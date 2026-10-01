@@ -44,8 +44,8 @@ function getProfileForUserId(userId: string) {
   return socialStore.state.profiles.find((profile) => profile.userId === userId) ?? null;
 }
 
-function makeHandle(user: { email: string; name: string }, profile?: { username?: string | null } | null) {
-  const username = profile?.username ?? user.email.split('@')[0].replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 24);
+function makeHandle(user: { email: string | null; name: string }, profile?: { username?: string | null } | null) {
+  const username = profile?.username ?? user.email?.split('@')[0].replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 24);
   return username || user.name.replace(/\s+/g, '').toLowerCase();
 }
 
@@ -103,7 +103,7 @@ async function getUserSummary(user: any) {
 
   return {
     id: user.id,
-    email: user.email,
+    email: user.email ?? null,
     name: user.name,
     role: user.role ?? 'USER',
     status: user.status ?? 'ACTIVE',
@@ -259,7 +259,6 @@ async function serializePost(post: any, currentUserId?: string) {
     author: authorSummary ? {
       id: authorSummary.id,
       name: authorSummary.name,
-      email: authorSummary.email,
       handle: authorSummary.handle,
       avatar: authorSummary.avatar,
       profile: authorSummary.profile,
@@ -546,6 +545,9 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
   if (moderation === 'REMOVE') {
     return res.status(400).json({ message: 'This post violates NOVA Community & Safety Rules.' });
   }
+  if (moderation === 'REVIEW') {
+    return res.status(422).json({ message: 'This content requires moderator review before publication.' });
+  }
 
   const dbAvailable = await isDatabaseAvailable();
 
@@ -567,7 +569,6 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
           author: {
             id: authorSummary.id,
             name: authorSummary.name,
-            email: authorSummary.email,
             handle: authorSummary.handle,
             avatar: authorSummary.avatar,
             profile: authorSummary.profile,
@@ -600,7 +601,6 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
       author: {
         id: authorSummary?.id ?? userId,
         name: authorSummary?.name ?? 'Unknown user',
-        email: authorSummary?.email ?? '',
         handle: authorSummary?.handle ?? 'unknown',
         avatar: authorSummary?.avatar ?? 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
         profile: authorSummary?.profile ?? null,
@@ -798,6 +798,9 @@ socialRouter.post('/posts/:id/comments', requireAuth, requireAccountAccess, asyn
   if (moderation === 'REMOVE') {
     return res.status(400).json({ message: 'This comment violates NOVA Community & Safety Rules.' });
   }
+  if (moderation === 'REVIEW') {
+    return res.status(422).json({ message: 'This content requires moderator review before publication.' });
+  }
 
   const dbAvailable = await isDatabaseAvailable();
   const postExists = await (async () => {
@@ -846,7 +849,6 @@ socialRouter.post('/posts/:id/comments', requireAuth, requireAccountAccess, asyn
     author: {
       id: authorSummary?.id ?? userId,
       name: authorSummary?.name ?? 'Unknown user',
-      email: authorSummary?.email ?? '',
       handle: authorSummary?.handle ?? 'unknown',
       avatar: authorSummary?.avatar ?? 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
       profile: authorSummary?.profile ?? null,
@@ -881,7 +883,7 @@ socialRouter.get('/posts/:id/comments', async (req, res) => {
         id: comment.author.id,
         name: comment.author.name,
         email: comment.author.email,
-        handle: comment.author.profile?.displayName ?? comment.author.email.split('@')[0],
+        handle: comment.author.profile?.displayName ?? comment.author.email?.split('@')[0] ?? 'member',
         avatar: comment.author.profile?.avatarUrl ?? 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
       },
     })) });
@@ -911,18 +913,24 @@ socialRouter.get('/posts/:id/comments', async (req, res) => {
 socialRouter.get('/notifications', requireAuth, async (req, res) => {
   const userId = req.user!.id;
   const dbAvailable = await isDatabaseAvailable();
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 50), 1), 200);
 
   if (dbAvailable) {
-    const notifications = await prisma.notification.findMany({
-      where: { recipientId: userId },
-      orderBy: { createdAt: 'desc' },
-    });
+    const [notifications, unreadCount] = await Promise.all([
+      prisma.notification.findMany({
+        where: { recipientId: userId },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+      }),
+      prisma.notification.count({ where: { recipientId: userId, readAt: null } }),
+    ]);
 
-    return res.json({ notifications });
+    return res.json({ notifications, unreadCount });
   }
 
-  const notifications = socialStore.state.notifications.filter((notification) => notification.recipientId === userId).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  return res.json({ notifications });
+  const notifications = socialStore.state.notifications.filter((notification) => notification.recipientId === userId).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, limit);
+  const unreadCount = socialStore.state.notifications.filter((notification) => notification.recipientId === userId && !notification.readAt).length;
+  return res.json({ notifications, unreadCount });
 });
 
 socialRouter.post('/notifications/:id/read', requireAuth, requireAccountAccess, async (req, res) => {
@@ -960,6 +968,26 @@ socialRouter.post('/notifications/:id/read', requireAuth, requireAccountAccess, 
   return res.json({ message: 'Notification marked as read.' });
 });
 
+socialRouter.post('/notifications/read-all', requireAuth, requireAccountAccess, async (req, res) => {
+  const userId = req.user!.id;
+  const dbAvailable = await isDatabaseAvailable();
+
+  if (dbAvailable) {
+    const result = await prisma.notification.updateMany({
+      where: { recipientId: userId, readAt: null },
+      data: { readAt: new Date() },
+    });
+    return res.json({ message: 'All notifications marked as read.', count: result.count });
+  }
+
+  const updated = socialStore.state.notifications.filter((notification) => notification.recipientId === userId && !notification.readAt);
+  for (const notification of updated) {
+    notification.readAt = new Date().toISOString();
+  }
+
+  return res.json({ message: 'All notifications marked as read.', count: updated.length });
+});
+
 socialRouter.post('/reports', requireAuth, requireAccountAccess, async (req, res) => {
   const payload = reportSchema.parse(req.body ?? {});
   const userId = req.user!.id;
@@ -967,13 +995,24 @@ socialRouter.post('/reports', requireAuth, requireAccountAccess, async (req, res
   const dbAvailable = await isDatabaseAvailable();
 
   if (dbAvailable) {
+    const targetExists = payload.targetType === 'post'
+      ? await prisma.post.findUnique({ where: { id: payload.targetId }, select: { id: true } })
+      : payload.targetType === 'comment'
+        ? await prisma.comment.findUnique({ where: { id: payload.targetId }, select: { id: true } })
+        : await prisma.user.findUnique({ where: { id: payload.targetId }, select: { id: true } });
+
+    if (!targetExists) {
+      return res.status(404).json({ message: 'Report target not found.' });
+    }
+
     const created = await prisma.report.create({
       data: {
         reporterId: userId,
         postId: payload.targetType === 'post' ? payload.targetId : null,
         commentId: payload.targetType === 'comment' ? payload.targetId : null,
+        targetUserId: payload.targetType === 'user' ? payload.targetId : null,
         category: payload.category,
-        details: payload.reason,
+        details: [payload.reason, payload.details].filter(Boolean).join('\n\n'),
       },
     });
 
