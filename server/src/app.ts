@@ -8,6 +8,7 @@ import env from './config/env.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { adminRouter } from './routes/admin.js';
 import { authRouter } from './routes/auth.js';
+import { creatorBusinessMarketplaceRouter } from './routes/creatorBusinessMarketplace.js';
 import { healthRouter } from './routes/health.js';
 import { messagesRouter } from './routes/messages.js';
 import { socialRouter } from './routes/social.js';
@@ -83,6 +84,7 @@ app.use('/api/admin', adminRouter);
 app.use('/api', messagesRouter);
 app.use('/api', subscriptionRouter);
 app.use('/api', socialRouter);
+app.use('/api', creatorBusinessMarketplaceRouter);
 
 app.get('/', (_req, res) => {
   res.json({ name: 'NOVA Social Platform API', status: 'online' });
