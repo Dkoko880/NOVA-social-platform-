@@ -11,6 +11,7 @@ enum UserRole {
   USER
   MODERATOR
   ADMIN
+  SUPPORT
   SUPER_ADMIN
 }
 
@@ -107,7 +108,9 @@ enum MarketplaceDisputeStatus {
 
 model User {
   id           String      @id @default(cuid())
-  email        String      @unique
+  email        String?     @unique
+  phoneE164    String?     @unique
+  phoneVerifiedAt DateTime?
   name         String
   passwordHash String
   role                     UserRole    @default(USER)
@@ -119,6 +122,11 @@ model User {
   updatedAt                DateTime    @updatedAt
 
   profile              Profile?
+  privateDetails       PrivateProfile?
+  mfaMethods           MfaMethod[]
+  securityAlerts       SecurityAlert[]
+  registrationDrafts   RegistrationDraft[]
+  authOtpChallenges    AuthOtpChallenge[]
   sessions             Session[]
   posts                Post[]
   comments             Comment[]
@@ -128,6 +136,7 @@ model User {
   blocksGiven          Block[] @relation("Blocker")
   blocksReceived       Block[] @relation("Blocked")
   reportsMade          Report[] @relation("Reporter")
+  reportsAbout         Report[] @relation("ReportedUser")
   notifications       Notification[] @relation("NotificationRecipient")
   conversationsOwnedBy Conversation[] @relation("ConversationOwner")
   messageSent          Message[] @relation("MessageSender")
@@ -148,8 +157,10 @@ model User {
   marketplaceOrders    MarketplaceOrder[] @relation("OrderBuyer")
   productInquiries     ProductInquiry[] @relation("InquiryBuyer")
   marketplaceDisputes  MarketplaceDispute[] @relation("DisputeReporter")
+  financialPaymentIntents PaymentIntent[] @relation("PaymentPayer")
 
   @@index([email])
+  @@index([phoneE164])
   @@index([role])
   @@index([status])
 }
@@ -158,7 +169,7 @@ model Profile {
   id          String  @id @default(cuid())
   userId      String  @unique
   displayName String?
-  username    String?
+  username    String? @unique
   bio         String?
   avatarUrl   String?
   coverUrl    String?
@@ -169,7 +180,100 @@ model Profile {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([username])
+}
+
+model PrivateProfile {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  dateOfBirth       DateTime?
+  countryCode       String?
+  region            String?
+  city              String?
+  addressCiphertext String?
+  addressIv         String?
+  addressTag        String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model RegistrationDraft {
+  id                   String   @id @default(cuid())
+  phoneE164            String   @unique
+  countryCode          String
+  fullName             String
+  otpHash              String
+  otpExpiresAt         DateTime
+  resendAllowedAt      DateTime
+  otpAttempts          Int      @default(0)
+  verifiedAt           DateTime?
+  sessionTokenHash     String?  @unique
+  stage                Int      @default(1)
+  dateOfBirth          DateTime?
+  region               String?
+  city                 String?
+  addressCiphertext    String?
+  addressIv            String?
+  addressTag            String?
+  avatarStorageKey     String?
+  username             String?  @unique
+  termsAcceptedAt      DateTime?
+  privacyAcceptedAt    DateTime?
+  guidelinesAcceptedAt DateTime?
+  consentVersion       String?
+  expiresAt            DateTime
+  consumedAt           DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  userId               String?
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([expiresAt])
+  @@index([stage, expiresAt])
+}
+
+model MfaMethod {
+  id         String   @id @default(cuid())
+  userId     String
+  type       String
+  secretHash String?
+  enabledAt  DateTime?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, enabledAt])
+}
+
+model AuthOtpChallenge {
+  id              String   @id @default(cuid())
+  phoneE164       String
+  otpHash         String
+  expiresAt       DateTime
+  attempts        Int      @default(0)
+  consumedAt      DateTime?
+  userId          String?
+  createdAt       DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([phoneE164, createdAt])
+  @@index([expiresAt])
+}
+
+model SecurityAlert {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  details   String?
+  createdAt DateTime @default(now())
+  readAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
 }
 
 model Session {
@@ -177,7 +281,9 @@ model Session {
   userId    String
   tokenHash String    @unique
   userAgent String?
+  deviceName String?
   ipAddress String?
+  lastSeenAt DateTime?
   expiresAt DateTime
   revokedAt DateTime?
   createdAt DateTime  @default(now())
@@ -334,6 +440,7 @@ model Report {
   reporterId String
   postId     String?
   commentId  String?
+  targetUserId String?
   category   ReportCategory
   details    String?
   status     ReportStatus @default(OPEN)
@@ -343,10 +450,12 @@ model Report {
   reporter User    @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
   post     Post?   @relation(fields: [postId], references: [id], onDelete: Cascade)
   comment  Comment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  targetUser User? @relation("ReportedUser", fields: [targetUserId], references: [id], onDelete: SetNull)
 
   @@index([reporterId])
   @@index([postId])
   @@index([commentId])
+  @@index([targetUserId])
   @@index([status])
 }
 
@@ -556,6 +665,7 @@ model CreatorLedgerEntry {
 model CreatorPayoutRequest {
   id                String   @id @default(cuid())
   creatorId         String
+  idempotencyKey    String?
   amountCents       Int
   currency          String   @default("USD")
   status            String   @default("PENDING")
@@ -567,6 +677,7 @@ model CreatorPayoutRequest {
   profile CreatorProfile @relation(fields: [creatorId], references: [userId], onDelete: Cascade)
 
   @@index([creatorId, status])
+  @@unique([creatorId, idempotencyKey])
 }
 
 model BusinessProfile {
@@ -690,6 +801,7 @@ model MarketplaceOrder {
   id          String                 @id @default(cuid())
   buyerId     String
   status      MarketplaceOrderStatus @default(PENDING)
+  paymentStatus String                @default("UNPAID")
   totalCents  Int
   currency    String                 @default("USD")
   createdAt   DateTime               @default(now())
@@ -752,4 +864,92 @@ model MarketplaceDispute {
 
   @@index([orderId, status])
   @@index([reporterId])
+}
+
+model PaymentIntent {
+  id                String   @id @default(cuid())
+  reference         String   @unique
+  idempotencyKey    String
+  payerId           String
+  provider          String
+  providerReference String?  @unique
+  amountCents       Int
+  currency          String
+  purpose           String
+  targetId          String?
+  status            String   @default("PENDING")
+  metadata          Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  payer User @relation("PaymentPayer", fields: [payerId], references: [id], onDelete: Restrict)
+
+  @@unique([payerId, idempotencyKey])
+  @@index([payerId, createdAt])
+  @@index([purpose, targetId])
+  @@index([status, createdAt])
+}
+
+model FinancialWebhookEvent {
+  id              String   @id @default(cuid())
+  provider        String
+  providerEventId String
+  paymentReference String
+  payloadHash     String
+  status          String   @default("RECEIVED")
+  receivedAt      DateTime @default(now())
+  processedAt     DateTime?
+
+  @@unique([provider, providerEventId])
+  @@index([paymentReference, receivedAt])
+}
+
+model FinancialLedgerEntry {
+  id             String   @id @default(cuid())
+  ownerId        String
+  direction      String
+  type           String
+  amountCents    Int
+  currency       String
+  sourceType     String
+  sourceId       String
+  idempotencyKey String   @unique
+  createdAt      DateTime @default(now())
+
+  @@index([ownerId, createdAt])
+  @@index([sourceType, sourceId])
+}
+
+model FinancialRefund {
+  id              String   @id @default(cuid())
+  paymentReference String
+  requestorId     String
+  reference       String   @unique
+  amountCents     Int
+  currency        String
+  reason          String
+  status          String   @default("PENDING")
+  reviewedBy      String?
+  reviewedAt      DateTime?
+  reviewReason    String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([paymentReference, requestorId])
+  @@index([status, createdAt])
+}
+
+model FinancialDispute {
+  id              String   @id @default(cuid())
+  paymentReference String
+  reporterId      String
+  status          String   @default("OPEN")
+  reason          String
+  notes           String?
+  evidenceReference String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([paymentReference, status])
+  @@index([reporterId, createdAt])
 }

@@ -3,6 +3,7 @@ import request from 'supertest';
 import { app } from '../app.js';
 import { commerceStore } from '../lib/commerceStore.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
+import { paymentWebhookSignature } from '../lib/paymentProviders.js';
 import { socialStore } from '../lib/socialStore.js';
 
 function cookie(response: { headers: Record<string, string | string[] | undefined> }) {
@@ -25,19 +26,30 @@ describe('command 2b creator, business, and marketplace authorization', () => {
     const creator = await register('Creator');
     const subscriber = await register('Subscriber');
     await request(app).put('/api/creators/me/profile').set('Cookie', creator.auth).send({ subscriptionPriceCents: 1200 });
-    expect((await request(app).post(`/api/creators/${creator.user.id}/subscribe`).set('Cookie', subscriber.auth)).status).toBe(201);
+    const subscribe = await request(app).post(`/api/creators/${creator.user.id}/subscribe`).set('Cookie', subscriber.auth);
+    expect(subscribe.status).toBe(201);
+    expect(subscribe.body.subscription.status).toBe('PENDING');
+    const subscriptionEvent = { eventId: 'command2b-creator-paid', reference: subscribe.body.paymentIntent.reference, status: 'SUCCESS' as const, providerReference: 'provider-subscription-1' };
+    await request(app).post('/api/payments/webhooks/manual').set('x-payment-signature', paymentWebhookSignature('manual', subscriptionEvent)).send(subscriptionEvent);
     expect((await request(app).get('/api/creators/me/subscribers').set('Cookie', creator.auth)).body.subscriptions).toHaveLength(1);
     expect((await request(app).get('/api/creators/me/subscribers').set('Cookie', subscriber.auth)).body.subscriptions).toHaveLength(0);
     expect((await request(app).get(`/api/creators/${creator.user.id}/profile`)).status).toBe(200);
-    expect((await request(app).get('/api/creators/me/earnings').set('Cookie', creator.auth)).body.balanceCents).toBe(1200);
+    expect((await request(app).get('/api/creators/me/earnings').set('Cookie', creator.auth)).body.balanceCents).toBe(1080);
     expect((await request(app).get('/api/creators/me/earnings').set('Cookie', subscriber.auth)).body.balanceCents).toBe(0);
-    const payout = await request(app).post('/api/creators/me/payouts').set('Cookie', creator.auth).send({ amountCents: 500 });
+    const payout = await request(app).post('/api/creators/me/payouts').set('Cookie', creator.auth).set('Idempotency-Key', 'command2b-payout-1').send({ amountCents: 500 });
     expect(payout.status).toBe(201);
+    const payoutRetry = await request(app).post('/api/creators/me/payouts').set('Cookie', creator.auth).set('Idempotency-Key', 'command2b-payout-1').send({ amountCents: 500 });
+    expect(payoutRetry.status).toBe(200);
+    expect(payoutRetry.body.payout.id).toBe(payout.body.payout.id);
     expect((await request(app).get('/api/admin/creator-payouts').set('Cookie', subscriber.auth)).status).toBe(403);
     const admin = await register('FinanceAdmin');
     fallbackStore.updateUser(admin.user.id, { role: 'ADMIN' });
-    expect((await request(app).patch(`/api/admin/creator-payouts/${payout.body.payout.id}`).set('Cookie', admin.auth).send({ status: 'FAILED' })).status).toBe(200);
-    expect((await request(app).get('/api/creators/me/earnings').set('Cookie', creator.auth)).body.balanceCents).toBe(1200);
+    expect((await request(app).patch(`/api/admin/finance/payouts/${payout.body.payout.id}`).set('Cookie', admin.auth).send({ status: 'FAILED' })).status).toBe(409);
+    expect((await request(app).patch(`/api/admin/finance/payouts/${payout.body.payout.id}`).set('Cookie', admin.auth).send({ status: 'REJECTED' })).status).toBe(400);
+    expect((await request(app).patch(`/api/admin/finance/payouts/${payout.body.payout.id}`).set('Cookie', admin.auth).send({ status: 'APPROVED' })).status).toBe(200);
+    expect((await request(app).patch(`/api/admin/finance/payouts/${payout.body.payout.id}`).set('Cookie', admin.auth).send({ status: 'PROCESSING' })).status).toBe(200);
+    expect((await request(app).patch(`/api/admin/finance/payouts/${payout.body.payout.id}`).set('Cookie', admin.auth).send({ status: 'FAILED' })).status).toBe(200);
+    expect((await request(app).get('/api/creators/me/earnings').set('Cookie', creator.auth)).body.balanceCents).toBe(1080);
     expect((await request(app).put(`/api/creators/${creator.user.id}/profile`).set('Cookie', subscriber.auth).send({ headline: 'Unauthorized' })).status).toBe(404);
   });
 
@@ -70,6 +82,10 @@ describe('command 2b creator, business, and marketplace authorization', () => {
     const orderId = order.body.order.id;
     expect((await request(app).patch(`/api/marketplace/orders/${orderId}/status`).set('Cookie', buyer.auth).send({ status: 'DELIVERED' })).status).toBe(404);
     expect((await request(app).patch(`/api/marketplace/orders/${orderId}/status`).set('Cookie', otherSeller.auth).send({ status: 'CONFIRMED' })).status).toBe(404);
+    expect((await request(app).patch(`/api/marketplace/orders/${orderId}/status`).set('Cookie', seller.auth).send({ status: 'CONFIRMED' })).status).toBe(409);
+    const payment = await request(app).post('/api/payments/intents').set('Cookie', buyer.auth).set('Idempotency-Key', 'command2b-order-payment').send({ purpose: 'MARKETPLACE_ORDER', targetId: orderId });
+    const orderEvent = { eventId: 'command2b-market-order-paid', reference: payment.body.paymentIntent.reference, status: 'SUCCESS' as const };
+    await request(app).post('/api/payments/webhooks/manual').set('x-payment-signature', paymentWebhookSignature('manual', orderEvent)).send(orderEvent);
     expect((await request(app).patch(`/api/marketplace/orders/${orderId}/status`).set('Cookie', seller.auth).send({ status: 'CONFIRMED' })).status).toBe(200);
     expect((await request(app).get('/api/marketplace/orders/me').set('Cookie', buyer.auth)).body.orders).toHaveLength(1);
     expect((await request(app).post(`/api/marketplace/orders/${orderId}/disputes`).set('Cookie', buyer.auth).send({ reason: 'Item arrived damaged.' })).status).toBe(201);

@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { commerceStore } from '../lib/commerceStore.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
-import { manualCreatorPaymentProvider, manualCreatorPayoutProvider } from '../lib/creatorProviders.js';
+import { manualCreatorPayoutProvider } from '../lib/creatorProviders.js';
+import { createCreatorSubscriptionIntent } from './payments.js';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 import { socialStore } from '../lib/socialStore.js';
 import { requireActiveAccountIfAuthenticated, requireAuth, requireRole } from '../middleware/auth.js';
@@ -184,33 +185,17 @@ router.post('/creators/:creatorId/subscribe', requireAuth, async (req, res) => {
   const subscriberId = req.user!.id;
   if (creatorId === subscriberId) return res.status(400).json({ message: 'You cannot subscribe to yourself.' });
   if (await blockedEitherWay(subscriberId, creatorId)) return res.status(403).json({ message: 'Creator subscriptions are unavailable for blocked users.' });
-  if (await isDatabaseAvailable()) {
-    const profile = await prisma.creatorProfile.findUnique({ where: { userId: creatorId } });
-    if (!profile?.isEnabled) return res.status(404).json({ message: 'Creator is unavailable.' });
-    const existing = await prisma.creatorSubscription.findUnique({ where: { creatorId_subscriberId: { creatorId, subscriberId } } });
-    if (existing?.status === 'ACTIVE') return res.status(409).json({ message: 'You are already subscribed.' });
-    const charge = await manualCreatorPaymentProvider.chargeSubscription({ creatorId, subscriberId, amountCents: profile.subscriptionPriceCents, currency: profile.currency });
-    const subscription = await prisma.$transaction(async (tx) => {
-      const item = await tx.creatorSubscription.upsert({
-        where: { creatorId_subscriberId: { creatorId, subscriberId } },
-        create: { creatorId, subscriberId, amountCents: profile.subscriptionPriceCents, currency: profile.currency, provider: manualCreatorPaymentProvider.name, providerReference: charge.reference, status: charge.status === 'PAID' ? 'ACTIVE' : 'EXPIRED' },
-        update: { amountCents: profile.subscriptionPriceCents, currency: profile.currency, provider: manualCreatorPaymentProvider.name, providerReference: charge.reference, status: charge.status === 'PAID' ? 'ACTIVE' : 'EXPIRED', startedAt: new Date(), endsAt: null },
-      });
-      if (charge.status === 'PAID') await tx.creatorLedgerEntry.create({ data: { creatorId, type: 'SUBSCRIPTION', amountCents: profile.subscriptionPriceCents, currency: profile.currency, reference: item.id, description: 'Creator subscription' } });
-      return item;
-    });
-    await notify(creatorId, subscriberId, 'creator_subscription', 'A new subscriber joined your creator profile.');
-    await audit(subscriberId, creatorId, 'CREATOR_SUBSCRIPTION_CREATED', subscription.id);
-    return res.status(201).json({ subscription });
+  const idempotencyKey = req.header('Idempotency-Key') ?? `creator-${creatorId}-${subscriberId}`;
+  try {
+    const result = await createCreatorSubscriptionIntent(subscriberId, creatorId, idempotencyKey);
+    await audit(subscriberId, creatorId, 'CREATOR_SUBSCRIPTION_PAYMENT_INTENT_CREATED', result.intent.reference);
+    return res.status(201).json({ subscription: result.subscription, paymentIntent: result.intent });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'CREATOR_NOT_FOUND') return res.status(404).json({ message: 'Creator is unavailable.' });
+    if (error instanceof Error && error.message === 'CREATOR_ALREADY_SUBSCRIBED') return res.status(409).json({ message: 'You are already subscribed.' });
+    if (error instanceof Error && error.message === 'PAYMENT_PENDING') return res.status(409).json({ message: 'A payment is already pending for this subscription.' });
+    throw error;
   }
-  const profile = commerceStore.state.creators.find((entry) => entry.userId === creatorId && entry.isEnabled);
-  if (!profile) return res.status(404).json({ message: 'Creator is unavailable.' });
-  if (commerceStore.state.creatorSubscriptions.some((entry) => entry.creatorId === creatorId && entry.subscriberId === subscriberId && entry.status === 'ACTIVE')) return res.status(409).json({ message: 'You are already subscribed.' });
-  const subscription = { id: id(), creatorId, subscriberId, status: 'ACTIVE', provider: manualCreatorPaymentProvider.name, amountCents: profile.subscriptionPriceCents, currency: profile.currency, startedAt: date(), createdAt: date(), updatedAt: date() };
-  commerceStore.state.creatorSubscriptions.push(subscription);
-  commerceStore.state.creatorLedger.push({ id: id(), creatorId, type: 'SUBSCRIPTION', amountCents: profile.subscriptionPriceCents, currency: profile.currency, reference: subscription.id, createdAt: date() });
-  await notify(creatorId, subscriberId, 'creator_subscription', 'A new subscriber joined your creator profile.');
-  return res.status(201).json({ subscription });
 });
 
 router.post('/creators/subscriptions/:id/cancel', requireAuth, async (req, res) => {
@@ -219,13 +204,18 @@ router.post('/creators/subscriptions/:id/cancel', requireAuth, async (req, res) 
   if (await isDatabaseAvailable()) {
     const subscription = await prisma.creatorSubscription.findFirst({ where: { id: subscriptionId, subscriberId } });
     if (!subscription) return res.status(404).json({ message: 'Subscription not found.' });
-    const updated = await prisma.creatorSubscription.update({ where: { id: subscriptionId }, data: { status: 'CANCELLED', endsAt: new Date() } });
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.creatorSubscription.update({ where: { id: subscriptionId }, data: { status: 'CANCELLED', endsAt: new Date() } });
+      await tx.paymentIntent.updateMany({ where: { purpose: 'CREATOR_SUBSCRIPTION', targetId: subscriptionId, status: 'PENDING' }, data: { status: 'CANCELLED' } });
+      return result;
+    });
     return res.json({ subscription: updated });
   }
   const subscription = commerceStore.state.creatorSubscriptions.find((entry) => entry.id === subscriptionId && entry.subscriberId === subscriberId);
   if (!subscription) return res.status(404).json({ message: 'Subscription not found.' });
   subscription.status = 'CANCELLED';
   subscription.endsAt = date();
+  for (const intent of commerceStore.state.paymentIntents.filter((entry) => entry.purpose === 'CREATOR_SUBSCRIPTION' && entry.targetId === subscriptionId && entry.status === 'PENDING')) intent.status = 'CANCELLED';
   return res.json({ subscription });
 });
 
@@ -241,10 +231,14 @@ router.get('/creators/me/earnings', requireAuth, async (req, res) => {
 
 router.post('/creators/me/payouts', requireAuth, async (req, res) => {
   const payload = z.object({ amountCents: z.number().int().positive() }).parse(req.body ?? {});
+  const idempotencyKey = z.string().trim().min(8).max(120).safeParse(req.header('Idempotency-Key'));
+  if (!idempotencyKey.success) return res.status(400).json({ message: 'An Idempotency-Key header is required.' });
   const creatorId = req.user!.id;
   if (await isDatabaseAvailable()) {
     const profile = await prisma.creatorProfile.findUnique({ where: { userId: creatorId } });
     if (!profile) return res.status(404).json({ message: 'Creator profile not found.' });
+    const prior = await prisma.creatorPayoutRequest.findUnique({ where: { creatorId_idempotencyKey: { creatorId, idempotencyKey: idempotencyKey.data } } });
+    if (prior) return prior.amountCents === payload.amountCents ? res.status(200).json({ payout: prior }) : res.status(409).json({ message: 'Idempotency key was already used for a different payout.' });
     let result;
     try {
       result = await prisma.$transaction(async (tx) => {
@@ -252,8 +246,9 @@ router.post('/creators/me/payouts', requireAuth, async (req, res) => {
         const balanceCents = entries.reduce((sum, entry) => sum + entry.amountCents, 0);
         if (payload.amountCents > balanceCents) throw new Error('INSUFFICIENT_CREATOR_BALANCE');
         const provider = await manualCreatorPayoutProvider.requestPayout({ creatorId, amountCents: payload.amountCents, currency: profile.currency });
-        const payout = await tx.creatorPayoutRequest.create({ data: { creatorId, amountCents: payload.amountCents, currency: profile.currency, provider: manualCreatorPayoutProvider.name, providerReference: provider.reference, status: provider.status } });
+        const payout = await tx.creatorPayoutRequest.create({ data: { creatorId, idempotencyKey: idempotencyKey.data, amountCents: payload.amountCents, currency: profile.currency, provider: manualCreatorPayoutProvider.name, providerReference: provider.reference, status: provider.status } });
         await tx.creatorLedgerEntry.create({ data: { creatorId, type: 'PAYOUT_REQUESTED', amountCents: -payload.amountCents, currency: profile.currency, reference: payout.id, description: 'Payout requested' } });
+        await tx.financialLedgerEntry.create({ data: { ownerId: creatorId, direction: 'DEBIT', type: 'PAYOUT_REQUESTED', amountCents: payload.amountCents, currency: profile.currency, sourceType: 'PAYOUT', sourceId: payout.id, idempotencyKey: `${payout.id}:request` } });
         return payout;
       }, { isolationLevel: 'Serializable' });
     } catch (error) {
@@ -266,12 +261,15 @@ router.post('/creators/me/payouts', requireAuth, async (req, res) => {
   }
   const profile = commerceStore.state.creators.find((entry) => entry.userId === creatorId);
   if (!profile) return res.status(404).json({ message: 'Creator profile not found.' });
+  const prior = commerceStore.state.creatorPayouts.find((entry) => entry.creatorId === creatorId && entry.idempotencyKey === idempotencyKey.data);
+  if (prior) return prior.amountCents === payload.amountCents ? res.status(200).json({ payout: prior }) : res.status(409).json({ message: 'Idempotency key was already used for a different payout.' });
   const balanceCents = commerceStore.state.creatorLedger.filter((entry) => entry.creatorId === creatorId).reduce((sum, entry) => sum + entry.amountCents, 0);
   if (payload.amountCents > balanceCents) return res.status(409).json({ message: 'Payout amount exceeds available balance.' });
   const provider = await manualCreatorPayoutProvider.requestPayout({ creatorId, amountCents: payload.amountCents, currency: profile.currency });
-  const payout = { id: id(), creatorId, amountCents: payload.amountCents, currency: profile.currency, provider: manualCreatorPayoutProvider.name, providerReference: provider.reference, status: provider.status, requestedAt: date() };
+  const payout = { id: id(), creatorId, idempotencyKey: idempotencyKey.data, amountCents: payload.amountCents, currency: profile.currency, provider: manualCreatorPayoutProvider.name, providerReference: provider.reference, status: provider.status, requestedAt: date() };
   commerceStore.state.creatorPayouts.push(payout);
   commerceStore.state.creatorLedger.push({ id: id(), creatorId, type: 'PAYOUT_REQUESTED', amountCents: -payload.amountCents, currency: profile.currency, reference: payout.id, createdAt: date() });
+  commerceStore.state.financialLedger.push({ id: id(), ownerId: creatorId, direction: 'DEBIT', type: 'PAYOUT_REQUESTED', amountCents: payload.amountCents, currency: profile.currency, sourceType: 'PAYOUT', sourceId: payout.id, idempotencyKey: `${payout.id}:request`, createdAt: date() });
   return res.status(201).json({ payout });
 });
 
@@ -290,33 +288,46 @@ router.get('/admin/creator-payouts', requireAuth, requireRole(['ADMIN', 'SUPER_A
   return res.json({ payouts });
 });
 
-router.patch('/admin/creator-payouts/:id', requireAuth, requireRole(['ADMIN', 'SUPER_ADMIN']), async (req, res) => {
-  const statusResult = z.enum(['PAID', 'FAILED']).safeParse(req.body?.status);
-  if (!statusResult.success) return res.status(400).json({ message: 'Payout status must be PAID or FAILED.' });
+router.patch(['/admin/creator-payouts/:id', '/admin/finance/payouts/:id'], requireAuth, requireRole(['ADMIN', 'SUPER_ADMIN']), async (req, res) => {
+  const reviewResult = z.object({
+    status: z.enum(['APPROVED', 'REJECTED', 'PROCESSING', 'PAID', 'FAILED']),
+    reason: z.string().trim().min(5).max(1000).optional(),
+    providerReference: z.string().trim().max(200).optional(),
+  }).strict().safeParse(req.body);
+  if (!reviewResult.success) return res.status(400).json({ message: 'Invalid payout review.' });
   const payoutId = String(req.params.id);
-  const status = statusResult.data;
-  const providerReference = z.string().trim().max(200).optional().safeParse(req.body?.providerReference);
-  if (!providerReference.success) return res.status(400).json({ message: 'Invalid provider reference.' });
+  const { status, reason, providerReference } = reviewResult.data;
+  if (status === 'REJECTED' && !reason) return res.status(400).json({ message: 'A rejection reason is required.' });
   if (await isDatabaseAvailable()) {
     const payout = await prisma.creatorPayoutRequest.findUnique({ where: { id: payoutId } });
     if (!payout) return res.status(404).json({ message: 'Payout request not found.' });
-    if (payout.status !== 'PENDING') return res.status(409).json({ message: 'Payout request has already been reviewed.' });
+    const transitions: Record<string, string[]> = { PENDING: ['APPROVED', 'REJECTED'], APPROVED: ['PROCESSING'], PROCESSING: ['PAID', 'FAILED'] };
+    if (!transitions[payout.status]?.includes(status)) return res.status(409).json({ message: 'Invalid payout status transition.' });
     const updated = await prisma.$transaction(async (tx) => {
-      const result = await tx.creatorPayoutRequest.update({ where: { id: payoutId }, data: { status, ...(providerReference.data ? { providerReference: providerReference.data } : {}) } });
-      if (status === 'FAILED') await tx.creatorLedgerEntry.create({ data: { creatorId: payout.creatorId, type: 'PAYOUT_FAILED_REFUND', amountCents: payout.amountCents, currency: payout.currency, reference: payout.id } });
+      const claimed = await tx.creatorPayoutRequest.updateMany({ where: { id: payoutId, status: payout.status }, data: { status, ...(providerReference ? { providerReference } : {}) } });
+      if (!claimed.count) throw new Error('PAYOUT_REVIEW_CONFLICT');
+      if (status === 'REJECTED' || status === 'FAILED') {
+        await tx.creatorLedgerEntry.create({ data: { creatorId: payout.creatorId, type: 'PAYOUT_RELEASED', amountCents: payout.amountCents, currency: payout.currency, reference: `${payout.id}:refund`, description: reason ?? 'Payout failed; balance released.' } });
+        await tx.financialLedgerEntry.create({ data: { ownerId: payout.creatorId, direction: 'CREDIT', type: 'PAYOUT_RELEASED', amountCents: payout.amountCents, currency: payout.currency, sourceType: 'PAYOUT', sourceId: payout.id, idempotencyKey: `${payout.id}:refund` } });
+      }
+      const result = await tx.creatorPayoutRequest.findUniqueOrThrow({ where: { id: payoutId } });
       return result;
     });
-    await audit(req.user!.id, payout.creatorId, 'CREATOR_PAYOUT_REVIEWED', `${payout.id}:${status}`);
+    await audit(req.user!.id, payout.creatorId, `CREATOR_PAYOUT_${status}`, `${payout.id}:${reason ?? ''}`);
     await notify(payout.creatorId, req.user!.id, 'creator_payout', `Your payout request was ${status.toLowerCase()}.`);
     return res.json({ payout: updated });
   }
   const payout = commerceStore.state.creatorPayouts.find((entry) => entry.id === payoutId);
   if (!payout) return res.status(404).json({ message: 'Payout request not found.' });
-  if (payout.status !== 'PENDING') return res.status(409).json({ message: 'Payout request has already been reviewed.' });
+  const transitions: Record<string, string[]> = { PENDING: ['APPROVED', 'REJECTED'], APPROVED: ['PROCESSING'], PROCESSING: ['PAID', 'FAILED'] };
+  if (!transitions[payout.status]?.includes(status)) return res.status(409).json({ message: 'Invalid payout status transition.' });
   payout.status = status;
-  if (providerReference.data) payout.providerReference = providerReference.data;
-  if (status === 'FAILED') commerceStore.state.creatorLedger.push({ id: id(), creatorId: payout.creatorId, type: 'PAYOUT_FAILED_REFUND', amountCents: payout.amountCents, currency: payout.currency, reference: payout.id, createdAt: date() });
-  await audit(req.user!.id, payout.creatorId, 'CREATOR_PAYOUT_REVIEWED', `${payout.id}:${status}`);
+  if (providerReference) payout.providerReference = providerReference;
+  if (status === 'REJECTED' || status === 'FAILED') {
+    commerceStore.state.creatorLedger.push({ id: id(), creatorId: payout.creatorId, type: 'PAYOUT_RELEASED', amountCents: payout.amountCents, currency: payout.currency, reference: `${payout.id}:refund`, description: reason ?? 'Payout failed; balance released.', createdAt: date() });
+    commerceStore.state.financialLedger.push({ id: id(), ownerId: payout.creatorId, direction: 'CREDIT', type: 'PAYOUT_RELEASED', amountCents: payout.amountCents, currency: payout.currency, sourceType: 'PAYOUT', sourceId: payout.id, idempotencyKey: `${payout.id}:refund`, createdAt: date() });
+  }
+  await audit(req.user!.id, payout.creatorId, `CREATOR_PAYOUT_${status}`, `${payout.id}:${reason ?? ''}`);
   await notify(payout.creatorId, req.user!.id, 'creator_payout', `Your payout request was ${status.toLowerCase()}.`);
   return res.json({ payout });
 });
@@ -714,11 +725,14 @@ router.get('/marketplace/seller/orders', requireAuth, async (req, res) => {
 
 router.patch('/marketplace/orders/:id/status', requireAuth, async (req, res) => {
   const orderId = String(req.params.id);
-  const nextStatus = z.enum(orderStatuses).parse(req.body?.status);
+  const statusResult = z.enum(orderStatuses).safeParse(req.body?.status);
+  if (!statusResult.success) return res.status(400).json({ message: 'Invalid order status.' });
+  const nextStatus = statusResult.data;
   if (!['CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED'].includes(nextStatus)) return res.status(400).json({ message: 'This order status cannot be set by a seller.' });
   if (await isDatabaseAvailable()) {
     const order = await prisma.marketplaceOrder.findFirst({ where: { id: orderId, items: { some: { sellerId: req.user!.id } } }, include: { items: true } });
     if (!order) return res.status(404).json({ message: 'Order not found.' });
+    if (order.paymentStatus !== 'PAID') return res.status(409).json({ message: 'Order must be paid before fulfillment.' });
     const transitions: Record<string, string[]> = { PENDING: ['CONFIRMED'], CONFIRMED: ['PROCESSING'], PROCESSING: ['SHIPPED'], SHIPPED: ['DELIVERED'] };
     if (!transitions[order.status]?.includes(nextStatus)) return res.status(409).json({ message: 'Invalid order status transition.' });
     const updated = await prisma.marketplaceOrder.update({ where: { id: orderId }, data: { status: nextStatus } });
@@ -728,6 +742,7 @@ router.patch('/marketplace/orders/:id/status', requireAuth, async (req, res) => 
   }
   const order = commerceStore.state.orders.find((entry) => entry.id === orderId && commerceStore.state.orderItems.some((item) => item.orderId === orderId && item.sellerId === req.user!.id));
   if (!order) return res.status(404).json({ message: 'Order not found.' });
+  if (order.paymentStatus !== 'PAID') return res.status(409).json({ message: 'Order must be paid before fulfillment.' });
   const transitions: Record<string, string[]> = { PENDING: ['CONFIRMED'], CONFIRMED: ['PROCESSING'], PROCESSING: ['SHIPPED'], SHIPPED: ['DELIVERED'] };
   if (!transitions[order.status]?.includes(nextStatus)) return res.status(409).json({ message: 'Invalid order status transition.' });
   order.status = nextStatus;
@@ -743,11 +758,13 @@ router.post('/marketplace/orders/:id/cancel', requireAuth, async (req, res) => {
     const order = await prisma.marketplaceOrder.findFirst({ where: { id: orderId, buyerId }, include: { items: true } });
     if (!order) return res.status(404).json({ message: 'Order not found.' });
     if (!['PENDING', 'CONFIRMED'].includes(order.status)) return res.status(409).json({ message: 'This order can no longer be cancelled.' });
+    if (order.paymentStatus === 'PAID') return res.status(409).json({ message: 'Paid orders require an approved refund.' });
     let updated;
     try {
       updated = await prisma.$transaction(async (tx) => {
-        const claimed = await tx.marketplaceOrder.updateMany({ where: { id: orderId, buyerId, status: { in: ['PENDING', 'CONFIRMED'] } }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
+        const claimed = await tx.marketplaceOrder.updateMany({ where: { id: orderId, buyerId, status: { in: ['PENDING', 'CONFIRMED'] }, paymentStatus: { not: 'PAID' } }, data: { status: 'CANCELLED', paymentStatus: 'CANCELLED', cancelledAt: new Date() } });
         if (!claimed.count) throw new Error('ORDER_CANCEL_CONFLICT');
+        await tx.paymentIntent.updateMany({ where: { purpose: 'MARKETPLACE_ORDER', targetId: orderId, status: 'PENDING' }, data: { status: 'CANCELLED' } });
       for (const item of order.items) await tx.marketplaceProduct.update({ where: { id: item.productId }, data: { stock: { increment: item.quantity }, status: 'ACTIVE' } });
         return tx.marketplaceOrder.findUniqueOrThrow({ where: { id: orderId } });
       });
@@ -761,11 +778,14 @@ router.post('/marketplace/orders/:id/cancel', requireAuth, async (req, res) => {
   const order = commerceStore.state.orders.find((entry) => entry.id === orderId && entry.buyerId === buyerId);
   if (!order) return res.status(404).json({ message: 'Order not found.' });
   if (!['PENDING', 'CONFIRMED'].includes(order.status)) return res.status(409).json({ message: 'This order can no longer be cancelled.' });
+  if (order.paymentStatus === 'PAID') return res.status(409).json({ message: 'Paid orders require an approved refund.' });
   for (const item of commerceStore.state.orderItems.filter((entry) => entry.orderId === orderId)) {
     const product = commerceStore.state.products.find((entry) => entry.id === item.productId);
     if (product) { product.stock += item.quantity; product.status = 'ACTIVE'; }
   }
   order.status = 'CANCELLED';
+  order.paymentStatus = 'CANCELLED';
+  for (const intent of commerceStore.state.paymentIntents.filter((entry) => entry.purpose === 'MARKETPLACE_ORDER' && entry.targetId === orderId && entry.status === 'PENDING')) intent.status = 'CANCELLED';
   order.cancelledAt = date();
   order.updatedAt = date();
   return res.json({ order });

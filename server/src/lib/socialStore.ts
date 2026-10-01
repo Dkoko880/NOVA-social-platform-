@@ -123,7 +123,7 @@ export type SubscriptionRecord = {
   id: string;
   userId: string;
   planId: string;
-  status: 'ACTIVE' | 'TRIALING' | 'PAUSED' | 'CANCELLED';
+  status: 'PENDING' | 'ACTIVE' | 'TRIALING' | 'PAUSED' | 'CANCELLED' | 'FAILED';
   currentPeriodStart: string;
   currentPeriodEnd: string | null;
   createdAt: string;
@@ -138,7 +138,7 @@ export type PaymentRecord = {
   providerReference: string | null;
   amountCents: number;
   currency: string;
-  status: 'PENDING' | 'PAID' | 'FAILED' | 'REFUNDED';
+  status: 'PENDING' | 'PAID' | 'FAILED' | 'REFUNDED' | 'CANCELLED';
   createdAt: string;
 };
 

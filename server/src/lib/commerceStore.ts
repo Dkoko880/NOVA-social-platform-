@@ -18,6 +18,11 @@ type CommerceState = {
   orderItems: CommerceRecord[];
   inquiries: CommerceRecord[];
   disputes: CommerceRecord[];
+  paymentIntents: CommerceRecord[];
+  paymentEvents: CommerceRecord[];
+  financialLedger: CommerceRecord[];
+  refunds: CommerceRecord[];
+  financialDisputes: CommerceRecord[];
 };
 
 const globalStore = globalThis as typeof globalThis & { __novaCommerceStore?: CommerceState };
@@ -39,6 +44,11 @@ function emptyState(): CommerceState {
     orderItems: [],
     inquiries: [],
     disputes: [],
+    paymentIntents: [],
+    paymentEvents: [],
+    financialLedger: [],
+    refunds: [],
+    financialDisputes: [],
   };
 }
 
