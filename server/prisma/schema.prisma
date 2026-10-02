@@ -30,6 +30,12 @@ enum ReactionType {
   ANGRY
 }
 
+enum PostVisibility {
+  PUBLIC
+  FOLLOWERS
+  PRIVATE
+}
+
 enum MessageStatus {
   SENT
   DELIVERED
@@ -129,6 +135,8 @@ model User {
   authOtpChallenges    AuthOtpChallenge[]
   sessions             Session[]
   posts                Post[]
+  postSaves            PostSave[]
+  postShares           PostShare[]
   comments             Comment[]
   reactions            Reaction[]
   followsGiven         Follow[] @relation("Follower")
@@ -301,6 +309,7 @@ model Post {
   communityId String?
   content     String
   imageUrl    String?
+  visibility  PostVisibility @default(PUBLIC)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -309,10 +318,38 @@ model Post {
   comments  Comment[]
   reactions Reaction[]
   reports   Report[]
+  saves     PostSave[]
+  shares    PostShare[]
 
   @@index([authorId])
   @@index([communityId])
   @@index([createdAt])
+}
+
+model PostSave {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, userId])
+  @@index([userId, createdAt])
+}
+
+model PostShare {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([postId, createdAt])
+  @@index([userId, createdAt])
 }
 
 model Conversation {

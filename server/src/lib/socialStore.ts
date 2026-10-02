@@ -17,6 +17,7 @@ export type SocialPostRecord = {
   authorId: string;
   content: string;
   imageUrl: string | null;
+  visibility: 'PUBLIC' | 'FOLLOWERS' | 'PRIVATE';
   communityId?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -47,6 +48,7 @@ export type SocialCommentRecord = {
   id: string;
   postId: string;
   authorId: string;
+  parentId?: string | null;
   content: string;
   createdAt: string;
   updatedAt: string;
@@ -200,6 +202,8 @@ const globalStore = globalThis as typeof globalThis & {
     profiles: SocialProfileRecord[];
     posts: SocialPostRecord[];
     comments: SocialCommentRecord[];
+    postSaves: { id: string; postId: string; userId: string; createdAt: string }[];
+    postShares: { id: string; postId: string; userId: string; createdAt: string }[];
     reactions: SocialReactionRecord[];
     follows: SocialFollowRecord[];
     notifications: SocialNotificationRecord[];
@@ -223,6 +227,8 @@ if (!globalStore.__novaSocialStore) {
     profiles: [],
     posts: [],
     comments: [],
+    postSaves: [],
+    postShares: [],
     reactions: [],
     follows: [],
     notifications: [],
@@ -256,6 +262,8 @@ export const socialStore = {
       profiles: [],
       posts: [],
       comments: [],
+      postSaves: [],
+      postShares: [],
       reactions: [],
       follows: [],
       notifications: [],

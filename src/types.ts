@@ -26,6 +26,8 @@ export type Post = {
   comments: number
   shares: number
   saved: number
+  savedByCurrentUser?: boolean
+  visibility?: 'PUBLIC' | 'FOLLOWERS' | 'PRIVATE'
   category?: string
   currentUserReaction?: string | null
   authorFollowing?: boolean

@@ -202,9 +202,9 @@ router.post('/communities/:id/announcements', requireAuth, async (req, res) => {
   if (moderation === 'REMOVE') return res.status(400).json({ message: 'This announcement violates NOVA Community & Safety Rules.' });
   if (moderation === 'REVIEW') return res.status(422).json({ message: 'This announcement requires moderator review.' });
   const post = await (async () => {
-    if (await isDatabaseAvailable()) return prisma.post.create({ data: { authorId: req.user!.id, communityId, content: payload.content, imageUrl: payload.imageUrl ?? null } });
+    if (await isDatabaseAvailable()) return prisma.post.create({ data: { authorId: req.user!.id, communityId, content: payload.content, imageUrl: payload.imageUrl ?? null, visibility: 'PUBLIC' } });
     const now = new Date().toISOString();
-    const created = { id: makeId('community_post'), authorId: req.user!.id, communityId, content: payload.content, imageUrl: payload.imageUrl ?? null, createdAt: now, updatedAt: now };
+    const created = { id: makeId('community_post'), authorId: req.user!.id, communityId, content: payload.content, imageUrl: payload.imageUrl ?? null, visibility: 'PUBLIC' as const, createdAt: now, updatedAt: now };
     socialStore.state.posts.push(created);
     return created;
   })();

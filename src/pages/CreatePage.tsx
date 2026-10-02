@@ -8,6 +8,7 @@ export function CreatePage() {
   const navigate = useNavigate()
   const [content, setContent] = useState('')
   const [imageUrl, setImageUrl] = useState('')
+  const [visibility, setVisibility] = useState<'PUBLIC' | 'FOLLOWERS' | 'PRIVATE'>('PUBLIC')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -18,7 +19,7 @@ export function CreatePage() {
     try {
       await apiRequest('/api/posts', {
         method: 'POST',
-        body: JSON.stringify({ content: content.trim(), ...(imageUrl.trim() ? { imageUrl: imageUrl.trim() } : {}) }),
+        body: JSON.stringify({ content: content.trim(), ...(imageUrl.trim() ? { imageUrl: imageUrl.trim() } : {}), visibility }),
       })
       navigate('/')
     } catch (publishError) {
@@ -60,6 +61,19 @@ export function CreatePage() {
             onChange={(event) => setImageUrl(event.target.value)}
             className="min-w-0 flex-1 bg-transparent text-slate-800 placeholder:text-slate-400 focus:outline-none"
           />
+        </label>
+        <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+          <span>Who can see this post?</span>
+          <select
+            aria-label="Post privacy"
+            value={visibility}
+            onChange={(event) => setVisibility(event.target.value as typeof visibility)}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-indigo-400 focus:outline-none"
+          >
+            <option value="PUBLIC">Everyone</option>
+            <option value="FOLLOWERS">Followers</option>
+            <option value="PRIVATE">Only me</option>
+          </select>
         </label>
         {imageUrl ? <img src={imageUrl} alt="Post preview" className="mt-3 max-h-80 w-full rounded-2xl object-cover" /> : null}
 

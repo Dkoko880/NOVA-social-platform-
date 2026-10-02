@@ -281,6 +281,77 @@ describe('social platform features', () => {
     expect(response.body.comment.content).toBe('Nice post!');
   });
 
+  it('supports post replies, editing, saving, privacy, and tracked shares', async () => {
+    for (const user of [
+      { name: 'Alice', email: 'alice@example.com' },
+      { name: 'Bob', email: 'bob@example.com' },
+    ]) {
+      await request(app).post('/api/auth/register').send({
+        ...user,
+        password: 'Password123',
+        communityRulesAccepted: true,
+      });
+    }
+    const aliceLogin = await request(app).post('/api/auth/login').send({
+      email: 'alice@example.com',
+      password: 'Password123',
+    });
+    const bobLogin = await request(app).post('/api/auth/login').send({
+      email: 'bob@example.com',
+      password: 'Password123',
+    });
+    const aliceId = aliceLogin.body.user.id;
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ content: 'Original post' });
+    const postId = created.body.post.id;
+    const root = await request(app)
+      .post(`/api/posts/${postId}/comments`)
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ content: 'Top-level comment' });
+    const reply = await request(app)
+      .post(`/api/posts/${postId}/comments`)
+      .set('Cookie', getCookieHeader(bobLogin))
+      .send({ content: 'A reply', parentId: root.body.comment.id });
+    const comments = await request(app).get(`/api/posts/${postId}/comments`).set('Cookie', getCookieHeader(aliceLogin));
+
+    expect(reply.status).toBe(201);
+    expect(reply.body.comment.parentId).toBe(root.body.comment.id);
+    expect(comments.body.comments.find((comment: { id: string }) => comment.id === reply.body.comment.id).parentId).toBe(root.body.comment.id);
+
+    const forbiddenEdit = await request(app)
+      .patch(`/api/posts/${postId}`)
+      .set('Cookie', getCookieHeader(bobLogin))
+      .send({ content: 'Changed by Bob' });
+    expect(forbiddenEdit.status).toBe(403);
+
+    await request(app).post(`/api/posts/${postId}/save`).set('Cookie', getCookieHeader(bobLogin));
+    const duplicateSave = await request(app).post(`/api/posts/${postId}/save`).set('Cookie', getCookieHeader(bobLogin));
+    expect(duplicateSave.body.savedCount).toBe(1);
+    const firstShare = await request(app).post(`/api/posts/${postId}/share`).set('Cookie', getCookieHeader(bobLogin));
+    const secondShare = await request(app).post(`/api/posts/${postId}/share`).set('Cookie', getCookieHeader(bobLogin));
+    expect(firstShare.body.shares).toBe(1);
+    expect(secondShare.body.shares).toBe(2);
+
+    const updated = await request(app)
+      .patch(`/api/posts/${postId}`)
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ content: 'Edited post', visibility: 'FOLLOWERS' });
+    expect(updated.status).toBe(200);
+    expect(updated.body.post.content).toBe('Edited post');
+    expect(updated.body.post.visibility).toBe('FOLLOWERS');
+
+    const hiddenPost = await request(app).get(`/api/posts/${postId}`).set('Cookie', getCookieHeader(bobLogin));
+    expect(hiddenPost.status).toBe(404);
+    await request(app)
+      .post(`/api/users/${aliceId}/follow`)
+      .set('Cookie', getCookieHeader(bobLogin));
+    const visiblePost = await request(app).get(`/api/posts/${postId}`).set('Cookie', getCookieHeader(bobLogin));
+    expect(visiblePost.body.post.savedByCurrentUser).toBe(true);
+    expect(visiblePost.body.post.shares).toBe(2);
+  });
+
   it('user cannot delete another user post', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',

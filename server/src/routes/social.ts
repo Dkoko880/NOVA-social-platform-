@@ -20,6 +20,13 @@ const updateProfileSchema = z.object({
 const createPostSchema = z.object({
   content: z.string().trim().min(1).max(2500),
   imageUrl: z.string().trim().max(500).url().optional().or(z.literal('')),
+  visibility: z.enum(['PUBLIC', 'FOLLOWERS', 'PRIVATE']).default('PUBLIC'),
+});
+
+const updatePostSchema = z.object({
+  content: z.string().trim().min(1).max(2500).optional(),
+  imageUrl: z.string().trim().max(500).url().optional().or(z.literal('')),
+  visibility: z.enum(['PUBLIC', 'FOLLOWERS', 'PRIVATE']).optional(),
 });
 
 const reactSchema = z.object({
@@ -28,6 +35,7 @@ const reactSchema = z.object({
 
 const commentSchema = z.object({
   content: z.string().trim().min(1).max(1200),
+  parentId: z.string().min(1).optional(),
 });
 
 const reportSchema = z.object({
@@ -210,6 +218,16 @@ async function isFollowing(currentUserId: string, targetUserId: string) {
   );
 }
 
+async function canViewPost(post: { authorId: string; visibility?: string | null }, currentUserId?: string) {
+  if (post.visibility !== 'FOLLOWERS' && post.visibility !== 'PRIVATE') {
+    return true;
+  }
+  if (post.authorId === currentUserId) {
+    return true;
+  }
+  return post.visibility === 'FOLLOWERS' && Boolean(currentUserId) && await isFollowing(currentUserId!, post.authorId);
+}
+
 async function getBlockStatus(currentUserId: string, targetUserId: string) {
   const dbAvailable = await isDatabaseAvailable();
 
@@ -266,6 +284,24 @@ async function serializePost(post: any, currentUserId?: string) {
 
     return socialStore.state.comments.filter((comment) => comment.postId === post.id).length;
   })();
+  const dbAvailable = await isDatabaseAvailable();
+  let shareCount = 0;
+  let saveCount = 0;
+  let savedByCurrentUser = false;
+  if (dbAvailable) {
+    const [shares, saves, saved] = await Promise.all([
+      prisma.postShare.count({ where: { postId: post.id } }),
+      prisma.postSave.count({ where: { postId: post.id } }),
+      currentUserId ? prisma.postSave.findUnique({ where: { postId_userId: { postId: post.id, userId: currentUserId } }, select: { id: true } }) : null,
+    ]);
+    shareCount = shares;
+    saveCount = saves;
+    savedByCurrentUser = Boolean(saved);
+  } else {
+    shareCount = socialStore.state.postShares.filter((share) => share.postId === post.id).length;
+    saveCount = socialStore.state.postSaves.filter((save) => save.postId === post.id).length;
+    savedByCurrentUser = Boolean(currentUserId && socialStore.state.postSaves.some((save) => save.postId === post.id && save.userId === currentUserId));
+  }
 
   return {
     id: post.id,
@@ -273,6 +309,7 @@ async function serializePost(post: any, currentUserId?: string) {
     imageUrl: post.imageUrl ?? null,
     createdAt: post.createdAt,
     updatedAt: post.updatedAt,
+    visibility: post.visibility ?? 'PUBLIC',
     author: authorSummary ? {
       id: authorSummary.id,
       name: authorSummary.name,
@@ -289,6 +326,9 @@ async function serializePost(post: any, currentUserId?: string) {
     },
     likes: likeCount,
     comments: commentCount,
+    shares: shareCount,
+    saved: saveCount,
+    savedByCurrentUser: Boolean(savedByCurrentUser),
     reactionCounts,
     currentUserReaction,
     userReaction: currentUserReaction,
@@ -592,29 +632,11 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
         authorId: userId,
         content: payload.content,
         imageUrl: payload.imageUrl || null,
+        visibility: payload.visibility,
       },
     });
 
-    const author = await getUserById(userId);
-    if (author) {
-      const authorSummary = await getUserSummary(author);
-      return res.status(201).json({
-        post: {
-          ...post,
-          author: {
-            id: authorSummary.id,
-            name: authorSummary.name,
-            handle: authorSummary.handle,
-            avatar: authorSummary.avatar,
-            profile: authorSummary.profile,
-          },
-          likes: 0,
-          comments: 0,
-          reactionCounts: { LIKE: 0, LOVE: 0, LAUGH: 0, SAD: 0, ANGRY: 0 },
-          currentUserReaction: null,
-        },
-      });
-    }
+    return res.status(201).json({ post: await serializePost(post, userId) });
   }
 
   const record = {
@@ -622,30 +644,13 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
     authorId: userId,
     content: payload.content,
     imageUrl: payload.imageUrl || null,
+    visibility: payload.visibility,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
 
   socialStore.state.posts.push(record);
-  const author = await getUserById(userId);
-  const authorSummary = author ? await getUserSummary(author) : null;
-
-  return res.status(201).json({
-    post: {
-      ...record,
-      author: {
-        id: authorSummary?.id ?? userId,
-        name: authorSummary?.name ?? 'Unknown user',
-        handle: authorSummary?.handle ?? 'unknown',
-        avatar: authorSummary?.avatar ?? 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
-        profile: authorSummary?.profile ?? null,
-      },
-      likes: 0,
-      comments: 0,
-      reactionCounts: { LIKE: 0, LOVE: 0, LAUGH: 0, SAD: 0, ANGRY: 0 },
-      currentUserReaction: null,
-    },
-  });
+  return res.status(201).json({ post: await serializePost(record, userId) });
 });
 
 socialRouter.get('/posts', async (req, res) => {
@@ -654,7 +659,16 @@ socialRouter.get('/posts', async (req, res) => {
   const dbAvailable = await isDatabaseAvailable();
 
   if (dbAvailable) {
+    const followedIds = req.user
+      ? (await prisma.follow.findMany({ where: { followerId: req.user.id }, select: { followingId: true } })).map((follow) => follow.followingId)
+      : [];
     const posts = await prisma.post.findMany({
+      where: {
+        OR: [
+          { visibility: 'PUBLIC' },
+          ...(req.user ? [{ authorId: req.user.id }, { visibility: 'FOLLOWERS' as const, authorId: { in: followedIds } }] : []),
+        ],
+      },
       orderBy: { createdAt: 'desc' },
       skip: offset,
       take: Number.isFinite(limit) && limit > 0 ? limit : 10,
@@ -665,7 +679,10 @@ socialRouter.get('/posts', async (req, res) => {
     return res.json({ posts: result });
   }
 
-  const posts = [...socialStore.state.posts].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(offset, offset + (Number.isFinite(limit) && limit > 0 ? limit : 10));
+  const visiblePosts = (await Promise.all(socialStore.state.posts.map(async (post) => (
+    await canViewPost(post, req.user?.id) ? post : null
+  )))).filter((post): post is NonNullable<typeof post> => post !== null);
+  const posts = visiblePosts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(offset, offset + (Number.isFinite(limit) && limit > 0 ? limit : 10));
   const result = await Promise.all(posts.map((post) => serializePost(post, req.user?.id)));
   return res.json({ posts: result });
 });
@@ -683,6 +700,9 @@ socialRouter.get('/posts/:id', async (req, res) => {
     if (!post) {
       return res.status(404).json({ message: 'Post not found.' });
     }
+    if (!await canViewPost(post, req.user?.id)) {
+      return res.status(404).json({ message: 'Post not found.' });
+    }
 
     return res.json({ post: await serializePost(post, req.user?.id) });
   }
@@ -691,8 +711,136 @@ socialRouter.get('/posts/:id', async (req, res) => {
   if (!post) {
     return res.status(404).json({ message: 'Post not found.' });
   }
+  if (!await canViewPost(post, req.user?.id)) {
+    return res.status(404).json({ message: 'Post not found.' });
+  }
 
   return res.json({ post: await serializePost(post, req.user?.id) });
+});
+
+socialRouter.patch('/posts/:id', requireAuth, requireAccountAccess, async (req, res) => {
+  const postId = String(req.params.id);
+  const payload = updatePostSchema.parse(req.body ?? {});
+  const userId = req.user!.id;
+  const dbAvailable = await isDatabaseAvailable();
+  const post = dbAvailable
+    ? await prisma.post.findUnique({ where: { id: postId } })
+    : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
+
+  if (!post) {
+    return res.status(404).json({ message: 'Post not found.' });
+  }
+  if (post.authorId !== userId && !['MODERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+    return res.status(403).json({ message: 'You may only edit your own posts.' });
+  }
+  if (payload.content !== undefined) {
+    const moderation = reviewContentForSafety({ type: 'post', text: payload.content, userId });
+    if (moderation === 'REMOVE') {
+      return res.status(400).json({ message: 'This post violates NOVA Community & Safety Rules.' });
+    }
+    if (moderation === 'REVIEW') {
+      return res.status(422).json({ message: 'This content requires moderator review before publication.' });
+    }
+  }
+
+  const updates = {
+    ...(payload.content !== undefined ? { content: payload.content } : {}),
+    ...(payload.imageUrl !== undefined ? { imageUrl: payload.imageUrl || null } : {}),
+    ...(payload.visibility !== undefined ? { visibility: payload.visibility } : {}),
+  };
+  const updated = dbAvailable
+    ? await prisma.post.update({ where: { id: postId }, data: updates })
+    : Object.assign(post, updates, { updatedAt: new Date().toISOString() });
+
+  return res.json({ post: await serializePost(updated, userId) });
+});
+
+socialRouter.post('/posts/:id/save', requireAuth, requireAccountAccess, async (req, res) => {
+  const postId = String(req.params.id);
+  const userId = req.user!.id;
+  const dbAvailable = await isDatabaseAvailable();
+  const post = dbAvailable
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { id: true, authorId: true, visibility: true } })
+    : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
+
+  if (!post || !await canViewPost(post, userId)) {
+    return res.status(404).json({ message: 'Post not found.' });
+  }
+  if (dbAvailable) {
+    await prisma.postSave.upsert({
+      where: { postId_userId: { postId, userId } },
+      create: { postId, userId },
+      update: {},
+    });
+    return res.json({
+      saved: true,
+      savedCount: await prisma.postSave.count({ where: { postId } }),
+    });
+  }
+
+  if (!socialStore.state.postSaves.some((save) => save.postId === postId && save.userId === userId)) {
+    socialStore.state.postSaves.push({
+      id: `post_save_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      postId,
+      userId,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  return res.json({
+    saved: true,
+    savedCount: socialStore.state.postSaves.filter((save) => save.postId === postId).length,
+  });
+});
+
+socialRouter.delete('/posts/:id/save', requireAuth, requireAccountAccess, async (req, res) => {
+  const postId = String(req.params.id);
+  const userId = req.user!.id;
+  const dbAvailable = await isDatabaseAvailable();
+  const post = dbAvailable
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { id: true, authorId: true, visibility: true } })
+    : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
+
+  if (!post || !await canViewPost(post, userId)) {
+    return res.status(404).json({ message: 'Post not found.' });
+  }
+  if (dbAvailable) {
+    await prisma.postSave.deleteMany({ where: { postId, userId } });
+    return res.json({
+      saved: false,
+      savedCount: await prisma.postSave.count({ where: { postId } }),
+    });
+  }
+
+  socialStore.state.postSaves = socialStore.state.postSaves.filter((save) => !(save.postId === postId && save.userId === userId));
+  return res.json({
+    saved: false,
+    savedCount: socialStore.state.postSaves.filter((save) => save.postId === postId).length,
+  });
+});
+
+socialRouter.post('/posts/:id/share', requireAuth, requireAccountAccess, async (req, res) => {
+  const postId = String(req.params.id);
+  const userId = req.user!.id;
+  const dbAvailable = await isDatabaseAvailable();
+  const post = dbAvailable
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { id: true, authorId: true, visibility: true } })
+    : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
+
+  if (!post || !await canViewPost(post, userId)) {
+    return res.status(404).json({ message: 'Post not found.' });
+  }
+  if (dbAvailable) {
+    await prisma.postShare.create({ data: { postId, userId } });
+    return res.status(201).json({ shares: await prisma.postShare.count({ where: { postId } }) });
+  }
+
+  socialStore.state.postShares.push({
+    id: `post_share_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    postId,
+    userId,
+    createdAt: new Date().toISOString(),
+  });
+  return res.status(201).json({ shares: socialStore.state.postShares.filter((share) => share.postId === postId).length });
 });
 
 socialRouter.delete('/posts/:id', requireAuth, async (req, res) => {
@@ -733,19 +881,13 @@ socialRouter.post('/posts/:id/react', requireAuth, requireAccountAccess, async (
   const postId = String(req.params.id);
   const payload = reactSchema.parse(req.body ?? {});
   const userId = req.user!.id;
-
-  const postExists = await (async () => {
-    const dbAvailable = await isDatabaseAvailable();
-    if (dbAvailable) {
-      return Boolean(await prisma.post.findUnique({ where: { id: postId }, select: { id: true } }));
-    }
-    return socialStore.state.posts.some((post) => post.id === postId);
-  })();
-  if (!postExists) {
+  const dbAvailable = await isDatabaseAvailable();
+  const post = dbAvailable
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true } })
+    : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
+  if (!post || !await canViewPost(post, userId)) {
     return res.status(404).json({ message: 'Post not found.' });
   }
-
-  const dbAvailable = await isDatabaseAvailable();
 
   if (dbAvailable) {
     const existing = await prisma.reaction.findFirst({
@@ -798,6 +940,12 @@ socialRouter.delete('/posts/:id/react', requireAuth, requireAccountAccess, async
   const userId = req.user!.id;
 
   const dbAvailable = await isDatabaseAvailable();
+  const post = dbAvailable
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true } })
+    : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
+  if (!post || !await canViewPost(post, userId)) {
+    return res.status(404).json({ message: 'Post not found.' });
+  }
 
   if (dbAvailable) {
     const reaction = await prisma.reaction.findFirst({
@@ -838,22 +986,28 @@ socialRouter.post('/posts/:id/comments', requireAuth, requireAccountAccess, asyn
   }
 
   const dbAvailable = await isDatabaseAvailable();
-  const postExists = await (async () => {
-    if (dbAvailable) {
-      return Boolean(await prisma.post.findUnique({ where: { id: postId }, select: { id: true } }));
-    }
-
-    return socialStore.state.posts.some((post) => post.id === postId);
-  })();
-
-  if (!postExists) {
+  const post = dbAvailable
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true } })
+    : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
+  if (!post || !await canViewPost(post, userId)) {
     return res.status(404).json({ message: 'Post not found.' });
+  }
+
+  let parentId: string | null = null;
+  if (payload.parentId) {
+    const parent = dbAvailable
+      ? await prisma.comment.findUnique({ where: { id: payload.parentId }, select: { id: true, postId: true, parentId: true } })
+      : socialStore.state.comments.find((comment) => comment.id === payload.parentId) ?? null;
+    if (!parent || parent.postId !== postId || parent.parentId) {
+      return res.status(400).json({ message: 'Replies must reference a top-level comment on this post.' });
+    }
+    parentId = parent.id;
   }
 
   let commentRecord: Awaited<ReturnType<typeof prisma.comment.create>> | { id: string; postId: string; authorId: string; content: string; createdAt: string; updatedAt: string; parentId: string | null; };
 
   if (dbAvailable) {
-    commentRecord = await prisma.comment.create({ data: { postId, authorId: userId, content: payload.content } });
+    commentRecord = await prisma.comment.create({ data: { postId, authorId: userId, content: payload.content, parentId } });
   } else {
     commentRecord = {
       id: `comment_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -862,12 +1016,13 @@ socialRouter.post('/posts/:id/comments', requireAuth, requireAccountAccess, asyn
       content: payload.content,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      parentId: null,
+      parentId,
     };
     socialStore.state.comments.push({
       id: commentRecord.id,
       postId: commentRecord.postId,
       authorId: commentRecord.authorId,
+      parentId: commentRecord.parentId,
       content: commentRecord.content,
       createdAt: commentRecord.createdAt,
       updatedAt: commentRecord.updatedAt,
@@ -878,6 +1033,7 @@ socialRouter.post('/posts/:id/comments', requireAuth, requireAccountAccess, asyn
   const authorSummary = author ? await getUserSummary(author) : null;
   const result = {
     id: commentRecord.id,
+    parentId: commentRecord.parentId,
     content: commentRecord.content,
     createdAt: commentRecord.createdAt,
     updatedAt: commentRecord.updatedAt,
@@ -890,9 +1046,9 @@ socialRouter.post('/posts/:id/comments', requireAuth, requireAccountAccess, asyn
     },
   };
 
-  const post = await (dbAvailable ? prisma.post.findUnique({ where: { id: postId }, select: { authorId: true } }) : Promise.resolve(socialStore.state.posts.find((entry) => entry.id === postId)));
-  if (post && post.authorId !== userId) {
-    await addNotification(post.authorId, userId, 'comment', `${(await getUserById(userId))?.name ?? 'Someone'} commented on your post.`);
+  const notificationPost = await (dbAvailable ? prisma.post.findUnique({ where: { id: postId }, select: { authorId: true } }) : Promise.resolve(socialStore.state.posts.find((entry) => entry.id === postId)));
+  if (notificationPost && notificationPost.authorId !== userId) {
+    await addNotification(notificationPost.authorId, userId, 'comment', `${(await getUserById(userId))?.name ?? 'Someone'} commented on your post.`);
   }
 
   return res.status(201).json({ comment: result });
@@ -901,6 +1057,12 @@ socialRouter.post('/posts/:id/comments', requireAuth, requireAccountAccess, asyn
 socialRouter.get('/posts/:id/comments', async (req, res) => {
   const postId = String(req.params.id);
   const dbAvailable = await isDatabaseAvailable();
+  const post = dbAvailable
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true } })
+    : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
+  if (!post || !await canViewPost(post, req.user?.id)) {
+    return res.status(404).json({ message: 'Post not found.' });
+  }
 
   if (dbAvailable) {
     const comments = await prisma.comment.findMany({
@@ -911,6 +1073,7 @@ socialRouter.get('/posts/:id/comments', async (req, res) => {
 
     return res.json({ comments: comments.map((comment) => ({
       id: comment.id,
+      parentId: comment.parentId,
       content: comment.content,
       createdAt: comment.createdAt,
       updatedAt: comment.updatedAt,
@@ -929,6 +1092,7 @@ socialRouter.get('/posts/:id/comments', async (req, res) => {
     const author = await getUserById(comment.authorId);
     return {
       id: comment.id,
+      parentId: comment.parentId ?? null,
       content: comment.content,
       createdAt: comment.createdAt,
       updatedAt: comment.updatedAt,

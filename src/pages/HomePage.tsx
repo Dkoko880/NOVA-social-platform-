@@ -16,8 +16,10 @@ function toPost(record: any): Post {
     image: record.imageUrl ?? undefined,
     likes: record.likes ?? 0,
     comments: record.comments ?? 0,
-    shares: 0,
-    saved: 0,
+    shares: record.shares ?? 0,
+    saved: record.saved ?? 0,
+    savedByCurrentUser: record.savedByCurrentUser ?? false,
+    visibility: record.visibility ?? 'PUBLIC',
     currentUserReaction: record.currentUserReaction ?? null,
     authorFollowing: record.authorFollowing ?? false,
   }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { MessageCircle, Share2, ShieldAlert, ThumbsUp, Trash2 } from 'lucide-react'
+import { Bookmark, MessageCircle, PencilLine, Share2, ShieldAlert, ThumbsUp, Trash2 } from 'lucide-react'
 import { Avatar } from './ui/Avatar'
 import { Button } from './ui/Button'
 import { useAuth } from '../context/AuthContext'
@@ -9,6 +9,7 @@ import type { Post } from '../types'
 
 type CommentRecord = {
   id: string
+  parentId?: string | null
   content: string
   createdAt: string
   author: { id: string; name: string; avatar?: string }
@@ -27,8 +28,17 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
   const [comments, setComments] = useState<CommentRecord[]>([])
   const [commentCount, setCommentCount] = useState(post.comments)
   const [commentDraft, setCommentDraft] = useState('')
+  const [replyDraft, setReplyDraft] = useState('')
+  const [replyToId, setReplyToId] = useState<string | null>(null)
   const [commentsOpen, setCommentsOpen] = useState(false)
   const [commentsLoading, setCommentsLoading] = useState(false)
+  const [content, setContent] = useState(post.content)
+  const [imageUrl, setImageUrl] = useState(post.image ?? '')
+  const [visibility, setVisibility] = useState<Post['visibility']>(post.visibility ?? 'PUBLIC')
+  const [editing, setEditing] = useState(false)
+  const [saved, setSaved] = useState(post.savedByCurrentUser ?? false)
+  const [saveCount, setSaveCount] = useState(post.saved)
+  const [shareCount, setShareCount] = useState(post.shares)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -39,7 +49,13 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     setLiked(post.currentUserReaction === 'LIKE')
     setCommentCount(post.comments)
     setAuthorFollowing(post.authorFollowing ?? false)
-  }, [post.authorFollowing, post.comments, post.currentUserReaction, post.likes])
+    setContent(post.content)
+    setImageUrl(post.image ?? '')
+    setVisibility(post.visibility ?? 'PUBLIC')
+    setSaved(post.savedByCurrentUser ?? false)
+    setSaveCount(post.saved)
+    setShareCount(post.shares)
+  }, [post.authorFollowing, post.comments, post.content, post.currentUserReaction, post.image, post.likes, post.saved, post.savedByCurrentUser, post.shares, post.visibility])
 
   const toggleLike = async () => {
     if (busy) return
@@ -80,24 +96,38 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     if (nextOpen) await loadComments()
   }
 
-  const submitComment = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (!commentDraft.trim() || busy) return
+  const publishComment = async (draft: string, parentId?: string) => {
+    if (!draft.trim() || busy) return
     setBusy(true)
     setError('')
     try {
       const response = await apiRequest<{ comment: CommentRecord }>(`/api/posts/${post.id}/comments`, {
         method: 'POST',
-        body: JSON.stringify({ content: commentDraft.trim() }),
+        body: JSON.stringify({ content: draft.trim(), ...(parentId ? { parentId } : {}) }),
       })
       setComments((current) => [response.comment, ...current])
       setCommentCount((count) => count + 1)
-      setCommentDraft('')
+      if (parentId) {
+        setReplyDraft('')
+        setReplyToId(null)
+      } else {
+        setCommentDraft('')
+      }
     } catch (commentError) {
       setError(commentError instanceof Error ? commentError.message : 'Unable to publish comment.')
     } finally {
       setBusy(false)
     }
+  }
+
+  const submitComment = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    await publishComment(commentDraft)
+  }
+
+  const submitReply = async (event: React.FormEvent<HTMLFormElement>, parentId: string) => {
+    event.preventDefault()
+    await publishComment(replyDraft, parentId)
   }
 
   const sharePost = async () => {
@@ -109,10 +139,51 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
         await navigator.clipboard.writeText(url)
         setNotice('Post link copied.')
       }
+      const response = await apiRequest<{ shares: number }>(`/api/posts/${post.id}/share`, { method: 'POST' })
+      setShareCount(response.shares)
     } catch (shareError) {
       if (shareError instanceof Error && shareError.name !== 'AbortError') {
-        setError('Unable to share this post from this browser.')
+        setError(shareError.message || 'Unable to share this post from this browser.')
       }
+    }
+  }
+
+  const toggleSave = async () => {
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const response = await apiRequest<{ saved: boolean; savedCount: number }>(`/api/posts/${post.id}/save`, {
+        method: saved ? 'DELETE' : 'POST',
+      })
+      setSaved(response.saved)
+      setSaveCount(response.savedCount)
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Unable to save this post.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const savePostEdits = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const response = await apiRequest<{ post: { content: string; imageUrl: string | null; visibility: NonNullable<Post['visibility']> } }>(`/api/posts/${post.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ content: content.trim(), imageUrl: imageUrl.trim(), visibility }),
+      })
+      setContent(response.post.content)
+      setImageUrl(response.post.imageUrl ?? '')
+      setVisibility(response.post.visibility)
+      setEditing(false)
+      setNotice('Post updated.')
+    } catch (editError) {
+      setError(editError instanceof Error ? editError.message : 'Unable to update this post.')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -185,8 +256,30 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
       </div>
 
       {post.category ? <div className="mt-3 inline-flex rounded-full bg-violet-50 px-2.5 py-1 text-[10px] font-semibold uppercase text-violet-700">{post.category}</div> : null}
-      {post.content ? <p className="mt-4 whitespace-pre-wrap text-[15px] leading-7 text-slate-700">{post.content}</p> : null}
-      {post.image ? <img src={post.image} alt="Post attachment" className="mt-4 max-h-[32rem] w-full rounded-[24px] object-cover" /> : null}
+      {editing ? (
+        <form onSubmit={(event) => void savePostEdits(event)} className="mt-4 space-y-3">
+          <textarea aria-label="Edit post content" value={content} onChange={(event) => setContent(event.target.value)} maxLength={2500} required className="min-h-28 w-full rounded-xl border border-slate-200 p-3 text-sm text-slate-800 focus:border-indigo-400 focus:outline-none" />
+          <input type="url" aria-label="Edit image URL" value={imageUrl} onChange={(event) => setImageUrl(event.target.value)} placeholder="Image URL (optional)" className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none" />
+          <label className="flex items-center justify-between gap-3 text-sm text-slate-600">
+            <span>Who can see this post?</span>
+            <select aria-label="Post privacy" value={visibility} onChange={(event) => setVisibility(event.target.value as NonNullable<Post['visibility']>)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+              <option value="PUBLIC">Everyone</option>
+              <option value="FOLLOWERS">Followers</option>
+              <option value="PRIVATE">Only me</option>
+            </select>
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" size="sm" onClick={() => setEditing(false)}>Cancel</Button>
+            <Button type="submit" variant="primary" size="sm" disabled={busy || !content.trim()}>{busy ? 'Saving…' : 'Save changes'}</Button>
+          </div>
+        </form>
+      ) : (
+        <>
+          {content ? <p className="mt-4 whitespace-pre-wrap text-[15px] leading-7 text-slate-700">{content}</p> : null}
+          {imageUrl ? <img src={imageUrl} alt="Post attachment" className="mt-4 max-h-[32rem] w-full rounded-[24px] object-cover" /> : null}
+          <p className="mt-2 text-xs text-slate-500">{visibility === 'PUBLIC' ? 'Everyone' : visibility === 'FOLLOWERS' ? 'Followers' : 'Only me'}</p>
+        </>
+      )}
 
       <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
         <Button variant="ghost" size="sm" className={`px-2 ${liked ? 'text-indigo-700' : 'text-slate-600'}`} onClick={() => void toggleLike()} disabled={busy} icon={<ThumbsUp className="h-4 w-4" aria-hidden="true" />}>
@@ -195,6 +288,11 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
         <Button variant="ghost" size="sm" className="px-2 text-slate-600" onClick={() => void toggleComments()} icon={<MessageCircle className="h-4 w-4" aria-hidden="true" />}>
           {commentCount}
         </Button>
+        <Button variant="ghost" size="sm" className={`px-2 ${saved ? 'text-indigo-700' : 'text-slate-600'}`} onClick={() => void toggleSave()} disabled={busy} icon={<Bookmark className="h-4 w-4" aria-hidden="true" />}>
+          {saveCount}
+        </Button>
+        <span className="px-2 text-xs text-slate-500" aria-label={`${shareCount} shares`}>{shareCount} shares</span>
+        {isOwnPost ? <Button variant="ghost" size="sm" className="px-2 text-slate-600" onClick={() => setEditing((value) => !value)} icon={<PencilLine className="h-4 w-4" aria-hidden="true" />}>Edit</Button> : null}
       </div>
 
       {notice ? <p className="mt-2 text-sm text-emerald-700" role="status">{notice}</p> : null}
@@ -208,12 +306,25 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
           </form>
           {commentsLoading ? <p className="mt-4 text-sm text-slate-500">Loading comments…</p> : comments.length === 0 ? <p className="mt-4 text-sm text-slate-500">No comments yet.</p> : (
             <ul className="mt-4 space-y-3">
-              {comments.map((comment) => (
+              {comments.filter((comment) => !comment.parentId).map((comment) => (
                 <li key={comment.id} className="flex gap-2">
                   <Avatar src={comment.author.avatar ?? ''} alt={comment.author.name} size="sm" />
-                  <div className="min-w-0 rounded-2xl bg-slate-50 px-3 py-2">
+                  <div className="min-w-0 flex-1 rounded-2xl bg-slate-50 px-3 py-2">
                     <p className="text-xs font-semibold text-slate-800">{comment.author.name}</p>
                     <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{comment.content}</p>
+                    <button type="button" onClick={() => { setReplyToId(replyToId === comment.id ? null : comment.id); setReplyDraft('') }} className="mt-2 text-xs font-semibold text-indigo-700">Reply</button>
+                    {comments.filter((reply) => reply.parentId === comment.id).map((reply) => (
+                      <div key={reply.id} className="mt-3 border-l-2 border-indigo-100 pl-3">
+                        <p className="text-xs font-semibold text-slate-800">{reply.author.name}</p>
+                        <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{reply.content}</p>
+                      </div>
+                    ))}
+                    {replyToId === comment.id ? (
+                      <form onSubmit={(event) => void submitReply(event, comment.id)} className="mt-3 flex gap-2">
+                        <input aria-label="Write a reply" value={replyDraft} onChange={(event) => setReplyDraft(event.target.value)} maxLength={1200} placeholder="Write a reply…" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none" />
+                        <Button type="submit" variant="primary" size="sm" disabled={busy || !replyDraft.trim()}>{busy ? 'Replying…' : 'Reply'}</Button>
+                      </form>
+                    ) : null}
                   </div>
                 </li>
               ))}
