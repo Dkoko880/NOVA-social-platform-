@@ -271,7 +271,7 @@ export function AuthPage({ mode }: AuthPageProps) {
     }
 
     if (isRegister && !formData.communityRulesAccepted) {
-      nextFieldErrors.communityRulesAccepted = 'You must accept the NOVA Community & Safety Rules.'
+      nextFieldErrors.communityRulesAccepted = 'You must accept the NOVAKOKO Community & Safety Rules.'
     }
 
     if (Object.keys(nextFieldErrors).length > 0) {
@@ -338,7 +338,7 @@ export function AuthPage({ mode }: AuthPageProps) {
                 N
               </div>
               <div>
-                <p className="text-xs uppercase tracking-[0.32em] text-violet-100">NOVA</p>
+                <p className="text-xs uppercase tracking-[0.32em] text-violet-100">NOVAKOKO</p>
                 <p className="text-sm text-violet-100">Safe social connection</p>
               </div>
             </div>
@@ -364,7 +364,7 @@ export function AuthPage({ mode }: AuthPageProps) {
           <div className="mb-6 flex items-center justify-between">
             <div>
               <p className="text-xs uppercase tracking-[0.28em] text-violet-600">{isRegister ? 'Create account' : 'Welcome back'}</p>
-              <h2 className="mt-2 text-3xl font-semibold text-slate-900">{isRegister ? 'Join NOVA' : 'Log in to NOVA'}</h2>
+              <h2 className="mt-2 text-3xl font-semibold text-slate-900">{isRegister ? 'Join NOVAKOKO' : 'Log in to NOVAKOKO'}</h2>
             </div>
             <Sparkles className="h-5 w-5 text-violet-600" aria-hidden="true" />
           </div>
@@ -458,9 +458,9 @@ export function AuthPage({ mode }: AuthPageProps) {
 
             {isRegister ? (
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                <p className="font-semibold">NOVA Community & Safety Rules</p>
+                <p className="font-semibold">NOVAKOKO Community & Safety Rules</p>
                 <p className="mt-2 leading-6 text-amber-800">
-                  NOVA is a family-friendly platform and does not allow pornography, explicit sexual content, sexual solicitation, exploitation, sexual harassment, sexually explicit images/videos, or links/files promoting prohibited sexual content.
+                  NOVAKOKO is a family-friendly platform and does not allow pornography, explicit sexual content, sexual solicitation, exploitation, sexual harassment, sexually explicit images/videos, or links/files promoting prohibited sexual content.
                 </p>
                 <label className="mt-3 flex items-start gap-3 text-sm text-amber-900">
                   <input
@@ -471,7 +471,7 @@ export function AuthPage({ mode }: AuthPageProps) {
                     aria-invalid={Boolean(fieldErrors.communityRulesAccepted)}
                   />
                   <span>
-                    I understand and agree to follow NOVA Community & Safety Rules.
+                    I understand and agree to follow NOVAKOKO Community & Safety Rules.
                   </span>
                 </label>
                 {fieldErrors.communityRulesAccepted ? <span className="mt-2 block text-xs text-rose-600">{fieldErrors.communityRulesAccepted}</span> : null}

@@ -27,6 +27,7 @@ export type Post = {
   shares: number
   saved: number
   category?: string
+  currentUserReaction?: string | null
 }
 
 export type NotificationItem = {

@@ -1,8 +1,6 @@
-import { ArrowRight, Clock3, Sparkles, TrendingUp, Users } from 'lucide-react'
+import { ArrowRight, Plus } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { stories, trendingTopics } from '../data/mockData'
-import { Button } from '../components/ui/Button'
 import { Avatar } from '../components/ui/Avatar'
 import { PostCard } from '../components/PostCard'
 import { useAuth } from '../context/AuthContext'
@@ -20,6 +18,7 @@ function toPost(record: any): Post {
     comments: record.comments ?? 0,
     shares: 0,
     saved: 0,
+    currentUserReaction: record.currentUserReaction ?? null,
   }
 }
 
@@ -27,12 +26,22 @@ export function HomePage() {
   const { user } = useAuth()
   const [posts, setPosts] = useState<Post[]>([])
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    void apiRequest<{ posts: any[] }>('/api/posts')
-      .then((response) => setPosts(response.posts.map(toPost)))
-      .catch((loadError) => setError(loadError instanceof Error ? loadError.message : 'Unable to load your feed.'))
-  }, [])
+  const loadFeed = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const response = await apiRequest<{ posts: any[] }>('/api/posts?limit=50')
+      setPosts(response.posts.map(toPost))
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load your feed.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void loadFeed() }, [])
 
   return (
     <div className="grid gap-6 p-4 sm:p-6 xl:grid-cols-[minmax(0,1fr)_340px]">
@@ -43,114 +52,42 @@ export function HomePage() {
               <p className="text-xs uppercase tracking-[0.28em] text-violet-100">Good morning</p>
               <h2 className="mt-2 text-2xl font-semibold sm:text-3xl">Welcome back, {user?.name.split(' ')[0]}.</h2>
               <p className="mt-2 max-w-xl text-sm text-violet-100">
-                Stay connected to the people, stories and neighborhoods that make life feel richer and safer.
+                See what your NOVAKOKO community is sharing today.
               </p>
             </div>
             <Link to="/explore">
-              <Button variant="secondary" className="bg-white text-indigo-700 hover:bg-indigo-50">
-                Explore NOVAKOKO <ArrowRight className="h-4 w-4" aria-hidden="true" />
-              </Button>
+              <Link to="/explore" className="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50">
+                Find people <ArrowRight className="h-4 w-4" aria-hidden="true" />
+              </Link>
             </Link>
           </div>
         </section>
 
         <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-semibold text-slate-900">Stories</p>
-            <Button variant="ghost" size="sm" className="text-violet-700">
-              View all
-            </Button>
-          </div>
-          <div className="mt-4 flex gap-3 overflow-x-auto pb-1">
-            {stories.map((story) => (
-              <button
-                key={story.id}
-                type="button"
-                className="group min-w-[80px] rounded-2xl border border-slate-200 bg-slate-50 p-2 text-center transition hover:border-violet-200 hover:bg-violet-50"
-              >
-                <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br p-[2px]" style={{ background: `linear-gradient(135deg, ${story.accent}, #e9d5ff)` }}>
-                  <img src={story.avatar} alt={story.name} className="h-full w-full rounded-full object-cover" />
-                </div>
-                <p className="mt-2 text-xs font-medium text-slate-700">{story.name}</p>
-              </button>
-            ))}
-          </div>
-        </section>
-
-        <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-          <div className="flex items-start gap-3">
+          <Link to="/create" className="flex items-start gap-3">
             <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(user?.name ?? 'NOVAKOKO')}`} alt={user?.name ?? 'NOVAKOKO'} size="md" />
-            <div className="flex-1 rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-3">
+            <div className="flex-1 rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-3 text-sm font-medium text-slate-500">
               <p className="text-sm font-medium text-slate-500">Share something with your community…</p>
             </div>
-          </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Button variant="secondary" size="sm">Photo</Button>
-            <Button variant="secondary" size="sm">Video</Button>
-            <Button variant="secondary" size="sm">Feeling</Button>
-            <Button variant="primary" size="sm" className="ml-auto">Publish</Button>
-          </div>
+            <span className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-3 py-2 text-sm font-semibold text-white"><Plus className="h-4 w-4" aria-hidden="true" />Create</span>
+          </Link>
         </section>
 
         <div className="space-y-5">
-          {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">{error}</div> : null}
-          {!error && posts.length === 0 ? <div className="rounded-2xl border border-dashed border-slate-200 bg-white p-6 text-center text-sm text-slate-500">No posts yet. Start the conversation.</div> : null}
+          {error ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700"><span>{error}</span><button type="button" onClick={() => void loadFeed()} className="font-semibold underline">Retry</button></div> : null}
+          {loading ? <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-500">Loading your feed…</div> : null}
+          {!loading && !error && posts.length === 0 ? <div className="rounded-2xl border border-dashed border-slate-200 bg-white p-6 text-center text-sm text-slate-500">No posts yet. Start the conversation.</div> : null}
           {posts.map((post) => (
-            <PostCard key={post.id} post={post} />
+            <PostCard key={post.id} post={post} onDeleted={(postId) => setPosts((current) => current.filter((item) => item.id !== postId))} />
           ))}
         </div>
       </div>
 
       <aside className="space-y-6">
-        <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm lg:hidden xl:block">
-          <div className="flex items-center justify-between">
-            <p className="font-semibold text-slate-900">Trending</p>
-            <TrendingUp className="h-4 w-4 text-violet-600" aria-hidden="true" />
-          </div>
-          <div className="mt-4 space-y-3">
-            {trendingTopics.map((topic, index) => (
-              <div key={topic} className="flex items-center justify-between rounded-2xl bg-slate-50 px-3 py-2">
-                <div>
-                  <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">#{index + 1}</p>
-                  <p className="font-medium text-slate-800">{topic}</p>
-                </div>
-                <span className="text-xs text-slate-500">{(index + 3) * 12}k</span>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex items-center justify-between">
-            <p className="font-semibold text-slate-900">Community pulse</p>
-            <Users className="h-4 w-4 text-violet-600" aria-hidden="true" />
-          </div>
-          <div className="mt-4 space-y-3">
-            {[
-              { label: 'New connections', value: '1,284', tone: 'text-violet-600' },
-              { label: 'Safe interactions', value: '94%', tone: 'text-emerald-600' },
-              { label: 'Positive feedback', value: '87%', tone: 'text-cyan-600' },
-            ].map((metric) => (
-              <div key={metric.label} className="rounded-2xl bg-slate-50 p-3">
-                <p className="text-xs text-slate-500">{metric.label}</p>
-                <p className={`mt-1 text-xl font-semibold ${metric.tone}`}>{metric.value}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="rounded-[28px] border border-violet-100 bg-violet-50 p-4 shadow-sm">
-          <div className="flex items-center gap-2 text-violet-700">
-            <Sparkles className="h-4 w-4" aria-hidden="true" />
-            <p className="font-semibold">Safety-first culture</p>
-          </div>
-          <p className="mt-3 text-sm leading-6 text-slate-600">
-            Sexual/adult content, harassment, scams and abusive behavior are prohibited. NOVAKOKO helps keep every space supportive and safe.
-          </p>
-          <div className="mt-4 flex items-center gap-2 text-sm text-slate-600">
-            <Clock3 className="h-4 w-4 text-violet-600" aria-hidden="true" />
-            <span>Moderation review in under 24 hours</span>
-          </div>
+        <section className="rounded-[28px] border border-violet-100 bg-violet-50 p-4">
+          <p className="font-semibold text-violet-900">A thoughtful community</p>
+          <p className="mt-2 text-sm leading-6 text-slate-600">Keep interactions respectful. Posts and comments are subject to NOVAKOKO moderation.</p>
+          <Link to="/explore" className="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-indigo-700">Discover people <ArrowRight className="h-4 w-4" aria-hidden="true" /></Link>
         </section>
       </aside>
     </div>

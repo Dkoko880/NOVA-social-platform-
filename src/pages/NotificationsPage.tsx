@@ -1,4 +1,5 @@
-import { BellRing, MessageSquareText, Rocket, ShieldAlert, UserPlus } from 'lucide-react'
+import { BellRing, Check, MessageSquareText, Rocket, ShieldAlert, UserPlus } from 'lucide-react'
+import { Button } from '../components/ui/Button'
 import { useEffect, useState } from 'react'
 import { apiRequest } from '../lib/api'
 
@@ -15,12 +16,42 @@ const typeMap = {
 export function NotificationsPage() {
   const [notifications, setNotifications] = useState<ApiNotification[]>([])
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     void apiRequest<{ notifications: ApiNotification[] }>('/api/notifications')
       .then((response) => setNotifications(response.notifications))
       .catch((loadError) => setError(loadError instanceof Error ? loadError.message : 'Unable to load notifications.'))
+      .finally(() => setLoading(false))
   }, [])
+
+  const markRead = async (id: string) => {
+    setBusy(true)
+    setError('')
+    try {
+      await apiRequest(`/api/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' })
+      setNotifications((current) => current.map((item) => item.id === id ? { ...item, readAt: new Date().toISOString() } : item))
+    } catch (markError) {
+      setError(markError instanceof Error ? markError.message : 'Unable to mark notification as read.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const markAllRead = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      await apiRequest('/api/notifications/read-all', { method: 'POST' })
+      const readAt = new Date().toISOString()
+      setNotifications((current) => current.map((item) => item.readAt ? item : { ...item, readAt }))
+    } catch (markError) {
+      setError(markError instanceof Error ? markError.message : 'Unable to mark notifications as read.')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <div className="p-4 sm:p-6">
@@ -30,15 +61,18 @@ export function NotificationsPage() {
             <p className="text-xs uppercase tracking-[0.28em] text-violet-600">Activity</p>
             <h2 className="mt-2 text-2xl font-semibold text-slate-900">Notifications</h2>
           </div>
-          <span className="rounded-full bg-violet-100 px-2.5 py-1 text-xs font-semibold text-violet-700">
-            {notifications.filter((item) => !item.readAt).length} unread
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="rounded-full bg-violet-100 px-2.5 py-1 text-xs font-semibold text-violet-700">{notifications.filter((item) => !item.readAt).length} unread</span>
+            <Button variant="secondary" size="sm" disabled={busy || notifications.every((item) => item.readAt)} onClick={() => void markAllRead()} icon={<Check className="h-4 w-4" aria-hidden="true" />}>Read all</Button>
+          </div>
         </div>
 
         <div className="mt-6 space-y-3">
             {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">{error}</div> : null}
+            {loading ? <p className="p-4 text-sm text-slate-500">Loading notifications…</p> : null}
+            {!loading && notifications.length === 0 && !error ? <p className="p-6 text-center text-sm text-slate-500">No notifications yet.</p> : null}
             {notifications.map((item) => {
-            const config = typeMap[item.type as keyof typeof typeMap] ?? typeMap.system
+            const config = item.type === 'reaction' ? typeMap.like : typeMap[item.type as keyof typeof typeMap] ?? typeMap.system
             const Icon = config.icon
 
             return (
@@ -62,6 +96,7 @@ export function NotificationsPage() {
                   </div>
                 </div>
                 {!item.readAt ? <span className="mt-2 h-2.5 w-2.5 rounded-full bg-violet-600" aria-label="Unread notification" /> : null}
+                {!item.readAt ? <Button variant="ghost" size="sm" disabled={busy} onClick={() => void markRead(item.id)}>Mark read</Button> : null}
               </div>
             )
           })}

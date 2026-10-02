@@ -1,9 +1,32 @@
-import { Image, Video, ShieldAlert, Eye, Lock, Globe } from 'lucide-react'
+import { Image, ShieldAlert } from 'lucide-react'
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Button } from '../components/ui/Button'
+import { apiRequest } from '../lib/api'
 
 export function CreatePage() {
-  const [visibility, setVisibility] = useState('Friends')
+  const navigate = useNavigate()
+  const [content, setContent] = useState('')
+  const [imageUrl, setImageUrl] = useState('')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const publishPost = async () => {
+    if (!content.trim() || submitting) return
+    setSubmitting(true)
+    setError('')
+    try {
+      await apiRequest('/api/posts', {
+        method: 'POST',
+        body: JSON.stringify({ content: content.trim(), ...(imageUrl.trim() ? { imageUrl: imageUrl.trim() } : {}) }),
+      })
+      navigate('/')
+    } catch (publishError) {
+      setError(publishError instanceof Error ? publishError.message : 'Unable to publish this post.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
   return (
     <div className="p-4 sm:p-6">
@@ -13,57 +36,38 @@ export function CreatePage() {
             <p className="text-xs uppercase tracking-[0.28em] text-violet-600">Create</p>
             <h2 className="mt-2 text-2xl font-semibold text-slate-900">Share a new post</h2>
           </div>
-          <Button variant="primary" size="sm">Draft saved</Button>
+          <span className="text-xs text-slate-500">Posts are reviewed under community safety rules.</span>
         </div>
 
         <div className="mt-6 rounded-[28px] border border-slate-200 bg-slate-50 p-4">
           <textarea
             aria-label="Post content"
             placeholder="What’s happening in your corner of the world?"
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+            maxLength={2500}
             className="min-h-[160px] w-full resize-none border-0 bg-transparent text-base text-slate-800 placeholder:text-slate-400 focus:outline-none"
           />
         </div>
 
-        <div className="mt-6 grid gap-4 md:grid-cols-2">
-          <button
-            type="button"
-            className="flex items-center justify-center gap-3 rounded-[24px] border border-dashed border-slate-300 bg-slate-50 p-5 text-sm font-medium text-slate-600 transition hover:border-violet-300 hover:bg-violet-50 hover:text-violet-700"
-          >
-            <Image className="h-5 w-5" aria-hidden="true" />
-            Add image
-          </button>
-          <button
-            type="button"
-            className="flex items-center justify-center gap-3 rounded-[24px] border border-dashed border-slate-300 bg-slate-50 p-5 text-sm font-medium text-slate-600 transition hover:border-violet-300 hover:bg-violet-50 hover:text-violet-700"
-          >
-            <Video className="h-5 w-5" aria-hidden="true" />
-            Add video
-          </button>
-        </div>
+        <label className="mt-5 flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
+          <Image className="h-5 w-5 shrink-0" aria-hidden="true" />
+          <input
+            type="url"
+            aria-label="Image URL"
+            placeholder="Image URL (https://...)"
+            value={imageUrl}
+            onChange={(event) => setImageUrl(event.target.value)}
+            className="min-w-0 flex-1 bg-transparent text-slate-800 placeholder:text-slate-400 focus:outline-none"
+          />
+        </label>
+        {imageUrl ? <img src={imageUrl} alt="Post preview" className="mt-3 max-h-80 w-full rounded-2xl object-cover" /> : null}
 
         <div className="mt-6 rounded-[24px] border border-slate-200 bg-slate-50 p-4">
-          <p className="text-sm font-semibold text-slate-900">Visibility</p>
-          <div className="mt-3 grid gap-3 sm:grid-cols-3">
-            {[
-              { label: 'Public', icon: Globe },
-              { label: 'Friends', icon: Eye },
-              { label: 'Private', icon: Lock },
-            ].map((option) => (
-              <button
-                key={option.label}
-                type="button"
-                onClick={() => setVisibility(option.label)}
-                className={`flex items-center justify-center gap-2 rounded-2xl border px-3 py-2.5 text-sm font-medium transition ${
-                  visibility === option.label
-                    ? 'border-violet-200 bg-violet-50 text-violet-700'
-                    : 'border-slate-200 bg-white text-slate-600'
-                }`}
-              >
-                <option.icon className="h-4 w-4" aria-hidden="true" />
-                {option.label}
-              </button>
-            ))}
-          </div>
+          <p className="text-sm font-semibold text-slate-900">Community safety</p>
+          <p className="mt-1 text-sm leading-6 text-slate-600">
+            Posts are checked by NOVAKOKO moderation before publication.
+          </p>
         </div>
 
         <div className="mt-6 rounded-[24px] border border-amber-200 bg-amber-50 p-4">
@@ -72,14 +76,17 @@ export function CreatePage() {
             <div>
               <p className="font-semibold text-amber-900">Content safety notice</p>
               <p className="mt-1 text-sm leading-6 text-amber-800">
-                Sexual/adult content, harassment, scams, and abusive behavior are prohibited on NOVA. Please keep community spaces respectful, safe, and family-friendly.
+                Sexual/adult content, harassment, scams, and abusive behavior are prohibited on NOVAKOKO. Please keep community spaces respectful and safe.
               </p>
             </div>
           </div>
         </div>
 
+        {error ? <p className="mt-4 text-sm text-rose-700" role="alert">{error}</p> : null}
         <div className="mt-6 flex justify-end">
-          <Button variant="primary" size="lg">Post to NOVA</Button>
+          <Button variant="primary" size="lg" onClick={() => void publishPost()} disabled={submitting || !content.trim()}>
+            {submitting ? 'Publishing…' : 'Post to NOVAKOKO'}
+          </Button>
         </div>
       </div>
     </div>

@@ -139,7 +139,7 @@ export async function requireActiveAccountIfAuthenticated(req: Request, res: Res
     const user = dbAvailable
       ? await prisma.user.findUnique({
           where: { id: decoded.sub },
-          select: { id: true, role: true, status: true },
+          select: { id: true, email: true, name: true, role: true, status: true },
         })
       : findUserById(decoded.sub);
 
@@ -149,6 +149,16 @@ export async function requireActiveAccountIfAuthenticated(req: Request, res: Res
         ? 'Your account is restricted and cannot approve or reject appeals.'
         : 'Your account is restricted and cannot access the platform.';
       return res.status(403).json({ message });
+    }
+
+    if (user) {
+      req.user = {
+        id: user.id,
+        email: user.email ?? null,
+        name: user.name,
+        role: user.role,
+        status: user.status,
+      };
     }
 
     return next();

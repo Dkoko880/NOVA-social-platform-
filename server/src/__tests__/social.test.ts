@@ -134,6 +134,53 @@ describe('social platform features', () => {
     expect(second.status).toBe(409);
   });
 
+  it('returns follow state and prevents following across a block', async () => {
+    for (const user of [
+      { name: 'Alice', email: 'alice@example.com' },
+      { name: 'Bob', email: 'bob@example.com' },
+    ]) {
+      await request(app).post('/api/auth/register').send({
+        ...user,
+        password: 'Password123',
+        communityRulesAccepted: true,
+      });
+    }
+
+    const aliceLogin = await request(app).post('/api/auth/login').send({
+      email: 'alice@example.com',
+      password: 'Password123',
+    });
+    const bobLogin = await request(app).post('/api/auth/login').send({
+      email: 'bob@example.com',
+      password: 'Password123',
+    });
+    const bob = (await request(app).get('/api/users')).body.users.find((user: { name: string }) => user.name === 'Bob');
+
+    const followed = await request(app)
+      .post(`/api/users/${bob.id}/follow`)
+      .set('Cookie', getCookieHeader(aliceLogin));
+    const profile = await request(app)
+      .get(`/api/users/${bob.id}`)
+      .set('Cookie', getCookieHeader(aliceLogin));
+    const notifications = await request(app)
+      .get('/api/notifications')
+      .set('Cookie', getCookieHeader(bobLogin));
+
+    expect(followed.status).toBe(200);
+    expect(profile.body.user.relationship.isFollowing).toBe(true);
+    expect(profile.body.user.followerCount).toBe(1);
+    expect(notifications.body.notifications.some((item: { type: string }) => item.type === 'follow')).toBe(true);
+
+    await request(app)
+      .post(`/api/users/${aliceLogin.body.user.id}/block`)
+      .set('Cookie', getCookieHeader(bobLogin));
+    const blockedFollow = await request(app)
+      .post(`/api/users/${aliceLogin.body.user.id}/follow`)
+      .set('Cookie', getCookieHeader(bobLogin));
+
+    expect(blockedFollow.status).toBe(403);
+  });
+
   it('user can react to a post', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',
@@ -350,6 +397,37 @@ describe('social platform features', () => {
     expect(created.status).toBe(201);
     expect(details.body.conversation.participants.map((participant: { userId: string }) => participant.userId).sort())
       .toEqual([aliceLogin.body.user.id, bob.id, cara.id].sort());
+  });
+
+  it('returns persisted conversation preferences in the conversation list', async () => {
+    for (const user of [
+      { name: 'Alice', email: 'alice@example.com' },
+      { name: 'Bob', email: 'bob@example.com' },
+    ]) {
+      await request(app).post('/api/auth/register').send({
+        ...user,
+        password: 'Password123',
+        communityRulesAccepted: true,
+      });
+    }
+    const aliceLogin = await request(app).post('/api/auth/login').send({ email: 'alice@example.com', password: 'Password123' });
+    const bob = (await request(app).get('/api/users')).body.users.find((user: { name: string }) => user.name === 'Bob');
+    const conversation = await request(app)
+      .post('/api/conversations')
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ participantId: bob.id });
+
+    await request(app)
+      .patch(`/api/conversations/${conversation.body.conversation.id}/preferences`)
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ pinned: true, starred: true });
+    const list = await request(app)
+      .get('/api/conversations')
+      .set('Cookie', getCookieHeader(aliceLogin));
+    const listed = list.body.conversations.find((item: { id: string }) => item.id === conversation.body.conversation.id);
+
+    expect(listed.pinnedAt).toBeTruthy();
+    expect(listed.starredAt).toBeTruthy();
   });
 
   it('prevents sending to a group member who has blocked the sender', async () => {

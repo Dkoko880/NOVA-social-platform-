@@ -82,6 +82,7 @@ function AppRoutes() {
         <Route path="/ai" element={<AppShell><AiPage /></AppShell>} />
         <Route path="/communities" element={<AppShell><CommunitiesPage /></AppShell>} />
         <Route path="/profile" element={<AppShell><ProfilePage /></AppShell>} />
+        <Route path="/profile/:id" element={<AppShell><ProfilePage /></AppShell>} />
         <Route path="/settings" element={<AppShell><SettingsPage /></AppShell>} />
 
         <Route element={<AdminRoute />}>

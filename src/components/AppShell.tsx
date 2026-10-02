@@ -3,13 +3,11 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import {
   Bell,
   Compass,
-  Flame,
   House,
   LogOut,
   MessageCircleMore,
   PlusSquare,
   Settings,
-  ShieldCheck,
   UserRound,
   BriefcaseBusiness,
   Radio,
@@ -37,7 +35,7 @@ export const sidebarItems = [
   { label: 'Profile', path: '/profile', icon: UserRound },
   { label: 'Settings', path: '/settings', icon: Settings },
   { label: 'Create', path: '/create', icon: PlusSquare },
-  { label: 'Notifications', path: '/notifications', icon: Bell, badge: '5' },
+  { label: 'Notifications', path: '/notifications', icon: Bell },
 ]
 
 export function AppShell({ children }: AppShellProps) {
@@ -60,11 +58,11 @@ export function AppShell({ children }: AppShellProps) {
 
   const userName = user?.name ?? 'NOVAKOKO User'
   const userHandle = user?.email ?? 'member@novakoko.com'
-  const userAvatar = 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=80'
+  const userAvatar = `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(userName)}`
 
   return (
     <div className="min-h-screen text-slate-900">
-      <div className="mx-auto flex min-h-screen max-w-[1600px] gap-4 p-3 pb-24 sm:p-4 lg:gap-6 lg:pb-4">
+      <div className="mx-auto flex min-h-screen max-w-[1600px] gap-4 p-3 pb-32 sm:p-4 lg:gap-6 lg:pb-4">
         <aside className="hidden w-[250px] shrink-0 rounded-[28px] border border-white/80 bg-white/85 p-4 shadow-[0_20px_70px_-42px_rgba(48,37,116,.32)] backdrop-blur lg:flex lg:flex-col">
           <div className="mb-8 flex items-center gap-3 px-2">
             <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 via-violet-600 to-fuchsia-500 text-lg font-black text-white shadow-lg shadow-violet-200">
@@ -77,7 +75,7 @@ export function AppShell({ children }: AppShellProps) {
           </div>
 
           <nav className="space-y-1">
-            {navItems.map(({ label, path, icon: Icon, badge }) => (
+            {navItems.map(({ label, path, icon: Icon }) => (
               <NavLink
                 key={path}
                 to={path}
@@ -92,11 +90,6 @@ export function AppShell({ children }: AppShellProps) {
                   <Icon className="h-4 w-4" aria-hidden="true" />
                   {label}
                 </span>
-                {badge ? (
-                  <span className="rounded-full bg-indigo-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                    {badge}
-                  </span>
-                ) : null}
               </NavLink>
             ))}
           </nav>
@@ -108,13 +101,6 @@ export function AppShell({ children }: AppShellProps) {
                 <p className="truncate text-sm font-semibold text-slate-900">{userName}</p>
                 <p className="truncate text-xs text-slate-500">{userHandle}</p>
               </div>
-            </div>
-            <div className="mt-4 flex items-center justify-between rounded-2xl bg-white/70 px-3 py-2">
-              <div>
-                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Safety</p>
-                <p className="text-sm font-semibold text-emerald-600">Protected</p>
-              </div>
-              <ShieldCheck className="h-5 w-5 text-emerald-500" aria-hidden="true" />
             </div>
             <Button
               type="button"
@@ -136,32 +122,6 @@ export function AppShell({ children }: AppShellProps) {
           </div>
         </main>
 
-        <aside className="hidden w-[300px] shrink-0 rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm xl:flex xl:flex-col">
-          <div className="mb-4 flex items-center justify-between">
-            <p className="text-sm font-semibold text-slate-900">Trending</p>
-            <Flame className="h-4 w-4 text-orange-500" aria-hidden="true" />
-          </div>
-          <div className="space-y-3">
-            {['Community care', 'Local events', 'Safe spaces', 'Family wellness'].map((trend, index) => (
-              <div key={trend} className="rounded-2xl bg-slate-50 p-3">
-                <p className="text-[10px] uppercase tracking-[0.22em] text-slate-500">#{index + 1}</p>
-                <p className="mt-1 font-medium text-slate-800">{trend}</p>
-                <p className="mt-1 text-xs text-slate-500">{(index + 2) * 28}k conversations</p>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-6 rounded-3xl bg-gradient-to-br from-slate-900 via-violet-900 to-indigo-700 p-4 text-white">
-            <p className="text-xs uppercase tracking-[0.25em] text-violet-200">Community highlight</p>
-            <h3 className="mt-3 text-lg font-semibold">Slow, safe, social</h3>
-            <p className="mt-2 text-sm text-violet-100">
-              Build meaningful connections with healthier boundaries and better moderation.
-            </p>
-            <Link to="/explore" className="mt-4 inline-flex rounded-full bg-white px-3 py-2 text-sm font-medium text-slate-900">
-              Discover more
-            </Link>
-          </div>
-        </aside>
       </div>
 
       <MobileNavigation />
@@ -195,25 +155,26 @@ function TopBar({ currentPath }: TopBarProps) {
     <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3 sm:px-6">
       <div>
         <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-indigo-600">NOVAKOKO</p>
-        <h1 className="text-xl font-semibold text-slate-900">{labels[currentPath] ?? 'NOVAKOKO'}</h1>
+        <h1 className="text-xl font-semibold text-slate-900">{labels[currentPath] ?? (currentPath.startsWith('/profile/') ? 'Profile' : 'NOVAKOKO')}</h1>
       </div>
       <div className="flex items-center gap-2">
-        <Button variant="secondary" size="sm" className="hidden sm:inline-flex">
-          Invite friends
-        </Button>
-        <Button variant="primary" size="sm" className="!rounded-full !bg-indigo-600 hover:!bg-indigo-700">
-          + Create
-        </Button>
+        <Link to="/explore" className="hidden rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 sm:inline-flex">Find people</Link>
+        <Link to="/create" className="inline-flex items-center rounded-full bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700">+ Create</Link>
       </div>
     </header>
   )
 }
 
 function MobileNavigation() {
-  const mobileItems = sidebarItems.filter(({ path }) => ['/', '/explore', '/live', '/messages', '/profile'].includes(path))
+  const { user } = useAuth()
+  const mobilePaths = ['/', '/messages', '/live', '/calls', '/communities', '/profile', '/settings', '/explore', '/ai', '/notifications']
+  const mobileItems = sidebarItems.filter(({ path }) => mobilePaths.includes(path))
+  if (['ADMIN', 'SUPER_ADMIN', 'MODERATOR'].includes(user?.role ?? 'USER')) {
+    mobileItems.push({ label: 'Admin', path: '/admin', icon: BriefcaseBusiness })
+  }
 
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-indigo-100/80 bg-white/90 px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl lg:hidden">
+    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-indigo-100/80 bg-white/95 px-2 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur-xl lg:hidden">
       <div className="mx-auto grid max-w-lg grid-cols-5 gap-1">
         {mobileItems.map(({ label, path, icon: Icon }) => (
           <NavLink
@@ -221,7 +182,7 @@ function MobileNavigation() {
             to={path}
             className={({ isActive }) =>
               cn(
-                'flex flex-col items-center justify-center gap-1 rounded-2xl px-2 py-2 text-[11px] font-medium transition-colors',
+                'flex min-h-9 flex-col items-center justify-center gap-0.5 rounded-xl px-1 py-1 text-[10px] font-medium transition-colors',
                 isActive ? 'bg-indigo-50 text-indigo-700' : 'text-slate-500 hover:text-slate-900',
               )
             }

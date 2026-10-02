@@ -1,64 +1,139 @@
-import { ArrowUpRight, Headphones, Radio, Users } from 'lucide-react'
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
-import { communities } from '../data/mockData'
-import { Avatar } from '../components/ui/Avatar'
+import { useEffect, useState, type FormEvent } from 'react'
+import { Headphones, Radio, Users } from 'lucide-react'
+import { Button } from '../components/ui/Button'
+import { useAuth } from '../context/AuthContext'
+import { apiRequest } from '../lib/api'
 
-const rooms = [
-  { title: 'Late night, soft thoughts', host: 'Maya Chen', topic: 'Lounge', listeners: '248', color: 'from-indigo-700 via-violet-700 to-fuchsia-600', image: 'photo-1524504388940-b1c1722653e1' },
-  { title: 'The Sunday reset', host: 'Jordan Lee', topic: 'Wellness', listeners: '186', color: 'from-sky-700 via-blue-700 to-indigo-600', image: 'photo-1500648767791-00dcc994a43e' },
-  { title: 'Good things close by', host: 'Nia Brooks', topic: 'Community', listeners: '92', color: 'from-violet-700 via-purple-700 to-indigo-600', image: 'photo-1534528741775-53994a69daeb' },
-]
+type LiveComment = { id: string; userId: string; text: string; createdAt: string }
+type LiveSession = {
+  id: string
+  hostId: string
+  title: string
+  description?: string | null
+  visibility: string
+  status: string
+  viewerCount: number
+  provider?: string
+  providerConfigured: boolean
+  comments: LiveComment[]
+}
 
 export function LivePage() {
-  const [joinedRoom, setJoinedRoom] = useState('')
+  const { user } = useAuth()
+  const [lives, setLives] = useState<LiveSession[]>([])
+  const [joinedLive, setJoinedLive] = useState<LiveSession | null>(null)
+  const [comment, setComment] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const loadLives = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const response = await apiRequest<{ lives: LiveSession[] }>('/api/live')
+      setLives(response.lives)
+      if (joinedLive) setJoinedLive(response.lives.find((live) => live.id === joinedLive.id) ?? null)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load live sessions.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void loadLives() }, [])
+
+  const joinLive = async (live: LiveSession) => {
+    setBusy(true)
+    setError('')
+    try {
+      const response = await apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/viewers/join`, { method: 'POST' })
+      setJoinedLive(response.live)
+      setLives((current) => current.map((item) => item.id === live.id ? response.live : item))
+    } catch (joinError) {
+      setError(joinError instanceof Error ? joinError.message : 'Unable to join this live session.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const leaveLive = async () => {
+    if (!joinedLive) return
+    setBusy(true)
+    try {
+      await apiRequest(`/api/live/${encodeURIComponent(joinedLive.id)}/viewers/leave`, { method: 'POST' })
+      setJoinedLive(null)
+      await loadLives()
+    } catch (leaveError) {
+      setError(leaveError instanceof Error ? leaveError.message : 'Unable to leave this session.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const postComment = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!joinedLive || !comment.trim() || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const response = await apiRequest<{ comment: LiveComment }>(`/api/live/${encodeURIComponent(joinedLive.id)}/comment`, { method: 'POST', body: JSON.stringify({ text: comment.trim() }) })
+      setJoinedLive((current) => current ? { ...current, comments: [...current.comments, response.comment] } : current)
+      setComment('')
+    } catch (commentError) {
+      setError(commentError instanceof Error ? commentError.message : 'Unable to post your comment.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const react = async (live: LiveSession) => {
+    try {
+      await apiRequest(`/api/live/${encodeURIComponent(live.id)}/react`, { method: 'POST', body: JSON.stringify({ type: 'LIKE' }) })
+    } catch (reactionError) {
+      setError(reactionError instanceof Error ? reactionError.message : 'Unable to react to this session.')
+    }
+  }
+
+  const unavailable = lives.length === 0 || lives.every((live) => !live.providerConfigured)
 
   return (
-    <div className="space-y-7 p-4 sm:p-7">
-      <header className="flex items-end justify-between gap-3">
-        <div>
-          <p className="text-xs font-bold uppercase tracking-[0.22em] text-indigo-600">Happening now</p>
-          <h2 className="mt-1 text-2xl font-bold text-slate-950 sm:text-3xl">Live rooms</h2>
-          <p className="mt-1 text-sm text-slate-500">Drop in, listen, and meet your people.</p>
-        </div>
-        <span className="inline-flex items-center gap-2 rounded-full bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700"><span className="h-2 w-2 animate-pulse rounded-full bg-rose-500" /> LIVE</span>
+    <div className="space-y-5 p-4 sm:p-6">
+      <header>
+        <p className="inline-flex items-center gap-2 text-xs font-semibold uppercase text-indigo-700"><Radio className="h-4 w-4" aria-hidden="true" /> Live</p>
+        <h2 className="mt-2 text-2xl font-semibold text-slate-900">Live sessions</h2>
       </header>
 
-      {joinedRoom ? (
-        <section role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-900">
-          <span>You joined <strong>{joinedRoom}</strong> as a listener.</span>
-          <button type="button" onClick={() => setJoinedRoom('')} className="font-semibold text-indigo-700 hover:text-indigo-900">Leave room</button>
+      {unavailable ? <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="status">Live streaming is unavailable because no media provider is configured.</div> : null}
+      {error ? <p className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p> : null}
+
+      {joinedLive ? (
+        <section className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div><h3 className="font-semibold text-slate-900">{joinedLive.title}</h3><p className="text-sm text-slate-600">{joinedLive.providerConfigured ? 'You joined as a listener.' : 'The streaming provider is unavailable.'}</p></div>
+            <Button variant="secondary" size="sm" onClick={() => void leaveLive()} disabled={busy}>Leave session</Button>
+          </div>
+          {joinedLive.providerConfigured ? <>
+            <ul className="mt-4 max-h-48 space-y-2 overflow-y-auto">{joinedLive.comments.map((entry) => <li key={entry.id} className="rounded-xl bg-white p-2 text-sm text-slate-700">{entry.text}</li>)}</ul>
+            <form onSubmit={(event) => void postComment(event)} className="mt-3 flex gap-2"><input value={comment} onChange={(event) => setComment(event.target.value)} maxLength={500} aria-label="Live comment" placeholder="Write a comment" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm" /><Button type="submit" variant="primary" size="sm" disabled={busy || !comment.trim()}>Send</Button></form>
+          </> : null}
         </section>
       ) : null}
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {rooms.map((room) => (
-          <article key={room.title} className="group overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg">
-            <div className={`relative flex h-40 flex-col justify-between bg-gradient-to-br ${room.color} p-4 text-white`}>
-              <img src={`https://images.unsplash.com/${room.image}?auto=format&fit=crop&w=900&q=80`} alt="" className="absolute inset-0 h-full w-full object-cover opacity-30 mix-blend-luminosity" />
-              <div className="relative flex justify-between"><span className="rounded-full bg-black/20 px-3 py-1 text-xs font-medium backdrop-blur">{room.topic}</span><span className="flex items-center gap-1 rounded-full bg-rose-500 px-2.5 py-1 text-[10px] font-bold"><Radio className="h-3 w-3" /> LIVE</span></div>
-              <div className="relative flex items-end justify-between"><div><p className="text-xs text-white/75">HOSTED BY</p><p className="font-semibold">{room.host}</p></div><div className="flex items-center gap-1.5 rounded-full bg-black/20 px-2.5 py-1 text-xs backdrop-blur"><Headphones className="h-3.5 w-3.5" /> {room.listeners}</div></div>
-            </div>
-            <div className="p-4">
-              <h3 className="text-lg font-semibold text-slate-900">{room.title}</h3>
-              <p className="mt-1 text-sm text-slate-500">A welcoming room for good conversation.</p>
-              <button type="button" onClick={() => setJoinedRoom(room.title)} className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-full bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-700"><Headphones className="h-4 w-4" /> Join room</button>
-            </div>
-          </article>
+      {loading ? <p className="rounded-xl bg-white p-4 text-sm text-slate-500">Loading sessions…</p> : null}
+      {!loading && lives.length === 0 && !error ? <p className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">No live sessions are available.</p> : null}
+      <ul className="divide-y divide-slate-200 rounded-2xl border border-slate-200 bg-white">
+        {lives.map((live) => (
+          <li key={live.id} className="flex flex-wrap items-center gap-3 p-4">
+            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-700"><Headphones className="h-5 w-5" aria-hidden="true" /></span>
+            <div className="min-w-0 flex-1"><h3 className="truncate font-semibold text-slate-900">{live.title}</h3><p className="mt-1 text-sm text-slate-500">{live.description || `Hosted by ${live.hostId === user?.id ? 'you' : 'a NOVAKOKO member'}`} · {live.viewerCount} listeners · {live.status}</p></div>
+            {live.providerConfigured && live.status === 'live' ? <><Button variant="secondary" size="sm" onClick={() => void react(live)}>React</Button><Button variant="primary" size="sm" onClick={() => void joinLive(live)} disabled={busy}>Join</Button></> : <span className="text-xs font-medium text-amber-700">Streaming unavailable</span>}
+            {live.hostId === user?.id && live.providerConfigured && live.status !== 'live' ? <Button variant="primary" size="sm" onClick={() => void apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/start`, { method: 'POST' }).then(({ live: updated }) => setLives((current) => current.map((item) => item.id === updated.id ? updated : item))).catch((startError) => setError(startError instanceof Error ? startError.message : 'Unable to start the session.'))}>Start</Button> : null}
+          </li>
         ))}
-      </section>
+      </ul>
 
-      <section className="rounded-[24px] border border-indigo-100 bg-gradient-to-r from-indigo-50 via-violet-50 to-fuchsia-50 p-5 sm:flex sm:items-center sm:justify-between sm:p-6">
-        <div><p className="text-xs font-bold uppercase tracking-[0.2em] text-indigo-700">Your people, your room</p><h3 className="mt-1 text-xl font-semibold text-slate-900">Start a live conversation</h3><p className="mt-1 text-sm text-slate-600">Bring a group together around something you love.</p></div>
-        <Link to="/communities" className="mt-4 inline-flex items-center gap-2 rounded-full bg-white px-4 py-2.5 text-sm font-semibold text-indigo-700 shadow-sm ring-1 ring-indigo-100 sm:mt-0">Explore groups <ArrowUpRight className="h-4 w-4" /></Link>
-      </section>
-
-      <section>
-        <div className="mb-3 flex items-center justify-between"><h3 className="font-semibold text-slate-900">Rooms from your circles</h3><Users className="h-4 w-4 text-indigo-600" /></div>
-        <div className="flex gap-3 overflow-x-auto pb-2">
-          {communities.slice(0, 4).map((community, index) => <div key={community.id} className="flex min-w-56 items-center gap-3 rounded-2xl border border-slate-200 bg-white p-3"><Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(community.name)}`} alt={community.name} size="sm" /><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-800">{community.name}</p><p className="text-xs text-slate-500">{index * 17 + 12} members listening</p></div></div>)}
-        </div>
-      </section>
+      <div className="flex justify-end"><Button variant="secondary" size="sm" onClick={() => void loadLives()} disabled={loading}><Users className="h-4 w-4" aria-hidden="true" /> Refresh</Button></div>
     </div>
   )
 }

@@ -210,6 +210,23 @@ async function isFollowing(currentUserId: string, targetUserId: string) {
   );
 }
 
+async function getBlockStatus(currentUserId: string, targetUserId: string) {
+  const dbAvailable = await isDatabaseAvailable();
+
+  if (dbAvailable) {
+    const [blockedByMe, blockedMe] = await Promise.all([
+      prisma.block.findUnique({ where: { blockerId_blockedId: { blockerId: currentUserId, blockedId: targetUserId } }, select: { id: true } }),
+      prisma.block.findUnique({ where: { blockerId_blockedId: { blockerId: targetUserId, blockedId: currentUserId } }, select: { id: true } }),
+    ]);
+    return { blockedByMe: Boolean(blockedByMe), blockedMe: Boolean(blockedMe) };
+  }
+
+  return {
+    blockedByMe: socialStore.state.blocks.some((entry) => entry.blockerId === currentUserId && entry.blockedId === targetUserId),
+    blockedMe: socialStore.state.blocks.some((entry) => entry.blockerId === targetUserId && entry.blockedId === currentUserId),
+  };
+}
+
 async function addNotification(recipientId: string, actorId: string | null, type: string, message: string) {
   const dbAvailable = await isDatabaseAvailable();
 
@@ -295,7 +312,7 @@ async function requireAccountAccess(req: any, res: any, next: any) {
 
 socialRouter.use(requireActiveAccountIfAuthenticated);
 
-socialRouter.get('/users', async (_req, res) => {
+socialRouter.get('/users', async (req, res) => {
   const dbAvailable = await isDatabaseAvailable();
 
   if (dbAvailable) {
@@ -323,10 +340,14 @@ socialRouter.get('/users', async (_req, res) => {
 
     const result = await Promise.all(users.map(async (user) => {
       const counts = await getFollowCounts(user.id);
+      const relationship = req.user && req.user.id !== user.id
+        ? { isFollowing: await isFollowing(req.user.id, user.id), ...await getBlockStatus(req.user.id, user.id) }
+        : null;
       return {
         ...await getUserSummary(user),
         followerCount: counts.followers,
         followingCount: counts.following,
+        ...(relationship ? { relationship } : {}),
       };
     }));
 
@@ -336,10 +357,14 @@ socialRouter.get('/users', async (_req, res) => {
   const users = fallbackStore.list().map((user) => ({ ...user, profile: getProfileForUserId(user.id) }));
   const result = await Promise.all(users.map(async (user) => {
     const counts = await getFollowCounts(user.id);
+    const relationship = req.user && req.user.id !== user.id
+      ? { isFollowing: await isFollowing(req.user.id, user.id), ...await getBlockStatus(req.user.id, user.id) }
+      : null;
     return {
       ...await getUserSummary(user),
       followerCount: counts.followers,
       followingCount: counts.following,
+      ...(relationship ? { relationship } : {}),
     };
   }));
 
@@ -357,12 +382,16 @@ socialRouter.get('/users/:id', async (req, res) => {
   const profile = await getProfilePayload(user.id);
   const counts = await getFollowCounts(user.id);
   const summary = await getUserSummary({ ...user, profile });
+  const relationship = req.user && req.user.id !== user.id
+    ? { isFollowing: await isFollowing(req.user.id, user.id), ...await getBlockStatus(req.user.id, user.id) }
+    : null;
 
   return res.json({
     user: {
       ...summary,
       followerCount: counts.followers,
       followingCount: counts.following,
+      ...(relationship ? { relationship } : {}),
     },
   });
 });
@@ -461,6 +490,11 @@ socialRouter.post('/users/:id/follow', requireAuth, requireAccountAccess, async 
   const targetUser = await getUserById(targetId);
   if (!targetUser) {
     return res.status(404).json({ message: 'User not found.' });
+  }
+
+  const blockStatus = await getBlockStatus(userId, targetId);
+  if (blockStatus.blockedByMe || blockStatus.blockedMe) {
+    return res.status(403).json({ message: 'You cannot follow a user involved in a block relationship.' });
   }
 
   const alreadyFollowing = await isFollowing(userId, targetId);

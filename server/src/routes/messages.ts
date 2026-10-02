@@ -235,15 +235,22 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
       orderBy: { updatedAt: 'desc' },
     });
 
-    return res.json({ conversations: conversations.map((conversation) => ({
-      id: conversation.id,
-      name: conversation.name,
-      updatedAt: conversation.updatedAt,
-      lastMessageAt: conversation.lastMessageAt,
-      lastMessagePreview: conversation.lastMessagePreview,
-      participants: conversation.participants.map((participant) => ({ id: participant.id, userId: participant.userId, role: participant.role, user: participant.user })),
-      lastMessage: conversation.messages[0] ? messageToPublicShape(conversation.messages[0]) : null,
-    })) });
+    return res.json({ conversations: conversations.map((conversation) => {
+      const currentParticipant = conversation.participants.find((participant) => participant.userId === userId);
+      return {
+        id: conversation.id,
+        name: conversation.name,
+        updatedAt: conversation.updatedAt,
+        lastMessageAt: conversation.lastMessageAt,
+        lastMessagePreview: conversation.lastMessagePreview,
+        pinnedAt: currentParticipant?.pinnedAt ?? null,
+        archivedAt: currentParticipant?.archivedAt ?? null,
+        starredAt: currentParticipant?.starredAt ?? null,
+        mutedUntil: currentParticipant?.mutedUntil ?? null,
+        participants: conversation.participants.map((participant) => ({ id: participant.id, userId: participant.userId, role: participant.role, user: participant.user })),
+        lastMessage: conversation.messages[0] ? messageToPublicShape(conversation.messages[0]) : null,
+      };
+    }) });
   }
 
   const conversations = socialStore.state.conversations.filter((conversation) => {
@@ -251,16 +258,24 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
     return participants.some((participant) => participant.userId === userId);
   });
 
-  return res.json({ conversations: conversations.map((conversation) => ({
-    ...conversation,
-    participants: socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversation.id).map((participant) => ({
-      ...participant,
-      user: findUserById(participant.userId) ? { id: participant.userId, name: findUserById(participant.userId)!.name } : undefined,
-    })),
-    lastMessage: socialStore.state.messages
-      .filter((message) => message.conversationId === conversation.id)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] ?? null,
-  })) });
+  return res.json({ conversations: conversations.map((conversation) => {
+    const participants = socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversation.id);
+    const currentParticipant = participants.find((participant) => participant.userId === userId);
+    return {
+      ...conversation,
+      pinnedAt: currentParticipant?.pinnedAt ?? null,
+      archivedAt: currentParticipant?.archivedAt ?? null,
+      starredAt: currentParticipant?.starredAt ?? null,
+      mutedUntil: currentParticipant?.mutedUntil ?? null,
+      participants: participants.map((participant) => ({
+        ...participant,
+        user: findUserById(participant.userId) ? { id: participant.userId, name: findUserById(participant.userId)!.name } : undefined,
+      })),
+      lastMessage: socialStore.state.messages
+        .filter((message) => message.conversationId === conversation.id)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] ?? null,
+    };
+  }) });
 });
 
 messagesRouter.get('/conversations/:id', requireAuth, async (req, res) => {
