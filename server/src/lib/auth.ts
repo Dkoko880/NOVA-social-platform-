@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import env from '../config/env.js';
 
@@ -11,16 +11,17 @@ export async function verifyPassword(password: string, passwordHash: string) {
   return bcrypt.compare(password, passwordHash);
 }
 
-export function signAccessToken(payload: { sub: string; email: string; role: string }) {
+export function signAccessToken(payload: { sub: string; email?: string | null; role: string }) {
   return jwt.sign(payload, env.JWT_SECRET as jwt.Secret, {
     expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
+    jwtid: randomUUID(),
   });
 }
 
 export function verifyAccessToken(token: string) {
   return jwt.verify(token, env.JWT_SECRET as jwt.Secret) as {
     sub: string;
-    email: string;
+    email?: string;
     role: string;
   };
 }
@@ -30,6 +31,9 @@ export function hashSessionToken(token: string) {
 }
 
 export function sanitizeUser<T extends Record<string, unknown>>(user: T) {
-  const { passwordHash: _passwordHash, ...safeUser } = user as T & { passwordHash?: string };
+  const { passwordHash: _passwordHash, ...safeUser } = user as T & { passwordHash?: string; addressCiphertext?: string; addressIv?: string; addressTag?: string };
+  delete (safeUser as Record<string, unknown>).addressCiphertext;
+  delete (safeUser as Record<string, unknown>).addressIv;
+  delete (safeUser as Record<string, unknown>).addressTag;
   return safeUser;
 }

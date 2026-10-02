@@ -8,9 +8,13 @@ import env from './config/env.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { adminRouter } from './routes/admin.js';
 import { authRouter } from './routes/auth.js';
+import { command2aRouter } from './routes/command2a.js';
+import { communitiesRouter } from './routes/communities.js';
 import { creatorBusinessMarketplaceRouter } from './routes/creatorBusinessMarketplace.js';
 import { healthRouter } from './routes/health.js';
 import { messagesRouter } from './routes/messages.js';
+import { paymentsRouter } from './routes/payments.js';
+import { registrationMediaRouter, registrationRouter } from './routes/registration.js';
 import { socialRouter } from './routes/social.js';
 import { subscriptionRouter } from './routes/subscriptions.js';
 
@@ -80,10 +84,15 @@ app.use('/api/auth', authRateLimiter);
 app.use('/health', healthRouter);
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
+app.use('/api/auth', registrationRouter);
+app.use('/api/media', registrationMediaRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api', messagesRouter);
+app.use('/api', communitiesRouter);
+app.use('/api', paymentsRouter);
 app.use('/api', subscriptionRouter);
 app.use('/api', socialRouter);
+app.use('/api', command2aRouter);
 app.use('/api', creatorBusinessMarketplaceRouter);
 
 app.get('/', (_req, res) => {

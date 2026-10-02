@@ -2,7 +2,9 @@ import { apiRequest, ApiError } from './api'
 
 export type AuthUser = {
   id: string
-  email: string
+  email: string | null
+  phoneE164?: string | null
+  username?: string | null
   name: string
   role?: string
   status?: string

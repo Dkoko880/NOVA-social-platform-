@@ -17,8 +17,30 @@ export type SocialPostRecord = {
   authorId: string;
   content: string;
   imageUrl: string | null;
+  communityId?: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type CommunityRecord = {
+  id: string;
+  ownerId: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  avatarUrl: string | null;
+  type?: 'GROUP' | 'COMMUNITY' | 'CHANNEL';
+  isPrivate?: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CommunityMemberRecord = {
+  id: string;
+  communityId: string;
+  userId: string;
+  role: 'MEMBER' | 'MODERATOR' | 'OWNER';
+  joinedAt: string;
 };
 
 export type SocialCommentRecord = {
@@ -82,6 +104,8 @@ export type ConversationRecord = {
   updatedAt: string;
   lastMessageAt: string | null;
   lastMessagePreview: string | null;
+  isChannel?: boolean;
+  disappearingAfterSeconds?: number;
 };
 
 export type ConversationParticipantRecord = {
@@ -92,6 +116,10 @@ export type ConversationParticipantRecord = {
   joinedAt: string;
   lastReadAt: string | null;
   leftAt: string | null;
+  pinnedAt?: string | null;
+  archivedAt?: string | null;
+  starredAt?: string | null;
+  mutedUntil?: string | null;
 };
 
 export type MessageRecord = {
@@ -104,6 +132,21 @@ export type MessageRecord = {
   readAt: string | null;
   deletedAt: string | null;
   status: 'SENT' | 'DELIVERED' | 'READ' | 'FAILED' | 'DELETED';
+  contentType?: 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT' | 'VOICE' | 'CONTACT' | 'LOCATION';
+  mediaUrl?: string | null;
+  metadata?: Record<string, unknown> | null;
+  replyToId?: string | null;
+  forwardedFromId?: string | null;
+  editedAt?: string | null;
+  expiresAt?: string | null;
+};
+
+export type MessageReactionRecord = {
+  id: string;
+  messageId: string;
+  userId: string;
+  type: string;
+  createdAt: string;
 };
 
 export type SubscriptionPlanRecord = {
@@ -165,6 +208,9 @@ const globalStore = globalThis as typeof globalThis & {
     conversations: ConversationRecord[];
     conversationParticipants: ConversationParticipantRecord[];
     messages: MessageRecord[];
+    messageReactions: MessageReactionRecord[];
+    communities: CommunityRecord[];
+    communityMembers: CommunityMemberRecord[];
     subscriptionPlans: SubscriptionPlanRecord[];
     subscriptions: SubscriptionRecord[];
     payments: PaymentRecord[];
@@ -185,6 +231,9 @@ if (!globalStore.__novaSocialStore) {
     conversations: [],
     conversationParticipants: [],
     messages: [],
+    messageReactions: [],
+    communities: [],
+    communityMembers: [],
     subscriptionPlans: [],
     subscriptions: [],
     payments: [],
@@ -215,6 +264,9 @@ export const socialStore = {
       conversations: [],
       conversationParticipants: [],
       messages: [],
+      messageReactions: [],
+      communities: [],
+      communityMembers: [],
       subscriptionPlans: [],
       subscriptions: [],
       payments: [],

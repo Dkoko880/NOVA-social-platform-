@@ -71,6 +71,13 @@ export type LiveReaction = {
   createdAt: string;
 };
 
+export type LiveGuest = {
+  userId: string;
+  role: 'GUEST' | 'COHOST';
+  status: 'REQUESTED' | 'LIVE' | 'REMOVED';
+  requestedAt: string;
+};
+
 export type LiveSession = {
   id: string;
   hostId: string;
@@ -81,10 +88,12 @@ export type LiveSession = {
   viewerCount: number;
   moderators: string[];
   viewers: LiveViewer[];
+  guests: LiveGuest[];
   comments: LiveComment[];
   reactions: LiveReaction[];
   replayUrl?: string | null;
   recordingUrl?: string | null;
+  recordingStatus: 'UNAVAILABLE' | 'RECORDING' | 'READY';
   analyticsHook: string | null;
   provider: 'local-dev';
   providerConfigured: boolean;
@@ -366,14 +375,16 @@ export function createLiveSession(input: { hostId: string; title: string; descri
     title: input.title,
     description: input.description ?? null,
     visibility: input.visibility ?? 'public',
-    status: 'live',
+    status: 'paused',
     viewerCount: 0,
     moderators: [],
     viewers: [],
+    guests: [],
     comments: [],
     reactions: [],
     replayUrl: null,
     recordingUrl: null,
+    recordingStatus: 'UNAVAILABLE',
     analyticsHook: null,
     provider: 'local-dev',
     providerConfigured: false,

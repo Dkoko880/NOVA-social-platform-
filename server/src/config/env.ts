@@ -1,8 +1,9 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { z } from 'zod';
 
-dotenv.config({ path: path.resolve(process.cwd(), '.env') });
+dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.env') });
 
 const runtimeEnvironment = {
   ...process.env,
@@ -12,7 +13,10 @@ const runtimeEnvironment = {
 const DEVELOPMENT_JWT_SECRET = 'nova-dev-jwt-secret-key-32-chars-plus';
 
 const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  NODE_ENV: z.preprocess(
+    (value) => (typeof value === 'string' ? value.toLowerCase() : value),
+    z.enum(['development', 'test', 'production']),
+  ).default('development'),
   PORT: z.coerce.number().default(4000),
   HOST: z.string().min(1).default('0.0.0.0'),
   DATABASE_URL: z.string().min(1).default('postgresql://postgres:postgres@localhost:5432/nova?schema=public'),

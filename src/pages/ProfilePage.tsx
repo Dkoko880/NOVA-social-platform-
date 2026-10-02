@@ -56,7 +56,7 @@ export function ProfilePage() {
                     <h2 className="text-2xl font-semibold text-slate-900">{displayName}</h2>
                     <ShieldCheck className="h-5 w-5 text-violet-600" aria-hidden="true" />
                   </div>
-                  <p className="text-sm text-slate-500">@{profile?.handle ?? user?.email.split('@')[0]}</p>
+                  <p className="text-sm text-slate-500">@{profile?.handle ?? user?.username ?? user?.email?.split('@')[0] ?? user?.phoneE164 ?? 'member'}</p>
                 </div>
               </div>
               <div className="flex gap-2">

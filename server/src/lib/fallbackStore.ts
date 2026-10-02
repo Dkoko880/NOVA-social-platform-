@@ -1,11 +1,11 @@
 import env from '../config/env.js';
 
-type UserRole = 'USER' | 'MODERATOR' | 'ADMIN' | 'SUPER_ADMIN';
+type UserRole = 'USER' | 'MODERATOR' | 'ADMIN' | 'SUPPORT' | 'SUPER_ADMIN';
 type UserStatus = 'ACTIVE' | 'SUSPENDED' | 'BANNED' | 'DEACTIVATED';
 
 export type FallbackUser = {
   id: string;
-  email: string;
+  email: string | null;
   name: string;
   passwordHash: string;
   role: UserRole;
@@ -13,6 +13,9 @@ export type FallbackUser = {
   communityRulesAccepted: boolean;
   communityRulesAcceptedAt: string | null;
   rulesVersion: string | null;
+  phoneE164?: string | null;
+  phoneVerifiedAt?: string | null;
+  username?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -38,10 +41,24 @@ export type FallbackAppeal = {
   reviewedAt: string | null;
 };
 
+export type FallbackSession = {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  userAgent: string | null;
+  deviceName: string | null;
+  ipAddress: string | null;
+  lastSeenAt: string | null;
+  expiresAt: string;
+  revokedAt: string | null;
+  createdAt: string;
+};
+
 const globalStore = globalThis as typeof globalThis & {
   __novaFallbackUserStore?: FallbackUser[];
   __novaFallbackAdminActions?: FallbackAdminAction[];
   __novaFallbackAppeals?: FallbackAppeal[];
+  __novaFallbackSessions?: FallbackSession[];
 };
 
 function assertFallbackStorageAllowed() {
@@ -58,6 +75,9 @@ if (!globalStore.__novaFallbackAdminActions) {
 }
 if (!globalStore.__novaFallbackAppeals) {
   globalStore.__novaFallbackAppeals = [];
+}
+if (!globalStore.__novaFallbackSessions) {
+  globalStore.__novaFallbackSessions = [];
 }
 
 export const fallbackStore = {
@@ -78,6 +98,7 @@ export const fallbackStore = {
     globalStore.__novaFallbackUserStore = [];
     globalStore.__novaFallbackAdminActions = [];
     globalStore.__novaFallbackAppeals = [];
+    globalStore.__novaFallbackSessions = [];
   },
   create(user: Omit<FallbackUser, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }) {
     assertFallbackStorageAllowed();
@@ -92,6 +113,9 @@ export const fallbackStore = {
       communityRulesAccepted: user.communityRulesAccepted,
       communityRulesAcceptedAt: user.communityRulesAcceptedAt ?? (user.communityRulesAccepted ? now : null),
       rulesVersion: user.rulesVersion ?? null,
+      phoneE164: user.phoneE164 ?? null,
+      phoneVerifiedAt: user.phoneVerifiedAt ?? null,
+      username: user.username ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -143,9 +167,52 @@ export const fallbackStore = {
     assertFallbackStorageAllowed();
     return globalStore.__novaFallbackAppeals!.find((appeal) => appeal.id === id) ?? null;
   },
+  createSession(session: Omit<FallbackSession, 'id' | 'createdAt' | 'revokedAt'> & { id?: string; createdAt?: string }) {
+    assertFallbackStorageAllowed();
+    const record: FallbackSession = {
+      ...session,
+      id: session.id ?? `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: session.createdAt ?? new Date().toISOString(),
+      revokedAt: null,
+    };
+    globalStore.__novaFallbackSessions!.push(record);
+    return { ...record };
+  },
+  findSessionByTokenHash(tokenHash: string) {
+    assertFallbackStorageAllowed();
+    return globalStore.__novaFallbackSessions!.find((session) => session.tokenHash === tokenHash && !session.revokedAt && new Date(session.expiresAt) > new Date()) ?? null;
+  },
+  listSessions(userId: string) {
+    assertFallbackStorageAllowed();
+    return globalStore.__novaFallbackSessions!
+      .filter((session) => session.userId === userId && !session.revokedAt && new Date(session.expiresAt) > new Date())
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+      .map((session) => ({ ...session }));
+  },
+  revokeSession(id: string, userId: string) {
+    assertFallbackStorageAllowed();
+    const session = globalStore.__novaFallbackSessions!.find((entry) => entry.id === id && entry.userId === userId && !entry.revokedAt);
+    if (!session) return false;
+    session.revokedAt = new Date().toISOString();
+    return true;
+  },
+  revokeSessionByTokenHash(tokenHash: string) {
+    assertFallbackStorageAllowed();
+    const session = globalStore.__novaFallbackSessions!.find((entry) => entry.tokenHash === tokenHash && !entry.revokedAt);
+    if (!session) return false;
+    session.revokedAt = new Date().toISOString();
+    return true;
+  },
+  revokeAllSessions(userId: string) {
+    assertFallbackStorageAllowed();
+    const now = new Date().toISOString();
+    for (const session of globalStore.__novaFallbackSessions!) {
+      if (session.userId === userId && !session.revokedAt) session.revokedAt = now;
+    }
+  },
   findByEmail(email: string) {
     assertFallbackStorageAllowed();
-    return globalStore.__novaFallbackUserStore!.find((user) => user.email.toLowerCase() === email.toLowerCase());
+    return globalStore.__novaFallbackUserStore!.find((user) => user.email?.toLowerCase() === email.toLowerCase());
   },
   findById(id: string) {
     assertFallbackStorageAllowed();
@@ -162,7 +229,7 @@ export function findUserById(id: string) {
 }
 
 export function createUser(input: {
-  email: string;
+  email: string | null;
   name: string;
   passwordHash: string;
   role?: UserRole;
@@ -170,6 +237,9 @@ export function createUser(input: {
   communityRulesAccepted?: boolean;
   communityRulesAcceptedAt?: string | null;
   rulesVersion?: string | null;
+  phoneE164?: string | null;
+  phoneVerifiedAt?: string | null;
+  username?: string | null;
 }) {
   return fallbackStore.create({
     email: input.email,
@@ -180,5 +250,8 @@ export function createUser(input: {
     communityRulesAccepted: input.communityRulesAccepted ?? false,
     communityRulesAcceptedAt: input.communityRulesAcceptedAt ?? (input.communityRulesAccepted ? new Date().toISOString() : null),
     rulesVersion: input.rulesVersion ?? null,
+    phoneE164: input.phoneE164 ?? null,
+    phoneVerifiedAt: input.phoneVerifiedAt ?? null,
+    username: input.username ?? null,
   });
 }

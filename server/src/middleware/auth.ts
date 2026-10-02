@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import env from '../config/env.js';
 import { hashSessionToken, verifyAccessToken } from '../lib/auth.js';
-import { findUserById } from '../lib/fallbackStore.js';
+import { fallbackStore, findUserById } from '../lib/fallbackStore.js';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
@@ -16,7 +16,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 
     const decoded = verifyAccessToken(token);
     const dbAvailable = await isDatabaseAvailable();
-    if (env.NODE_ENV === 'production' && dbAvailable) {
+    if (dbAvailable) {
       const session = await prisma.session.findFirst({
         where: {
           tokenHash: hashSessionToken(token),
@@ -30,8 +30,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       if (!session) {
         return res.status(401).json({ message: 'User session is invalid or expired.' });
       }
+    } else if (!fallbackStore.findSessionByTokenHash(hashSessionToken(token))) {
+      return res.status(401).json({ message: 'User session is invalid or expired.' });
     }
-    let user = null as { id: string; email: string; name: string; role: string; status: string } | null;
+    let user = null as { id: string; email: string | null; name: string; role: string; status: string } | null;
 
     if (dbAvailable) {
       user = await prisma.user.findUnique({
@@ -117,7 +119,7 @@ export async function requireActiveAccountIfAuthenticated(req: Request, res: Res
   try {
     const decoded = verifyAccessToken(token);
     const dbAvailable = await isDatabaseAvailable();
-    if (env.NODE_ENV === 'production' && dbAvailable) {
+    if (dbAvailable) {
       const session = await prisma.session.findFirst({
         where: {
           tokenHash: hashSessionToken(token),
@@ -131,6 +133,8 @@ export async function requireActiveAccountIfAuthenticated(req: Request, res: Res
       if (!session) {
         return res.status(401).json({ message: 'User session is invalid or expired.' });
       }
+    } else if (!fallbackStore.findSessionByTokenHash(hashSessionToken(token))) {
+      return res.status(401).json({ message: 'User session is invalid or expired.' });
     }
     const user = dbAvailable
       ? await prisma.user.findUnique({
@@ -140,7 +144,11 @@ export async function requireActiveAccountIfAuthenticated(req: Request, res: Res
       : findUserById(decoded.sub);
 
     if (user && ['BANNED', 'SUSPENDED', 'DEACTIVATED'].includes(user.status)) {
-      return res.status(403).json({ message: 'Your account is restricted and cannot access the platform.' });
+      const isAppealReview = req.method === 'POST' && /^\/appeals\/[^/]+\/(approve|reject)$/.test(req.path);
+      const message = isAppealReview
+        ? 'Your account is restricted and cannot approve or reject appeals.'
+        : 'Your account is restricted and cannot access the platform.';
+      return res.status(403).json({ message });
     }
 
     return next();

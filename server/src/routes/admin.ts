@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { socialStore } from '../lib/socialStore.js';
-import { requireAuth, requireAdminAccess, requireModeratorAccess } from '../middleware/auth.js';
+import { requireAuth, requireActiveAccountIfAuthenticated, requireAdminAccess, requireModeratorAccess } from '../middleware/auth.js';
 
 const adminRouter = Router();
 const adminRoles = new Set(['ADMIN', 'SUPER_ADMIN']);
@@ -24,7 +24,7 @@ function parsePagination(req: any) {
 
 async function trackAdminAction(actorId: string, targetUserId: string | null, actionType: string, details: string | null) {
   if (await isDatabaseAvailable()) {
-    void prisma.adminAction.create({
+    await prisma.adminAction.create({
       data: {
         actorId,
         targetUserId,
@@ -183,7 +183,7 @@ async function loadAppeals() {
   }));
 }
 
-adminRouter.use(requireAuth);
+adminRouter.use(requireAuth, requireActiveAccountIfAuthenticated);
 
 adminRouter.get('/dashboard', requireAdminAccess, async (req, res) => {
   const users = await getUsers();

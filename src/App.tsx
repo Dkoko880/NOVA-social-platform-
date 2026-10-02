@@ -11,6 +11,7 @@ import { ProfilePage } from './pages/ProfilePage'
 import { SettingsPage } from './pages/SettingsPage'
 import { AuthPage } from './pages/AuthPage'
 import { AdminPage } from './pages/AdminPage'
+import { DownloadPage } from './pages/DownloadPage'
 
 function PublicRoute() {
   const { isAuthenticated, isLoading } = useAuth()
@@ -61,6 +62,7 @@ function AdminRoute() {
 function AppRoutes() {
   return (
     <Routes>
+      <Route path="/download" element={<DownloadPage />} />
       <Route element={<PublicRoute />}>
         <Route path="/login" element={<AuthPage mode="login" />} />
         <Route path="/register" element={<AuthPage mode="register" />} />

@@ -3,7 +3,11 @@ export type RealtimeEvent =
   | 'message:read'
   | 'typing:start'
   | 'typing:stop'
-  | 'presence:change';
+  | 'presence:change'
+  | 'notification:new'
+  | 'notification:read'
+  | 'call:update'
+  | 'live:update';
 
 export type RealtimeListener<T = unknown> = (payload: T) => void | Promise<void>;
 
@@ -38,7 +42,7 @@ class LocalRealtimeHub {
 export const realtimeHub = new LocalRealtimeHub();
 
 export function subscribeToUserEvents(userId: string, listener: RealtimeListener) {
-  const events: RealtimeEvent[] = ['message:new', 'message:read', 'typing:start', 'typing:stop', 'presence:change'];
+  const events: RealtimeEvent[] = ['message:new', 'message:read', 'typing:start', 'typing:stop', 'presence:change', 'notification:new', 'notification:read', 'call:update', 'live:update'];
   const unsubscribers = events.map((event) => realtimeHub.subscribe(event, (payload) => {
     if (typeof payload === 'object' && payload !== null && 'allowedUserIds' in payload) {
       const allowedUserIds = (payload as { allowedUserIds?: unknown }).allowedUserIds;

@@ -43,7 +43,27 @@ describe('social platform features', () => {
 
     expect(response.status).toBe(201);
     expect(response.body.post.content).toBe('Hello NOVA!');
-    expect(response.body.post.author.email).toBe('alice@example.com');
+    expect(response.body.post.author.name).toBe('Alice');
+  });
+
+  it('does not publish content that requires moderator review', async () => {
+    await request(app).post('/api/auth/register').send({
+      name: 'Alice',
+      email: 'alice@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+    const login = await request(app).post('/api/auth/login').send({
+      email: 'alice@example.com',
+      password: 'Password123',
+    });
+
+    const response = await request(app)
+      .post('/api/posts')
+      .set('Cookie', getCookieHeader(login))
+      .send({ content: 'sexual '.repeat(37) });
+
+    expect(response.status).toBe(422);
   });
 
   it('unauthenticated user cannot create a post', async () => {
@@ -100,7 +120,7 @@ describe('social platform features', () => {
       password: 'Password123',
     });
 
-    const targetUser = (await request(app).get('/api/users')).body.users.find((user: { email: string }) => user.email === 'bob@example.com');
+    const targetUser = (await request(app).get('/api/users')).body.users.find((user: { name: string }) => user.name === 'Bob');
 
     const first = await request(app)
       .post(`/api/users/${targetUser.id}/follow`)
@@ -260,7 +280,7 @@ describe('social platform features', () => {
       password: 'Password123',
     });
 
-    const bobUser = (await request(app).get('/api/users')).body.users.find((user: { email: string }) => user.email === 'bob@example.com');
+    const bobUser = (await request(app).get('/api/users')).body.users.find((user: { name: string }) => user.name === 'Bob');
 
     const conversation = await request(app)
       .post('/api/conversations')
@@ -275,6 +295,101 @@ describe('social platform features', () => {
     expect(conversation.status).toBe(201);
     expect(message.status).toBe(201);
     expect(message.body.message.text).toContain('volunteer plan');
+  });
+
+  it('does not create a conversation with a missing user', async () => {
+    await request(app).post('/api/auth/register').send({
+      name: 'Alice',
+      email: 'alice@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+
+    const aliceLogin = await request(app).post('/api/auth/login').send({
+      email: 'alice@example.com',
+      password: 'Password123',
+    });
+
+    const response = await request(app)
+      .post('/api/conversations')
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ participantId: 'missing-user' });
+
+    expect(response.status).toBe(404);
+  });
+
+  it('creates a group conversation with all requested participants', async () => {
+    for (const user of [
+      { name: 'Alice', email: 'alice@example.com' },
+      { name: 'Bob', email: 'bob@example.com' },
+      { name: 'Cara', email: 'cara@example.com' },
+    ]) {
+      await request(app).post('/api/auth/register').send({
+        ...user,
+        password: 'Password123',
+        communityRulesAccepted: true,
+      });
+    }
+
+    const aliceLogin = await request(app).post('/api/auth/login').send({
+      email: 'alice@example.com',
+      password: 'Password123',
+    });
+    const users = (await request(app).get('/api/users')).body.users as { id: string; name: string }[];
+    const bob = users.find((user) => user.name === 'Bob')!;
+    const cara = users.find((user) => user.name === 'Cara')!;
+
+    const created = await request(app)
+      .post('/api/conversations')
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ participantIds: [bob.id, cara.id], name: 'Volunteer Team' });
+    const details = await request(app)
+      .get(`/api/conversations/${created.body.conversation.id}`)
+      .set('Cookie', getCookieHeader(aliceLogin));
+
+    expect(created.status).toBe(201);
+    expect(details.body.conversation.participants.map((participant: { userId: string }) => participant.userId).sort())
+      .toEqual([aliceLogin.body.user.id, bob.id, cara.id].sort());
+  });
+
+  it('prevents sending to a group member who has blocked the sender', async () => {
+    for (const user of [
+      { name: 'Alice', email: 'alice@example.com' },
+      { name: 'Bob', email: 'bob@example.com' },
+      { name: 'Cara', email: 'cara@example.com' },
+    ]) {
+      await request(app).post('/api/auth/register').send({
+        ...user,
+        password: 'Password123',
+        communityRulesAccepted: true,
+      });
+    }
+
+    const aliceLogin = await request(app).post('/api/auth/login').send({
+      email: 'alice@example.com',
+      password: 'Password123',
+    });
+    const caraLogin = await request(app).post('/api/auth/login').send({
+      email: 'cara@example.com',
+      password: 'Password123',
+    });
+    const users = (await request(app).get('/api/users')).body.users as { id: string; name: string }[];
+    const bob = users.find((user) => user.name === 'Bob')!;
+    const cara = users.find((user) => user.name === 'Cara')!;
+    const created = await request(app)
+      .post('/api/conversations')
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ participantIds: [bob.id, cara.id] });
+
+    await request(app)
+      .post(`/api/users/${aliceLogin.body.user.id}/block`)
+      .set('Cookie', getCookieHeader(caraLogin));
+    const response = await request(app)
+      .post(`/api/conversations/${created.body.conversation.id}/messages`)
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ text: 'A group update' });
+
+    expect(response.status).toBe(403);
   });
 
   it('report requires authentication', async () => {

@@ -1,4 +1,4 @@
-const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'https://nova-social-platform-api.onrender.com'
 
 if (import.meta.env.PROD && !configuredApiBaseUrl) {
   throw new Error('VITE_API_BASE_URL must be configured for production frontend builds.')

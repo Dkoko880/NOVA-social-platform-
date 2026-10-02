@@ -9,7 +9,7 @@ import { apiRequest, API_BASE_URL } from '../lib/api'
 type ConversationListItem = {
   id: string
   name: string | null
-  participants: Array<{ userId: string; role?: string; user?: { id: string; name: string; email: string } }>
+  participants: Array<{ userId: string; role?: string; user?: { id: string; name: string } }>
   lastMessagePreview: string | null
   updatedAt: string
   lastMessageAt: string | null
@@ -28,7 +28,7 @@ type MessageItem = {
   status?: string
 }
 
-type DirectoryUser = { id: string; name: string; email: string }
+type DirectoryUser = { id: string; name: string }
 
 export function MessagesPage() {
   const { user } = useAuth()
@@ -194,7 +194,7 @@ export function MessagesPage() {
                 {directory.map((directoryUser) => (
                   <button key={directoryUser.id} type="button" onClick={() => void createConversation(directoryUser.id)} className="w-full rounded-xl px-2 py-2 text-left hover:bg-slate-100">
                     <p className="text-sm font-medium text-slate-900">{directoryUser.name}</p>
-                    <p className="text-xs text-slate-500">{directoryUser.email}</p>
+                    <p className="text-xs text-slate-500">Open profile</p>
                   </button>
                 ))}
               </div>
@@ -220,7 +220,7 @@ export function MessagesPage() {
             ) : (
               conversations.filter((conversation) => {
                 const peer = conversation.participants.find((participant) => participant.userId !== user?.id)?.user
-                return `${conversation.name ?? ''} ${peer?.name ?? ''} ${peer?.email ?? ''}`.toLowerCase().includes(search.toLowerCase())
+                return `${conversation.name ?? ''} ${peer?.name ?? ''}`.toLowerCase().includes(search.toLowerCase())
               }).map((conversation) => {
                 const lastMessage = conversation.lastMessage ?? null
                 const peer = conversation.participants.find((participant) => participant.userId !== user?.id)?.user
@@ -234,7 +234,7 @@ export function MessagesPage() {
                       selectedId === conversation.id ? 'bg-violet-50 ring-1 ring-violet-100' : 'hover:bg-slate-100'
                     }`}
                   >
-                    <Avatar src={peer?.email ? `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(peer.name || peer.email)}` : 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80'} alt={peer?.name ?? 'conversation'} size="md" status="online" />
+                    <Avatar src={peer?.name ? `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(peer.name)}` : 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80'} alt={peer?.name ?? 'conversation'} size="md" status="online" />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
                         <p className="truncate font-medium text-slate-900">{conversation.name ?? peer?.name ?? 'Direct message'}</p>
@@ -261,10 +261,9 @@ export function MessagesPage() {
             <>
               <div className="flex items-center justify-between border-b border-slate-200 pb-4">
                 <div className="flex items-center gap-3">
-                  <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(activePeer.name || activePeer.email)}`} alt={activePeer.name} size="md" status="online" />
+                  <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(activePeer.name)}`} alt={activePeer.name} size="md" status="online" />
                   <div>
                     <p className="font-semibold text-slate-900">{activePeer.name}</p>
-                    <p className="text-xs text-slate-500">{activePeer.email}</p>
                   </div>
                 </div>
                 <Button variant="secondary" size="sm">View profile</Button>

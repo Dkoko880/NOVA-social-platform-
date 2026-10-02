@@ -8,7 +8,9 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
     "start:prod": "node dist/src/server.js",
-    "test": "vitest run",
+    "test": "NODE_ENV=test vitest run",
+    "provision:local": "NODE_ENV=development tsx src/scripts/provision-local.ts",
+    "provision:production": "NODE_ENV=production tsx src/scripts/provision-local.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev --name init",
@@ -26,7 +28,9 @@
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
+    "multer": "^2.4.0",
     "prisma": "^6.16.0",
+    "sharp": "^0.35.5",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -36,6 +40,7 @@
     "@types/express": "^5.0.0",
     "@types/jsonwebtoken": "^9.0.2",
     "@types/morgan": "^1.9.10",
+    "@types/multer": "^2.3.0",
     "@types/node": "^24.13.3",
     "@types/supertest": "^6.0.0",
     "supertest": "^7.0.0",

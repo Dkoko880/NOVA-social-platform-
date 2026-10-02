@@ -140,6 +140,7 @@ model User {
   notifications       Notification[] @relation("NotificationRecipient")
   conversationsOwnedBy Conversation[] @relation("ConversationOwner")
   messageSent          Message[] @relation("MessageSender")
+  messageReactions     MessageReaction[]
   conversationParticipants ConversationParticipant[]
   subscriptions       Subscription[]
   entitlements        Entitlement[]
@@ -317,6 +318,8 @@ model Post {
 model Conversation {
   id                 String   @id @default(cuid())
   name               String?
+  isChannel           Boolean  @default(false)
+  disappearingAfterSeconds Int @default(0)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
   lastMessageAt      DateTime?
@@ -339,6 +342,10 @@ model ConversationParticipant {
   joinedAt    DateTime  @default(now())
   lastReadAt  DateTime?
   leftAt      DateTime?
+  pinnedAt    DateTime?
+  archivedAt  DateTime?
+  starredAt   DateTime?
+  mutedUntil  DateTime?
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -358,14 +365,37 @@ model Message {
   readAt        DateTime?
   deletedAt     DateTime?
   status        MessageStatus @default(SENT)
+  contentType   String        @default("TEXT")
+  mediaUrl      String?
+  metadata      Json?
+  replyToId     String?
+  forwardedFromId String?
+  editedAt      DateTime?
+  expiresAt     DateTime?
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User         @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  reactions    MessageReaction[]
 
   @@index([conversationId, createdAt])
   @@index([senderId])
   @@index([readAt])
   @@index([status])
+  @@index([expiresAt])
+}
+
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  type      String
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, type])
+  @@index([messageId])
 }
 
 model Comment {
@@ -563,6 +593,8 @@ model Community {
   slug        String   @unique
   description String?
   avatarUrl   String?
+  type        CommunityType @default(COMMUNITY)
+  isPrivate   Boolean       @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -572,6 +604,12 @@ model Community {
 
   @@index([ownerId])
   @@index([name])
+}
+
+enum CommunityType {
+  GROUP
+  COMMUNITY
+  CHANNEL
 }
 
 model CommunityMember {

@@ -53,6 +53,21 @@ describe('admin and moderation routes', () => {
     expect(response.status).toBe(403);
   });
 
+  it('suspended administrator cannot access admin APIs', async () => {
+    const { login } = await makeUser({
+      email: 'suspended-admin@example.com',
+      name: 'Suspended Admin',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+    });
+
+    const response = await request(app)
+      .get('/api/admin/dashboard')
+      .set('Cookie', getCookieHeader(login));
+
+    expect(response.status).toBe(403);
+  });
+
   it('MODERATOR cannot perform ADMIN-only action', async () => {
     const { user, login } = await makeUser({ email: 'mod@example.com', name: 'Moderator', role: 'MODERATOR' });
     const target = await makeUser({ email: 'target@example.com', name: 'Target', role: 'USER' });
