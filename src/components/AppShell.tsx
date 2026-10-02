@@ -11,8 +11,11 @@ import {
   Settings,
   ShieldCheck,
   UserRound,
-  Users,
   BriefcaseBusiness,
+  Radio,
+  Phone,
+  Sparkles,
+  UsersRound,
 } from 'lucide-react'
 import { Avatar } from './ui/Avatar'
 import { cn } from '../utils/cn'
@@ -26,12 +29,15 @@ type AppShellProps = {
 export const sidebarItems = [
   { label: 'Home', path: '/', icon: House },
   { label: 'Explore', path: '/explore', icon: Compass },
-  { label: 'Create', path: '/create', icon: PlusSquare },
-  { label: 'Notifications', path: '/notifications', icon: Bell, badge: '5' },
+  { label: 'Live', path: '/live', icon: Radio },
   { label: 'Messages', path: '/messages', icon: MessageCircleMore },
-  { label: 'Communities', path: '/communities', icon: Users },
+  { label: 'Calls', path: '/calls', icon: Phone },
+  { label: 'Groups', path: '/communities', icon: UsersRound },
+  { label: 'AI Studio', path: '/ai', icon: Sparkles },
   { label: 'Profile', path: '/profile', icon: UserRound },
   { label: 'Settings', path: '/settings', icon: Settings },
+  { label: 'Create', path: '/create', icon: PlusSquare },
+  { label: 'Notifications', path: '/notifications', icon: Bell, badge: '5' },
 ]
 
 export function AppShell({ children }: AppShellProps) {
@@ -52,21 +58,21 @@ export function AppShell({ children }: AppShellProps) {
     }
   }
 
-  const userName = user?.name ?? 'NOVA User'
-  const userHandle = user?.email ?? 'nova@example.com'
+  const userName = user?.name ?? 'NOVAKOKO User'
+  const userHandle = user?.email ?? 'member@novakoko.com'
   const userAvatar = 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=80'
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900">
-      <div className="mx-auto flex min-h-screen max-w-[1600px] gap-4 p-3 sm:p-4 lg:gap-6">
-        <aside className="hidden w-[260px] shrink-0 rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm lg:flex lg:flex-col">
+    <div className="min-h-screen text-slate-900">
+      <div className="mx-auto flex min-h-screen max-w-[1600px] gap-4 p-3 pb-24 sm:p-4 lg:gap-6 lg:pb-4">
+        <aside className="hidden w-[250px] shrink-0 rounded-[28px] border border-white/80 bg-white/85 p-4 shadow-[0_20px_70px_-42px_rgba(48,37,116,.32)] backdrop-blur lg:flex lg:flex-col">
           <div className="mb-8 flex items-center gap-3 px-2">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-600 via-indigo-500 to-cyan-500 text-lg font-black text-white shadow-lg shadow-violet-200">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 via-violet-600 to-fuchsia-500 text-lg font-black text-white shadow-lg shadow-violet-200">
               N
             </div>
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-violet-600">NOVA</p>
-              <p className="text-sm text-slate-500">Together, safely</p>
+              <p className="text-xs font-bold uppercase tracking-[0.2em] text-indigo-700">NOVAKOKO</p>
+              <p className="text-xs text-slate-500">Your world, closer</p>
             </div>
           </div>
 
@@ -78,7 +84,7 @@ export function AppShell({ children }: AppShellProps) {
                 className={({ isActive }) =>
                   cn(
                     'group flex items-center justify-between rounded-2xl px-3 py-3 text-sm font-medium transition-colors',
-                    isActive ? 'bg-violet-50 text-violet-700 ring-1 ring-violet-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900',
+                    isActive ? 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900',
                   )
                 }
               >
@@ -87,7 +93,7 @@ export function AppShell({ children }: AppShellProps) {
                   {label}
                 </span>
                 {badge ? (
-                  <span className="rounded-full bg-violet-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                  <span className="rounded-full bg-indigo-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
                     {badge}
                   </span>
                 ) : null}
@@ -95,7 +101,7 @@ export function AppShell({ children }: AppShellProps) {
             ))}
           </nav>
 
-          <div className="mt-auto rounded-3xl border border-violet-100 bg-gradient-to-r from-violet-50 to-indigo-50 p-4">
+          <div className="mt-auto rounded-3xl border border-indigo-100 bg-gradient-to-r from-indigo-50 to-violet-50 p-4">
             <div className="flex items-center gap-3">
               <Avatar src={userAvatar} alt={userName} size="sm" />
               <div className="min-w-0">
@@ -124,7 +130,7 @@ export function AppShell({ children }: AppShellProps) {
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="rounded-[28px] border border-slate-200 bg-white shadow-sm">
+          <div className="min-h-[calc(100vh-2rem)] overflow-hidden rounded-[28px] border border-white/80 bg-white/90 shadow-[0_20px_70px_-42px_rgba(48,37,116,.32)] backdrop-blur">
             <TopBar currentPath={location.pathname} />
             <div>{children}</div>
           </div>
@@ -174,6 +180,9 @@ function TopBar({ currentPath }: TopBarProps) {
     '/create': 'Create',
     '/notifications': 'Notifications',
     '/messages': 'Messages',
+    '/live': 'Live rooms',
+    '/calls': 'Calls',
+    '/ai': 'AI Studio',
     '/communities': 'Communities',
     '/profile': 'Profile',
     '/settings': 'Settings',
@@ -185,15 +194,15 @@ function TopBar({ currentPath }: TopBarProps) {
   return (
     <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3 sm:px-6">
       <div>
-        <p className="text-xs font-semibold uppercase tracking-[0.3em] text-violet-600">NOVA</p>
-        <h1 className="text-xl font-semibold text-slate-900">{labels[currentPath] ?? 'NOVA'}</h1>
+        <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-indigo-600">NOVAKOKO</p>
+        <h1 className="text-xl font-semibold text-slate-900">{labels[currentPath] ?? 'NOVAKOKO'}</h1>
       </div>
       <div className="flex items-center gap-2">
         <Button variant="secondary" size="sm" className="hidden sm:inline-flex">
           Invite friends
         </Button>
-        <Button variant="primary" size="sm">
-          + New post
+        <Button variant="primary" size="sm" className="!rounded-full !bg-indigo-600 hover:!bg-indigo-700">
+          + Create
         </Button>
       </div>
     </header>
@@ -201,17 +210,19 @@ function TopBar({ currentPath }: TopBarProps) {
 }
 
 function MobileNavigation() {
+  const mobileItems = sidebarItems.filter(({ path }) => ['/', '/explore', '/live', '/messages', '/profile'].includes(path))
+
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 px-2 py-2 backdrop-blur lg:hidden">
-      <div className="mx-auto grid max-w-md grid-cols-5 gap-2">
-        {sidebarItems.slice(0, 5).map(({ label, path, icon: Icon }) => (
+    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-indigo-100/80 bg-white/90 px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl lg:hidden">
+      <div className="mx-auto grid max-w-lg grid-cols-5 gap-1">
+        {mobileItems.map(({ label, path, icon: Icon }) => (
           <NavLink
             key={path}
             to={path}
             className={({ isActive }) =>
               cn(
                 'flex flex-col items-center justify-center gap-1 rounded-2xl px-2 py-2 text-[11px] font-medium transition-colors',
-                isActive ? 'bg-violet-50 text-violet-700' : 'text-slate-500 hover:text-slate-900',
+                isActive ? 'bg-indigo-50 text-indigo-700' : 'text-slate-500 hover:text-slate-900',
               )
             }
           >

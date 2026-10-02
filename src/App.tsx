@@ -12,6 +12,9 @@ import { SettingsPage } from './pages/SettingsPage'
 import { AuthPage } from './pages/AuthPage'
 import { AdminPage } from './pages/AdminPage'
 import { DownloadPage } from './pages/DownloadPage'
+import { LivePage } from './pages/LivePage'
+import { CallsPage } from './pages/CallsPage'
+import { AiPage } from './pages/AiPage'
 
 function PublicRoute() {
   const { isAuthenticated, isLoading } = useAuth()
@@ -74,6 +77,9 @@ function AppRoutes() {
         <Route path="/create" element={<AppShell><CreatePage /></AppShell>} />
         <Route path="/notifications" element={<AppShell><NotificationsPage /></AppShell>} />
         <Route path="/messages" element={<AppShell><MessagesPage /></AppShell>} />
+        <Route path="/live" element={<AppShell><LivePage /></AppShell>} />
+        <Route path="/calls" element={<AppShell><CallsPage /></AppShell>} />
+        <Route path="/ai" element={<AppShell><AiPage /></AppShell>} />
         <Route path="/communities" element={<AppShell><CommunitiesPage /></AppShell>} />
         <Route path="/profile" element={<AppShell><ProfilePage /></AppShell>} />
         <Route path="/settings" element={<AppShell><SettingsPage /></AppShell>} />

@@ -231,7 +231,7 @@ export function MessagesPage() {
                     type="button"
                     onClick={() => setSelectedId(conversation.id)}
                     className={`flex w-full items-center gap-3 rounded-[20px] p-3 text-left transition ${
-                      selectedId === conversation.id ? 'bg-violet-50 ring-1 ring-violet-100' : 'hover:bg-slate-100'
+                      selectedId === conversation.id ? 'bg-indigo-50 ring-1 ring-indigo-100' : 'hover:bg-slate-100'
                     }`}
                   >
                     <Avatar src={peer?.name ? `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(peer.name)}` : 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80'} alt={peer?.name ?? 'conversation'} size="md" status="online" />
@@ -243,7 +243,7 @@ export function MessagesPage() {
                       <p className="truncate text-xs text-slate-500">{lastMessage?.text ?? conversation.lastMessagePreview ?? 'Start the conversation'}</p>
                     </div>
                     {lastMessage && lastMessage.senderId !== user?.id && !lastMessage.readAt ? (
-                      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-violet-600 text-[10px] font-semibold text-white">1</span>
+                      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-600 text-[10px] font-semibold text-white">1</span>
                     ) : null}
                   </button>
                 )
@@ -280,9 +280,9 @@ export function MessagesPage() {
                     const isOwn = message.senderId === user?.id
                     return (
                       <div key={message.id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
-                        <div className={`max-w-md rounded-2xl px-4 py-3 text-sm ${isOwn ? 'bg-violet-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
+                        <div className={`max-w-md rounded-2xl px-4 py-3 text-sm ${isOwn ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
                           <p>{message.text}</p>
-                          <div className={`mt-1 text-[10px] ${isOwn ? 'text-violet-100' : 'text-slate-500'}`}>
+                          <div className={`mt-1 text-[10px] ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>
                             {new Date(message.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
                             {isOwn ? ` · ${message.readAt ? 'Read' : 'Sent'}` : ''}
                           </div>

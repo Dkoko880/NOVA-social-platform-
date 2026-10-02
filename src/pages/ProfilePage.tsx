@@ -37,7 +37,7 @@ export function ProfilePage() {
     })
   }, [user])
 
-  const displayName = profile?.profile?.displayName ?? user?.name ?? 'NOVA user'
+  const displayName = profile?.profile?.displayName ?? user?.name ?? 'NOVAKOKO user'
   const avatar = profile?.profile?.avatarUrl ?? `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(displayName)}`
 
   return (
@@ -54,7 +54,7 @@ export function ProfilePage() {
                 <div>
                   <div className="flex items-center gap-2">
                     <h2 className="text-2xl font-semibold text-slate-900">{displayName}</h2>
-                    <ShieldCheck className="h-5 w-5 text-violet-600" aria-hidden="true" />
+                    <ShieldCheck className="h-5 w-5 text-indigo-600" aria-hidden="true" />
                   </div>
                   <p className="text-sm text-slate-500">@{profile?.handle ?? user?.username ?? user?.email?.split('@')[0] ?? user?.phoneE164 ?? 'member'}</p>
                 </div>
@@ -70,7 +70,7 @@ export function ProfilePage() {
             </div>
 
             <p className="mt-5 max-w-2xl text-sm leading-7 text-slate-600">
-              {profile?.profile?.bio ?? 'Share your story with the NOVA community.'}
+              {profile?.profile?.bio ?? 'Share your story with the NOVAKOKO community.'}
             </p>
 
             <div className="mt-4 flex flex-wrap items-center gap-5 text-sm text-slate-500">

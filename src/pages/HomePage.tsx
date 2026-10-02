@@ -47,8 +47,8 @@ export function HomePage() {
               </p>
             </div>
             <Link to="/explore">
-              <Button variant="secondary" className="bg-white text-violet-700 hover:bg-violet-50">
-                Explore NOVA <ArrowRight className="h-4 w-4" aria-hidden="true" />
+              <Button variant="secondary" className="bg-white text-indigo-700 hover:bg-indigo-50">
+                Explore NOVAKOKO <ArrowRight className="h-4 w-4" aria-hidden="true" />
               </Button>
             </Link>
           </div>
@@ -79,7 +79,7 @@ export function HomePage() {
 
         <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
           <div className="flex items-start gap-3">
-            <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(user?.name ?? 'NOVA')}`} alt={user?.name ?? 'NOVA'} size="md" />
+            <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(user?.name ?? 'NOVAKOKO')}`} alt={user?.name ?? 'NOVAKOKO'} size="md" />
             <div className="flex-1 rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-3">
               <p className="text-sm font-medium text-slate-500">Share something with your community…</p>
             </div>
@@ -145,7 +145,7 @@ export function HomePage() {
             <p className="font-semibold">Safety-first culture</p>
           </div>
           <p className="mt-3 text-sm leading-6 text-slate-600">
-            Sexual/adult content, harassment, scams and abusive behavior are prohibited. NOVA helps keep every space supportive and safe.
+            Sexual/adult content, harassment, scams and abusive behavior are prohibited. NOVAKOKO helps keep every space supportive and safe.
           </p>
           <div className="mt-4 flex items-center gap-2 text-sm text-slate-600">
             <Clock3 className="h-4 w-4 text-violet-600" aria-hidden="true" />

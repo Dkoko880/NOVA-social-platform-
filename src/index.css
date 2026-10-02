@@ -1,9 +1,11 @@
+@import 'tailwindcss';
+
 :root {
-  font-family: Inter, 'Segoe UI', sans-serif;
+  font-family: 'Avenir Next', Avenir, 'Segoe UI', sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  color: #0f172a;
-  background: #f1f5f9;
+  color: #191a2d;
+  background: #f4f4fa;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -23,7 +25,9 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+  background:
+    radial-gradient(ellipse at 12% 0%, rgba(213, 204, 255, 0.34), transparent 35rem),
+    linear-gradient(180deg, #f8f8fc 0%, #f0f0f8 100%);
 }
 
 img {

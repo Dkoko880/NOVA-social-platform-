@@ -53,7 +53,7 @@ export function NotificationsPage() {
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="text-sm text-slate-700">
-                    <span className="font-semibold text-slate-900">NOVA</span> {item.message}
+                    <span className="font-semibold text-slate-900">NOVAKOKO</span> {item.message}
                   </p>
                   <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
                     <span>{config.label}</span>

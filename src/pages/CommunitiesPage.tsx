@@ -177,7 +177,7 @@ export function CommunitiesPage() {
     <div className="space-y-5 p-4 sm:p-6">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-700">Groups, communities, channels</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-indigo-700">Groups, communities, channels</p>
           <h2 className="mt-1 text-2xl font-semibold text-slate-900">Your spaces</h2>
         </div>
         <Button variant="primary" size="sm" icon={<Plus className="h-4 w-4" aria-hidden="true" />} onClick={() => setShowCreate((current) => !current)}>
@@ -188,7 +188,7 @@ export function CommunitiesPage() {
       {error ? <p role="status" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p> : null}
 
       {showCreate ? (
-        <section className="grid gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-2">
+        <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:grid-cols-2">
           <label className="text-sm font-medium text-slate-700">Name
             <input value={name} onChange={(event) => setName(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal" maxLength={80} />
           </label>
@@ -212,10 +212,10 @@ export function CommunitiesPage() {
             <span className="text-xs text-slate-500">{communities.length} spaces</span>
           </div>
           {loading ? <p className="text-sm text-slate-500">Loading spaces…</p> : communities.length === 0 ? <p className="rounded-xl border border-dashed border-slate-300 p-5 text-sm text-slate-500">No spaces yet.</p> : (
-            <div className="divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white">
+            <div className="divide-y divide-slate-200 rounded-2xl border border-slate-200 bg-white">
               {communities.map((community) => (
-                <article key={community.id} className={`flex items-center gap-3 p-3 ${selected?.id === community.id ? 'bg-emerald-50' : ''}`}>
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-emerald-800">
+                <article key={community.id} className={`flex items-center gap-3 p-3 ${selected?.id === community.id ? 'bg-indigo-50' : ''}`}>
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-700">
                     {community.isPrivate ? <LockKeyhole className="h-4 w-4" /> : community.type === 'CHANNEL' ? <Megaphone className="h-4 w-4" /> : community.type === 'GROUP' ? <Users className="h-4 w-4" /> : <Globe2 className="h-4 w-4" />}
                   </div>
                   <button type="button" className="min-w-0 flex-1 text-left" onClick={() => void openCommunity(community.id)}>
@@ -229,11 +229,11 @@ export function CommunitiesPage() {
           )}
         </section>
 
-        <section className="min-w-0 rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
+        <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
           {!selected ? <div className="flex min-h-48 flex-col items-center justify-center text-center text-slate-500"><Users className="h-6 w-6" /><p className="mt-2 text-sm">Select a space to view its members and announcements.</p></div> : (
             <>
               <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 pb-4">
-                <div><p className="text-xs font-semibold uppercase text-emerald-700">{typeLabels[selected.type]}{selected.isPrivate ? ' · Private' : ''}</p><h3 className="mt-1 text-xl font-semibold text-slate-900">{selected.name}</h3><p className="mt-1 text-sm text-slate-600">{selected.description}</p><p className="mt-2 text-xs text-slate-500">{selected.memberCount} members</p></div>
+                <div><p className="text-xs font-semibold uppercase text-indigo-700">{typeLabels[selected.type]}{selected.isPrivate ? ' · Private' : ''}</p><h3 className="mt-1 text-xl font-semibold text-slate-900">{selected.name}</h3><p className="mt-1 text-sm text-slate-600">{selected.description}</p><p className="mt-2 text-xs text-slate-500">{selected.memberCount} members</p></div>
                 <div className="flex flex-wrap gap-2">
                   {selected.joined && selected.myRole !== 'OWNER' ? <Button variant="secondary" size="sm" onClick={() => void leaveCommunity()}>Leave</Button> : null}
                   {!selected.joined ? <Button variant="primary" size="sm" onClick={() => void joinCommunity(selected.id)}>Join</Button> : null}
@@ -253,7 +253,7 @@ export function CommunitiesPage() {
               ) : null}
 
               <div className="mt-5 grid gap-5 md:grid-cols-2">
-                <div><h4 className="flex items-center gap-2 text-sm font-semibold text-slate-900"><Shield className="h-4 w-4 text-emerald-700" />Members</h4><ul className="mt-2 divide-y divide-slate-100">{selected.members.map((member) => <li key={member.userId} className="flex items-center justify-between gap-2 py-2 text-sm"><span className="min-w-0 truncate text-slate-700">{member.user?.name ?? member.userId}</span><div className="flex shrink-0 items-center gap-2"><span className="text-xs text-slate-500">{member.role.toLowerCase()}</span>{canModerate && member.role !== 'OWNER' ? <><Button variant="ghost" size="sm" icon={<Shield className="h-3.5 w-3.5" />} onClick={() => void updateMemberRole(member)} aria-label={member.role === 'MODERATOR' ? 'Remove moderator role' : 'Make moderator'} /><Button variant="ghost" size="sm" icon={<UserMinus className="h-3.5 w-3.5" />} onClick={() => void removeMember(member.userId)} aria-label="Remove member" /></> : null}</div></li>)}</ul></div>
+                <div><h4 className="flex items-center gap-2 text-sm font-semibold text-slate-900"><Shield className="h-4 w-4 text-indigo-700" />Members</h4><ul className="mt-2 divide-y divide-slate-100">{selected.members.map((member) => <li key={member.userId} className="flex items-center justify-between gap-2 py-2 text-sm"><span className="min-w-0 truncate text-slate-700">{member.user?.name ?? member.userId}</span><div className="flex shrink-0 items-center gap-2"><span className="text-xs text-slate-500">{member.role.toLowerCase()}</span>{canModerate && member.role !== 'OWNER' ? <><Button variant="ghost" size="sm" icon={<Shield className="h-3.5 w-3.5" />} onClick={() => void updateMemberRole(member)} aria-label={member.role === 'MODERATOR' ? 'Remove moderator role' : 'Make moderator'} /><Button variant="ghost" size="sm" icon={<UserMinus className="h-3.5 w-3.5" />} onClick={() => void removeMember(member.userId)} aria-label="Remove member" /></> : null}</div></li>)}</ul></div>
                 <div><h4 className="text-sm font-semibold text-slate-900">Announcements</h4><ul className="mt-2 space-y-2">{selected.posts.map((post) => <li key={post.id} className="rounded-lg bg-slate-50 p-3"><p className="whitespace-pre-wrap text-sm text-slate-700">{post.content}</p><time className="mt-1 block text-[11px] text-slate-500">{new Date(post.createdAt).toLocaleString()}</time></li>)}{selected.posts.length === 0 ? <li className="text-sm text-slate-500">No announcements yet.</li> : null}</ul></div>
               </div>
             </>

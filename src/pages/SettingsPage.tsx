@@ -69,14 +69,14 @@ export function SettingsPage() {
     <div className="p-4 sm:p-6">
       <div className="mx-auto max-w-5xl rounded-[32px] border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
         <div>
-          <p className="text-xs uppercase tracking-[0.28em] text-violet-600">Preferences</p>
+          <p className="text-xs uppercase tracking-[0.28em] text-indigo-600">Preferences</p>
           <h2 className="mt-2 text-2xl font-semibold text-slate-900">Settings</h2>
         </div>
 
         <section className="mt-6 border-t border-slate-200 pt-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <MonitorSmartphone className="h-5 w-5 text-violet-700" aria-hidden="true" />
+              <MonitorSmartphone className="h-5 w-5 text-indigo-700" aria-hidden="true" />
               <div>
                 <h3 className="font-semibold text-slate-900">Active sessions</h3>
                 <p className="text-sm text-slate-500">Devices currently signed in to your account.</p>
@@ -108,7 +108,7 @@ export function SettingsPage() {
             return (
               <section key={group.id} className="rounded-[24px] border border-slate-200 bg-slate-50 p-4">
                 <div className="mb-4 flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-violet-700 shadow-sm">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-indigo-700 shadow-sm">
                     <Icon className="h-4 w-4" aria-hidden="true" />
                   </div>
                   <p className="font-semibold text-slate-900">{group.title}</p>
@@ -117,7 +117,7 @@ export function SettingsPage() {
                   {group.items.map((item) => (
                     <div key={item.label} className="flex items-center justify-between gap-3 rounded-2xl bg-white px-3 py-3 text-sm">
                       <span className="text-slate-700">{item.label}</span>
-                      <span className={`inline-flex items-center gap-2 ${item.highlight ? 'font-semibold text-violet-700' : 'text-slate-500'}`}>
+                      <span className={`inline-flex items-center gap-2 ${item.highlight ? 'font-semibold text-indigo-700' : 'text-slate-500'}`}>
                         {item.value}
                         <ChevronRight className="h-4 w-4" aria-hidden="true" />
                       </span>

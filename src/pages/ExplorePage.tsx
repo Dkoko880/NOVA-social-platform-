@@ -16,7 +16,7 @@ export function ExplorePage() {
     <div className="space-y-6 p-4 sm:p-6">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
-          <p className="text-xs uppercase tracking-[0.28em] text-violet-600">Discover</p>
+          <p className="text-xs uppercase tracking-[0.28em] text-indigo-600">Discover</p>
           <h2 className="mt-2 text-2xl font-semibold text-slate-900">Explore what matters to you</h2>
         </div>
         <Button variant="secondary" size="sm" icon={<Filter className="h-4 w-4" aria-hidden="true" />}>
@@ -31,7 +31,7 @@ export function ExplorePage() {
           <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between">
               <p className="font-semibold text-slate-900">Trending topics</p>
-              <Sparkles className="h-4 w-4 text-violet-600" aria-hidden="true" />
+              <Sparkles className="h-4 w-4 text-indigo-600" aria-hidden="true" />
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
               {filteredTopics.length ? (
@@ -39,7 +39,7 @@ export function ExplorePage() {
                   <button
                     key={topic}
                     type="button"
-                    className="rounded-full border border-violet-100 bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700 transition hover:bg-violet-100"
+                    className="rounded-full border border-indigo-100 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100"
                   >
                     #{topic}
                   </button>
@@ -86,7 +86,7 @@ export function ExplorePage() {
           <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between">
               <p className="font-semibold text-slate-900">Recommended users</p>
-              <UsersRound className="h-4 w-4 text-violet-600" aria-hidden="true" />
+              <UsersRound className="h-4 w-4 text-indigo-600" aria-hidden="true" />
             </div>
             <div className="mt-4 space-y-3">
               {recommendedUsers.map((person) => (
@@ -107,7 +107,7 @@ export function ExplorePage() {
           <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between">
               <p className="font-semibold text-slate-900">Recommended communities</p>
-              <Users className="h-4 w-4 text-violet-600" aria-hidden="true" />
+              <Users className="h-4 w-4 text-indigo-600" aria-hidden="true" />
             </div>
             <div className="mt-4 space-y-3">
               {communities.slice(0, 2).map((community) => (
