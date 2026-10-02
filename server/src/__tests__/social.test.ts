@@ -91,13 +91,24 @@ describe('social platform features', () => {
       email: 'alice@example.com',
       password: 'Password123',
     });
+    const bobLogin = await request(app).post('/api/auth/login').send({
+      email: 'bob@example.com',
+      password: 'Password123',
+    });
+    const bobUser = (await request(app).get('/api/users')).body.users.find((user: { name: string }) => user.name === 'Bob');
+    const post = await request(app)
+      .post('/api/posts')
+      .set('Cookie', getCookieHeader(bobLogin))
+      .send({ content: 'Bob post for Alice feed' });
 
     const target = await request(app)
-      .post(`/api/users/${(await request(app).get('/api/users')).body.users[1].id}/follow`)
+      .post(`/api/users/${bobUser.id}/follow`)
       .set('Cookie', getCookieHeader(aliceLogin));
 
     expect(target.status).toBe(200);
     expect(target.body.following).toBe(true);
+    const feed = await request(app).get('/api/posts').set('Cookie', getCookieHeader(aliceLogin));
+    expect(feed.body.posts.find((entry: { id: string }) => entry.id === post.body.post.id).authorFollowing).toBe(true);
   });
 
   it('duplicate follow is prevented', async () => {
@@ -342,6 +353,10 @@ describe('social platform features', () => {
     expect(conversation.status).toBe(201);
     expect(message.status).toBe(201);
     expect(message.body.message.text).toContain('volunteer plan');
+    const refreshed = await request(app)
+      .get(`/api/conversations/${conversation.body.conversation.id}/messages`)
+      .set('Cookie', getCookieHeader(aliceLogin));
+    expect(refreshed.body.messages.some((entry: { id: string }) => entry.id === message.body.message.id)).toBe(true);
   });
 
   it('does not create a conversation with a missing user', async () => {

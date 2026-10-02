@@ -292,6 +292,7 @@ async function serializePost(post: any, currentUserId?: string) {
     reactionCounts,
     currentUserReaction,
     userReaction: currentUserReaction,
+    authorFollowing: currentUserId ? await isFollowing(currentUserId, post.authorId ?? post.author?.id) : false,
   };
 }
 

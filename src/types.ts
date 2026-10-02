@@ -28,6 +28,7 @@ export type Post = {
   saved: number
   category?: string
   currentUserReaction?: string | null
+  authorFollowing?: boolean
 }
 
 export type NotificationItem = {

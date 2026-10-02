@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { MessageCircle, Share2, ShieldAlert, ThumbsUp, Trash2 } from 'lucide-react'
 import { Avatar } from './ui/Avatar'
@@ -23,6 +23,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
   const { user } = useAuth()
   const [likes, setLikes] = useState(post.likes)
   const [liked, setLiked] = useState(post.currentUserReaction === 'LIKE')
+  const [authorFollowing, setAuthorFollowing] = useState(post.authorFollowing ?? false)
   const [comments, setComments] = useState<CommentRecord[]>([])
   const [commentCount, setCommentCount] = useState(post.comments)
   const [commentDraft, setCommentDraft] = useState('')
@@ -32,6 +33,13 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const isOwnPost = user?.id === post.author.id
+
+  useEffect(() => {
+    setLikes(post.likes)
+    setLiked(post.currentUserReaction === 'LIKE')
+    setCommentCount(post.comments)
+    setAuthorFollowing(post.authorFollowing ?? false)
+  }, [post.authorFollowing, post.comments, post.currentUserReaction, post.likes])
 
   const toggleLike = async () => {
     if (busy) return
@@ -108,6 +116,23 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     }
   }
 
+  const toggleFollowAuthor = async () => {
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const response = await apiRequest<{ following: boolean }>(`/api/users/${encodeURIComponent(post.author.id)}/follow`, {
+        method: authorFollowing ? 'DELETE' : 'POST',
+      })
+      setAuthorFollowing(response.following)
+      setNotice(response.following ? `Following @${post.author.handle}.` : `Unfollowed @${post.author.handle}.`)
+    } catch (followError) {
+      setError(followError instanceof Error ? followError.message : 'Unable to update follow status.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const reportPost = async () => {
     const reason = window.prompt('Why are you reporting this post?')
     if (!reason || reason.trim().length < 4) return
@@ -149,6 +174,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
           </div>
         </Link>
         <div className="flex items-center gap-1">
+          {!isOwnPost ? <button type="button" onClick={() => void toggleFollowAuthor()} disabled={busy} aria-label={authorFollowing ? `Unfollow ${post.author.name}` : `Follow ${post.author.name}`} className="rounded-xl px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-50 disabled:opacity-50">{authorFollowing ? 'Following' : 'Follow'}</button> : null}
           <button type="button" onClick={() => void sharePost()} aria-label="Share post" title="Share post" className="rounded-full p-2 text-slate-500 hover:bg-slate-100">
             <Share2 className="h-4 w-4" aria-hidden="true" />
           </button>
