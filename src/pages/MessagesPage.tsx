@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { Archive, Image, Pin, Search, SendHorizontal, Star, VolumeX } from 'lucide-react'
+import { Archive, ArrowLeft, Image, Megaphone, MessageCircleMore, Phone, Pin, Search, SendHorizontal, Star, UsersRound, VolumeX } from 'lucide-react'
 import { Avatar } from '../components/ui/Avatar'
 import { Button } from '../components/ui/Button'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -53,6 +53,7 @@ export function MessagesPage() {
   const [error, setError] = useState('')
   const [sending, setSending] = useState(false)
   const [search, setSearch] = useState('')
+  const [conversationFilter, setConversationFilter] = useState<'all' | 'unread' | 'groups'>('all')
   const [messageSearch, setMessageSearch] = useState('')
   const [searchResults, setSearchResults] = useState<MessageItem[] | null>(null)
   const [showNew, setShowNew] = useState(false)
@@ -188,11 +189,15 @@ export function MessagesPage() {
   const activePeer = useMemo(() => activeConversation?.participants.find((participant) => participant.userId !== user?.id)?.user ?? null, [activeConversation, user])
   const visibleConversations = useMemo(() => conversations
     .filter((conversation) => showArchived || !conversation.archivedAt)
+    .filter((conversation) => conversationFilter === 'all'
+      || (conversationFilter === 'unread'
+        ? Boolean(conversation.lastMessage && conversation.lastMessage.senderId !== user?.id && !conversation.lastMessage.readAt)
+        : conversation.participants.length > 2 || Boolean(conversation.name)))
     .filter((conversation) => {
       const peer = conversation.participants.find((participant) => participant.userId !== user?.id)?.user
       return `${conversation.name ?? ''} ${peer?.name ?? ''}`.toLowerCase().includes(search.toLowerCase())
     })
-    .sort((left, right) => Number(Boolean(right.pinnedAt)) - Number(Boolean(left.pinnedAt)) || new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()), [conversations, search, showArchived, user?.id])
+    .sort((left, right) => Number(Boolean(right.pinnedAt)) - Number(Boolean(left.pinnedAt)) || new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()), [conversations, conversationFilter, search, showArchived, user?.id])
 
   const loadOlderMessages = async () => {
     if (!selectedId || !messages[0] || loadingOlder) return
@@ -342,12 +347,25 @@ export function MessagesPage() {
   }
 
   return (
-    <div className="p-4 sm:p-6">
-      <div className="mx-auto grid max-w-6xl overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-sm lg:grid-cols-[340px_minmax(0,1fr)]">
-        <aside className="border-b border-slate-200 bg-slate-50 p-4 lg:border-b-0 lg:border-r">
+    <div className="space-y-4 p-3 sm:p-6">
+      <header className="mx-auto max-w-6xl rounded-[24px] bg-gradient-to-r from-[#10214f] via-blue-800 to-indigo-700 p-4 text-white shadow-lg shadow-blue-950/10 sm:p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div><p className="text-xs font-semibold uppercase tracking-[0.22em] text-sky-200">NOVAKOKO Connect</p><h2 className="mt-1 text-xl font-semibold sm:text-2xl">Messages</h2></div>
+          <p className="text-sm text-blue-100">Your chats, groups, and communities in one place.</p>
+        </div>
+        <nav aria-label="Communication sections" className="mt-4 flex gap-2 overflow-x-auto pb-1">
+          <Link to="/messages" aria-current="page" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-blue-800"><MessageCircleMore className="h-4 w-4" aria-hidden="true" />Chats</Link>
+          <Link to="/communities?type=GROUP" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><UsersRound className="h-4 w-4" aria-hidden="true" />Groups</Link>
+          <Link to="/communities?type=COMMUNITY" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><UsersRound className="h-4 w-4" aria-hidden="true" />Communities</Link>
+          <Link to="/communities?type=CHANNEL" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><Megaphone className="h-4 w-4" aria-hidden="true" />Channels</Link>
+          <Link to="/calls" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><Phone className="h-4 w-4" aria-hidden="true" />Calls</Link>
+        </nav>
+      </header>
+      <div className="mx-auto grid max-w-6xl overflow-hidden rounded-[26px] border border-blue-100 bg-white shadow-[0_18px_60px_-38px_rgba(18,35,87,.35)] lg:grid-cols-[340px_minmax(0,1fr)]">
+        <aside className={`${selectedId ? 'hidden lg:block' : 'block'} min-w-0 border-b border-blue-100 bg-slate-50/80 p-4 lg:border-b-0 lg:border-r`}>
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-xl font-semibold text-slate-900">Messages</h2>
-            <Button variant="secondary" size="sm" onClick={() => void openNewConversation()}>New</Button>
+            <div><h3 className="text-lg font-semibold text-slate-900">Chats</h3><p className="text-xs text-slate-500">Private and group conversations</p></div>
+            <Button variant="primary" size="sm" onClick={() => void openNewConversation()}>New chat</Button>
           </div>
 
           {showNew ? (
@@ -376,6 +394,17 @@ export function MessagesPage() {
             <Search className="h-4 w-4" aria-hidden="true" />
             <input aria-label="Search conversations" placeholder="Search conversations" value={search} onChange={(event) => setSearch(event.target.value)} className="w-full border-0 bg-transparent text-slate-800 placeholder:text-slate-400 focus:outline-none" />
           </label>
+          <div className="mt-3 flex gap-2 overflow-x-auto pb-1" aria-label="Filter conversations">
+            {([
+              ['all', 'All chats'],
+              ['unread', 'Unread'],
+              ['groups', 'Groups'],
+            ] as const).map(([filter, label]) => (
+              <button key={filter} type="button" aria-pressed={conversationFilter === filter} onClick={() => setConversationFilter(filter)} className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold transition ${conversationFilter === filter ? 'bg-blue-700 text-white' : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-blue-50'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
           <button type="button" onClick={() => setShowArchived((current) => !current)} className="mt-3 inline-flex items-center gap-2 text-xs font-medium text-slate-600"><Archive className="h-4 w-4" aria-hidden="true" />{showArchived ? 'Hide archived' : 'Show archived'}</button>
 
           <div className="mt-3 space-y-2">
@@ -403,12 +432,13 @@ export function MessagesPage() {
           </div>
         </aside>
 
-        <section className="flex min-h-[600px] min-w-0 flex-col bg-white p-4">
+        <section className={`${selectedId ? 'flex' : 'hidden lg:flex'} min-h-[65vh] min-w-0 flex-col bg-white p-3 sm:p-4`}>
           {error ? <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</div> : null}
           {activeConversation ? (
             <>
-              <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
+              <header className="flex flex-wrap items-center justify-between gap-3 border-b border-blue-100 pb-4">
                 <div className="flex min-w-0 items-center gap-3">
+                  <button type="button" onClick={() => setSelectedId('')} aria-label="Back to chats" className="rounded-full p-2 text-slate-500 hover:bg-blue-50 lg:hidden"><ArrowLeft className="h-5 w-5" aria-hidden="true" /></button>
                   <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(activeConversation.name ?? activePeer?.name ?? 'Group')}`} alt={activeConversation.name ?? activePeer?.name ?? 'Group'} size="md" />
                   <div className="min-w-0">
                     <p className="truncate font-semibold text-slate-900">{activeConversation.name ?? activePeer?.name ?? 'Group conversation'}</p>
@@ -416,6 +446,7 @@ export function MessagesPage() {
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-1">
+                  <Link to="/calls" title="Open voice and video calls" aria-label="Open calls" className="rounded-lg p-2 text-blue-700 hover:bg-blue-50"><Phone className="h-4 w-4" aria-hidden="true" /></Link>
                   <button type="button" title="Pin conversation" aria-label="Pin conversation" onClick={() => void updatePreference('pinned')} className={`rounded-lg p-2 ${activeConversation.pinnedAt ? 'text-indigo-700' : 'text-slate-500 hover:bg-slate-100'}`}><Pin className="h-4 w-4" /></button>
                   <button type="button" title="Star conversation" aria-label="Star conversation" onClick={() => void updatePreference('starred')} className={`rounded-lg p-2 ${activeConversation.starredAt ? 'text-amber-600' : 'text-slate-500 hover:bg-slate-100'}`}><Star className="h-4 w-4" /></button>
                   <button type="button" title="Mute for 24 hours" aria-label="Mute conversation" onClick={() => void updatePreference('mutedUntil')} className={`rounded-lg p-2 ${activeConversation.mutedUntil && new Date(activeConversation.mutedUntil).getTime() > Date.now() ? 'text-indigo-700' : 'text-slate-500 hover:bg-slate-100'}`}><VolumeX className="h-4 w-4" /></button>

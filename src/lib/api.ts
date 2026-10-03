@@ -59,17 +59,45 @@ function extractErrorMessage(payload: unknown, fallback: string) {
 
 export async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
+  const isSafeRead = (options.method ?? 'GET').toUpperCase() === 'GET'
+  const maxAttempts = isSafeRead ? 3 : 1
 
   if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-      signal: AbortSignal.timeout(15000),
-    ...options,
-    credentials: 'include',
-    headers,
-  })
+  let response: Response | undefined
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      response = await fetch(`${API_BASE_URL}${path}`, {
+        signal: AbortSignal.timeout(15000),
+        ...options,
+        credentials: 'include',
+        headers,
+      })
+    } catch (error) {
+      if (isSafeRead && error instanceof TypeError && attempt < maxAttempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)))
+        continue
+      }
+
+      if (error instanceof TypeError) {
+        throw new Error(`Unable to reach the NOVAKOKO API at ${API_BASE_URL}. Please try again shortly.`)
+      }
+      throw error
+    }
+
+    if (isSafeRead && [502, 503, 504].includes(response.status) && attempt < maxAttempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)))
+      continue
+    }
+
+    break
+  }
+
+  if (!response) {
+    throw new Error(`Unable to reach the NOVAKOKO API at ${API_BASE_URL}. Please try again shortly.`)
+  }
 
   const rawText = await response.text()
   let payload: unknown = {}

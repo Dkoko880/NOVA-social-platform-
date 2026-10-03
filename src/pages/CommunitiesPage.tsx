@@ -1,5 +1,6 @@
 import { Flag, Globe2, LockKeyhole, Megaphone, Plus, Shield, UserMinus, UserPlus, Users } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { Button } from '../components/ui/Button'
 import { useAuth } from '../context/AuthContext'
 import { apiRequest } from '../lib/api'
@@ -31,6 +32,7 @@ const typeLabels: Record<Community['type'], string> = {
 
 export function CommunitiesPage() {
   const { user } = useAuth()
+  const [searchParams] = useSearchParams()
   const [communities, setCommunities] = useState<Community[]>([])
   const [selected, setSelected] = useState<CommunityDetail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -44,6 +46,9 @@ export function CommunitiesPage() {
   const [reportReason, setReportReason] = useState('')
   const [directory, setDirectory] = useState<DirectoryUser[]>([])
   const [inviteId, setInviteId] = useState('')
+  const requestedType = searchParams.get('type')
+  const activeType = (['GROUP', 'COMMUNITY', 'CHANNEL'] as const).find((value) => value === requestedType) ?? 'ALL'
+  const visibleCommunities = activeType === 'ALL' ? communities : communities.filter((community) => community.type === activeType)
 
   const loadCommunities = async () => {
     try {
@@ -175,14 +180,29 @@ export function CommunitiesPage() {
 
   return (
     <div className="space-y-5 p-4 sm:p-6">
-      <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-indigo-700">Groups, communities, channels</p>
-          <h2 className="mt-1 text-2xl font-semibold text-slate-900">Your spaces</h2>
+      <header className="overflow-hidden rounded-[26px] bg-gradient-to-br from-[#10214f] via-blue-800 to-indigo-700 p-5 text-white shadow-lg shadow-blue-950/10 sm:p-6">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-200">Your people, your spaces</p>
+            <h2 className="mt-1 text-2xl font-semibold">Groups &amp; communities</h2>
+            <p className="mt-1 text-sm text-blue-100">Find your groups, communities, and channels.</p>
+          </div>
+          <Button variant="secondary" size="sm" icon={<Plus className="h-4 w-4" aria-hidden="true" />} onClick={() => setShowCreate((current) => !current)}>
+            Create space
+          </Button>
         </div>
-        <Button variant="primary" size="sm" icon={<Plus className="h-4 w-4" aria-hidden="true" />} onClick={() => setShowCreate((current) => !current)}>
-          Create space
-        </Button>
+        <nav aria-label="Space types" className="mt-5 flex gap-2 overflow-x-auto pb-1">
+          {([
+            ['ALL', 'All spaces'],
+            ['GROUP', 'Groups'],
+            ['COMMUNITY', 'Communities'],
+            ['CHANNEL', 'Channels'],
+          ] as const).map(([typeFilter, label]) => (
+            <Link key={typeFilter} to={typeFilter === 'ALL' ? '/communities' : `/communities?type=${typeFilter}`} aria-current={activeType === typeFilter ? 'page' : undefined} className={`shrink-0 rounded-full px-4 py-2 text-sm font-semibold transition ${activeType === typeFilter ? 'bg-white text-blue-800' : 'bg-white/10 text-white hover:bg-white/20'}`}>
+              {label}
+            </Link>
+          ))}
+        </nav>
       </header>
 
       {error ? <p role="status" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p> : null}
@@ -209,11 +229,11 @@ export function CommunitiesPage() {
         <section className="min-w-0">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="font-semibold text-slate-900">Discover</h3>
-            <span className="text-xs text-slate-500">{communities.length} spaces</span>
+            <span className="text-xs text-slate-500">{visibleCommunities.length} spaces</span>
           </div>
-          {loading ? <p className="text-sm text-slate-500">Loading spaces…</p> : communities.length === 0 ? <p className="rounded-xl border border-dashed border-slate-300 p-5 text-sm text-slate-500">No spaces yet.</p> : (
+          {loading ? <p className="text-sm text-slate-500">Loading spaces…</p> : visibleCommunities.length === 0 ? <p className="rounded-xl border border-dashed border-slate-300 p-5 text-sm text-slate-500">{communities.length === 0 ? 'No spaces yet.' : `No ${activeType.toLowerCase()} spaces yet.`}</p> : (
             <div className="divide-y divide-slate-200 rounded-2xl border border-slate-200 bg-white">
-              {communities.map((community) => (
+              {visibleCommunities.map((community) => (
                 <article key={community.id} className={`flex items-center gap-3 p-3 ${selected?.id === community.id ? 'bg-indigo-50' : ''}`}>
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-700">
                     {community.isPrivate ? <LockKeyhole className="h-4 w-4" /> : community.type === 'CHANNEL' ? <Megaphone className="h-4 w-4" /> : community.type === 'GROUP' ? <Users className="h-4 w-4" /> : <Globe2 className="h-4 w-4" />}
