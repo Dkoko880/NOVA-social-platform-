@@ -8,6 +8,7 @@ declare global {
         role: string;
         status: string;
       };
+      registrationDraftId?: string;
     }
   }
 }
