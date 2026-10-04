@@ -51,14 +51,6 @@ type MemoryDraft = {
   userId: string | null;
 };
 
-declare global {
-  namespace Express {
-    interface Request {
-      registrationDraftId?: string;
-    }
-  }
-}
-
 const drafts = new Map<string, MemoryDraft>();
 const otpHash = (id: string, code: string) => createHmac('sha256', env.JWT_SECRET).update(`${id}:${code}`).digest('hex');
 const registrationRouter = Router();
@@ -240,20 +232,21 @@ registrationRouter.post('/register/start', async (req, res, next) => {
     const phoneE164 = normalizePhone(payload.countryCode, payload.phone);
     if (!phoneE164) return res.status(400).json({ message: 'Enter a valid phone number for the selected country.' });
 
-    const provider = getOtpProvider(env.NODE_ENV);
+    const freeRegistration = process.env.FREE_REGISTRATION === "true";
+   const provider = freeRegistration ? null : getOtpProvider(env.NODE_ENV);
     const useDb = await databaseEnabled();
     const existingUser = useDb
       ? await prisma.user.findUnique({ where: { phoneE164 }, select: { id: true } })
       : fallbackStore.list().find((user) => user.phoneE164 === phoneE164);
-    if (existingUser) return genericStartResponse(res, randomUUID(), provider.mode);
+    if (existingUser) return genericStartResponse(res, randomUUID(), provider?.mode ?? "free");
 
     const currentDraft = await findDraftByPhone(phoneE164);
     if (currentDraft && !currentDraft.consumedAt && currentDraft.expiresAt > new Date()) {
-      return genericStartResponse(res, currentDraft.id, provider.mode);
+      return genericStartResponse(res, currentDraft.id, provider?.mode ?? "free");
     }
 
     const id = randomUUID();
-    const code = provider.generateCode();
+    const code = provider ? provider.generateCode() : "";
     const now = Date.now();
     const draft: MemoryDraft = {
       id,
@@ -284,8 +277,8 @@ registrationRouter.post('/register/start', async (req, res, next) => {
       userId: null,
     };
     await saveDraft(draft);
-    await provider.sendCode(phoneE164, code);
-    return genericStartResponse(res, id, provider.mode);
+    if (provider) await provider.sendCode(phoneE164, code);
+    return genericStartResponse(res, id, provider?.mode ?? "free");
   } catch (error) {
     if (error instanceof z.ZodError) return res.status(400).json({ message: 'Invalid registration details.' });
     if (error instanceof OtpProviderUnavailableError) return res.status(503).json({ message: 'Phone verification is temporarily unavailable.' });
