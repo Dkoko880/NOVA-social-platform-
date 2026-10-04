@@ -20,7 +20,13 @@ import { subscriptionRouter } from './routes/subscriptions.js';
 
 const app = express();
 const testRuntime = env.NODE_ENV === 'test' || process.env.VITEST === 'true';
-const allowedOrigins = env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean);
+const allowedOrigins = Array.from(
+  new Set([
+    ...env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean),
+    'https://nova-social-platform-svx2.vercel.app',
+    'https://nova-social-platform.vercel.app',
+  ]),
+);
 const connectSources = ["'self'", ...allowedOrigins.filter((origin) => origin !== '*')];
 
 app.use(helmet({
