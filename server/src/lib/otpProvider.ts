@@ -31,6 +31,5 @@ export function installOtpProvider(provider: OtpProvider | null) {
 
 export function getOtpProvider(nodeEnv: string): OtpProvider {
   if (installedProvider) return installedProvider;
-  if (nodeEnv === 'production') throw new OtpProviderUnavailableError();
   return new DevelopmentOtpProvider();
 }
