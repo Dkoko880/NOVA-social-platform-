@@ -294,6 +294,10 @@ registrationRouter.post('/register/resend', async (req, res, next) => {
       return res.status(400).json({ message: 'This verification request is invalid or expired.' });
     }
     if (draft.resendAllowedAt > new Date()) return res.status(429).json({ message: 'Please wait before requesting another code.' });
+    const freeRegistration = process.env.FREE_REGISTRATION === "true";
+    if (freeRegistration) {
+      return res.json({ deliveryMode: "free", message: "Free registration mode does not require an OTP." });
+    }
     const provider = getOtpProvider(env.NODE_ENV);
     const code = provider.generateCode();
     const now = Date.now();
@@ -314,14 +318,18 @@ registrationRouter.post('/register/resend', async (req, res, next) => {
 
 registrationRouter.post('/register/verify', async (req, res, next) => {
   try {
-    const payload = z.object({ challengeId: z.string().uuid(), code: z.string().regex(/^\d{6}$/) }).parse(req.body ?? {});
+    const freeRegistration = process.env.FREE_REGISTRATION === "true";
+    const payload = z.object({
+      challengeId: z.string().uuid(),
+      code: z.string().regex(/^\d{6}$/).optional(),
+    }).parse(req.body ?? {});
     const draft = await findDraftById(payload.challengeId);
     if (!draft || draft.consumedAt || draft.verifiedAt || draft.expiresAt <= new Date() || draft.otpExpiresAt <= new Date()) {
       return res.status(400).json({ message: 'The verification code is invalid or expired.' });
     }
     if (draft.otpAttempts >= MAX_OTP_ATTEMPTS) return res.status(429).json({ message: 'Too many verification attempts. Restart registration later.' });
 
-    if (!validCodeHash(draft.id, payload.code, draft.otpHash)) {
+    if (!freeRegistration && (!payload.code || !validCodeHash(draft.id, payload.code, draft.otpHash))) {
       const attemptedCount = draft.otpAttempts + 1;
       if (await databaseEnabled()) {
         await prisma.registrationDraft.updateMany({
