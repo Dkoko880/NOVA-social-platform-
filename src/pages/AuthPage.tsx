@@ -15,7 +15,7 @@ type AuthPageProps = {
 type RegistrationStage = 1 | 2 | 3 | 4 | 5
 
 const countryCodes = getCountries()
-const countryName = new Intl.DisplayNames(['en'], { type: 'region' })
+const countryName = new Intl.DisplayNames(['en'], { type: 'region' }); const countryLabel=(c: string) => { try { return countryName.of(c) || c } catch { return c } }
 const countryFlag = (country: string) => String.fromCodePoint(...[...country].map((character) => 127397 + character.charCodeAt(0)))
 
 function PhoneRegistrationFlow() {
@@ -129,7 +129,7 @@ function PhoneRegistrationFlow() {
               <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
                 <label className="block text-sm font-medium">Country
                   <select value={country} onChange={(event) => { const nextCountry = event.target.value as CountryCode; setCountry(nextCountry); setPrivateDetails((current) => ({ ...current, countryCode: nextCountry })) }} className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3">
-                    {countryCodes.map((item) => <option key={item} value={item}>{countryFlag(item)} {countryName.of(item)} (+{getCountryCallingCode(item)})</option>)}
+                    {countryCodes.map((item) => <option key={item} value={item}>{countryFlag(item)} {countryLabel(item)} (+{getCountryCallingCode(item)})</option>)}
                   </select>
                 </label>
                 <label className="block text-sm font-medium">Phone number
@@ -152,7 +152,7 @@ function PhoneRegistrationFlow() {
           {stage === 2 ? (
             <form className="mt-8 grid gap-4 sm:grid-cols-2" onSubmit={(event) => { event.preventDefault(); void savePrivateDetails() }}>
               <label className="block text-sm font-medium">Date of birth<input required type="date" max={new Date(Date.now() - 13 * 365.25 * 86400000).toISOString().slice(0, 10)} value={privateDetails.dateOfBirth} onChange={(event) => setPrivateDetails({ ...privateDetails, dateOfBirth: event.target.value })} className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-3" /></label>
-              <label className="block text-sm font-medium">Country<select required value={privateDetails.countryCode} onChange={(event) => setPrivateDetails({ ...privateDetails, countryCode: event.target.value })} className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3">{countryCodes.map((item) => <option key={item} value={item}>{countryFlag(item)} {countryName.of(item)}</option>)}</select></label>
+              <label className="block text-sm font-medium">Country<select required value={privateDetails.countryCode} onChange={(event) => setPrivateDetails({ ...privateDetails, countryCode: event.target.value })} className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3">{countryCodes.map((item) => <option key={item} value={item}>{countryFlag(item)} {countryLabel(item)}</option>)}</select></label>
               <label className="block text-sm font-medium">State / region<input required maxLength={100} value={privateDetails.region} onChange={(event) => setPrivateDetails({ ...privateDetails, region: event.target.value })} className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-3" /></label>
               <label className="block text-sm font-medium">City<input required maxLength={100} value={privateDetails.city} onChange={(event) => setPrivateDetails({ ...privateDetails, city: event.target.value })} className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-3" /></label>
               <label className="block text-sm font-medium sm:col-span-2">Address<input required maxLength={300} autoComplete="street-address" value={privateDetails.address} onChange={(event) => setPrivateDetails({ ...privateDetails, address: event.target.value })} className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-3" /></label>
@@ -376,7 +376,7 @@ export function AuthPage({ mode }: AuthPageProps) {
                   <>
                     <label className="block text-sm font-medium text-slate-700">Country
                       <select value={phoneCountry} onChange={(event) => setPhoneCountry(event.target.value as CountryCode)} className="mt-1.5 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2.5">
-                        {countryCodes.map((item) => <option key={item} value={item}>{countryFlag(item)} {countryName.of(item)} (+{getCountryCallingCode(item)})</option>)}
+                        {countryCodes.map((item) => <option key={item} value={item}>{countryFlag(item)} {countryLabel(item)} (+{getCountryCallingCode(item)})</option>)}
                       </select>
                     </label>
                     <label className="block text-sm font-medium text-slate-700">Phone number
