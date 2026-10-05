@@ -413,8 +413,30 @@ registrationRouter.patch('/register/stage/2', registrationAuth, async (req, res,
     const draft = await findDraftById(req.registrationDraftId!);
     if (!draft) return res.status(401).json({ message: 'Registration session is invalid or expired.' });
     if (draft.stage > 2) return res.json({ stage: draft.stage });
-    const encrypted = encryptPrivateDetails(payload);
-    await updateDraft(draft.id, { ...encrypted, dateOfBirth: null, region: null, city: null, stage: 3 });
+    let encrypted;
+    try {
+      encrypted = encryptPrivateDetails(payload);
+    } catch (error) {
+      console.error('[registration.stage2] encryption failed:', error);
+      if (error instanceof Error && 'statusCode' in error && (error as Error & { statusCode?: number }).statusCode === 503) {
+        return res.status(503).json({ message: 'Registration private-data encryption is not configured on the server.' });
+      }
+      throw error;
+    }
+
+    try {
+      await updateDraft(draft.id, {
+        ...encrypted,
+        dateOfBirth: null,
+        region: null,
+        city: null,
+        stage: 3,
+      });
+    } catch (error) {
+      console.error('[registration.stage2] draft update failed:', error);
+      throw error;
+    }
+
     return res.json({ stage: 3, message: 'Private details saved.' });
   } catch (error) {
     if (error instanceof z.ZodError) return res.status(400).json({ message: 'Enter a valid date and complete address details.' });
