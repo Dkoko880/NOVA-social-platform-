@@ -1,0 +1,27 @@
+
+
+/* NOVAKOKO mobile-first viewport protection */
+html, body, #root {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+@media (max-width: 640px) {
+  body {
+    min-height: 100dvh;
+  }
+
+  #root {
+    min-height: 100dvh;
+  }
+
+  img, video, canvas {
+    max-width: 100%;
+  }
+}
