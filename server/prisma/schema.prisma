@@ -113,60 +113,60 @@ enum MarketplaceDisputeStatus {
 }
 
 model User {
-  id           String      @id @default(cuid())
-  email        String?     @unique
-  phoneE164    String?     @unique
-  phoneVerifiedAt DateTime?
-  name         String
-  passwordHash String
-  role                     UserRole    @default(USER)
-  status                   UserStatus  @default(ACTIVE)
-  communityRulesAccepted   Boolean     @default(false)
+  id                       String     @id @default(cuid())
+  email                    String?    @unique
+  phoneE164                String?    @unique
+  phoneVerifiedAt          DateTime?
+  name                     String
+  passwordHash             String
+  role                     UserRole   @default(USER)
+  status                   UserStatus @default(ACTIVE)
+  communityRulesAccepted   Boolean    @default(false)
   communityRulesAcceptedAt DateTime?
   rulesVersion             String?
-  createdAt                DateTime    @default(now())
-  updatedAt                DateTime    @updatedAt
+  createdAt                DateTime   @default(now())
+  updatedAt                DateTime   @updatedAt
 
-  profile              Profile?
-  privateDetails       PrivateProfile?
-  mfaMethods           MfaMethod[]
-  securityAlerts       SecurityAlert[]
-  registrationDrafts   RegistrationDraft[]
-  authOtpChallenges    AuthOtpChallenge[]
-  sessions             Session[]
-  posts                Post[]
-  postSaves            PostSave[]
-  postShares           PostShare[]
-  comments             Comment[]
-  reactions            Reaction[]
-  followsGiven         Follow[] @relation("Follower")
-  followsReceived      Follow[] @relation("Following")
-  blocksGiven          Block[] @relation("Blocker")
-  blocksReceived       Block[] @relation("Blocked")
-  reportsMade          Report[] @relation("Reporter")
-  reportsAbout         Report[] @relation("ReportedUser")
-  notifications       Notification[] @relation("NotificationRecipient")
-  conversationsOwnedBy Conversation[] @relation("ConversationOwner")
-  messageSent          Message[] @relation("MessageSender")
-  messageReactions     MessageReaction[]
+  profile                  Profile?
+  privateDetails           PrivateProfile?
+  mfaMethods               MfaMethod[]
+  securityAlerts           SecurityAlert[]
+  registrationDrafts       RegistrationDraft[]
+  authOtpChallenges        AuthOtpChallenge[]
+  sessions                 Session[]
+  posts                    Post[]
+  postSaves                PostSave[]
+  postShares               PostShare[]
+  comments                 Comment[]
+  reactions                Reaction[]
+  followsGiven             Follow[]                  @relation("Follower")
+  followsReceived          Follow[]                  @relation("Following")
+  blocksGiven              Block[]                   @relation("Blocker")
+  blocksReceived           Block[]                   @relation("Blocked")
+  reportsMade              Report[]                  @relation("Reporter")
+  reportsAbout             Report[]                  @relation("ReportedUser")
+  notifications            Notification[]            @relation("NotificationRecipient")
+  conversationsOwnedBy     Conversation[]            @relation("ConversationOwner")
+  messageSent              Message[]                 @relation("MessageSender")
+  messageReactions         MessageReaction[]
   conversationParticipants ConversationParticipant[]
-  subscriptions       Subscription[]
-  entitlements        Entitlement[]
-  communityMemberships CommunityMember[]
-  ownedCommunities     Community[]
-  adminActions         AdminAction[] @relation("AdminActionActor")
-  actionTargets        AdminAction[] @relation("AdminActionTarget")
-  creatorProfile       CreatorProfile?
-  creatorSubscriptions  CreatorSubscription[] @relation("CreatorSubscriber")
-  businessOwned        BusinessProfile? @relation("BusinessOwner")
-  businessMemberships  BusinessMember[]
-  businessFollows      BusinessFollower[]
-  businessPosts        BusinessPost[]
-  sellerProfile        SellerProfile?
-  marketplaceOrders    MarketplaceOrder[] @relation("OrderBuyer")
-  productInquiries     ProductInquiry[] @relation("InquiryBuyer")
-  marketplaceDisputes  MarketplaceDispute[] @relation("DisputeReporter")
-  financialPaymentIntents PaymentIntent[] @relation("PaymentPayer")
+  subscriptions            Subscription[]
+  entitlements             Entitlement[]
+  communityMemberships     CommunityMember[]
+  ownedCommunities         Community[]
+  adminActions             AdminAction[]             @relation("AdminActionActor")
+  actionTargets            AdminAction[]             @relation("AdminActionTarget")
+  creatorProfile           CreatorProfile?
+  creatorSubscriptions     CreatorSubscription[]     @relation("CreatorSubscriber")
+  businessOwned            BusinessProfile?          @relation("BusinessOwner")
+  businessMemberships      BusinessMember[]
+  businessFollows          BusinessFollower[]
+  businessPosts            BusinessPost[]
+  sellerProfile            SellerProfile?
+  marketplaceOrders        MarketplaceOrder[]        @relation("OrderBuyer")
+  productInquiries         ProductInquiry[]          @relation("InquiryBuyer")
+  marketplaceDisputes      MarketplaceDispute[]      @relation("DisputeReporter")
+  financialPaymentIntents  PaymentIntent[]           @relation("PaymentPayer")
 
   @@index([email])
   @@index([phoneE164])
@@ -175,10 +175,10 @@ model User {
 }
 
 model Profile {
-  id          String  @id @default(cuid())
-  userId      String  @unique
+  id          String   @id @default(cuid())
+  userId      String   @unique
   displayName String?
-  username    String? @unique
+  username    String?  @unique
   bio         String?
   avatarUrl   String?
   coverUrl    String?
@@ -188,12 +188,11 @@ model Profile {
   updatedAt   DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
 }
 
 model PrivateProfile {
-  id                String   @id @default(cuid())
-  userId            String   @unique
+  id                String    @id @default(cuid())
+  userId            String    @unique
   dateOfBirth       DateTime?
   countryCode       String?
   region            String?
@@ -201,40 +200,40 @@ model PrivateProfile {
   addressCiphertext String?
   addressIv         String?
   addressTag        String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model RegistrationDraft {
-  id                   String   @id @default(cuid())
-  phoneE164            String   @unique
+  id                   String    @id @default(cuid())
+  phoneE164            String    @unique
   countryCode          String
   fullName             String
   otpHash              String
   otpExpiresAt         DateTime
   resendAllowedAt      DateTime
-  otpAttempts          Int      @default(0)
+  otpAttempts          Int       @default(0)
   verifiedAt           DateTime?
-  sessionTokenHash     String?  @unique
-  stage                Int      @default(1)
+  sessionTokenHash     String?   @unique
+  stage                Int       @default(1)
   dateOfBirth          DateTime?
   region               String?
   city                 String?
   addressCiphertext    String?
   addressIv            String?
-  addressTag            String?
+  addressTag           String?
   avatarStorageKey     String?
-  username             String?  @unique
+  username             String?   @unique
   termsAcceptedAt      DateTime?
   privacyAcceptedAt    DateTime?
   guidelinesAcceptedAt DateTime?
   consentVersion       String?
   expiresAt            DateTime
   consumedAt           DateTime?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
   userId               String?
 
   user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
@@ -244,12 +243,12 @@ model RegistrationDraft {
 }
 
 model MfaMethod {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   userId     String
   type       String
   secretHash String?
   enabledAt  DateTime?
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -257,14 +256,14 @@ model MfaMethod {
 }
 
 model AuthOtpChallenge {
-  id              String   @id @default(cuid())
-  phoneE164       String
-  otpHash         String
-  expiresAt       DateTime
-  attempts        Int      @default(0)
-  consumedAt      DateTime?
-  userId          String?
-  createdAt       DateTime @default(now())
+  id         String    @id @default(cuid())
+  phoneE164  String
+  otpHash    String
+  expiresAt  DateTime
+  attempts   Int       @default(0)
+  consumedAt DateTime?
+  userId     String?
+  createdAt  DateTime  @default(now())
 
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -273,11 +272,11 @@ model AuthOtpChallenge {
 }
 
 model SecurityAlert {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   userId    String
   type      String
   details   String?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
   readAt    DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -286,16 +285,16 @@ model SecurityAlert {
 }
 
 model Session {
-  id        String    @id @default(cuid())
-  userId    String
-  tokenHash String    @unique
-  userAgent String?
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  userAgent  String?
   deviceName String?
-  ipAddress String?
+  ipAddress  String?
   lastSeenAt DateTime?
-  expiresAt DateTime
-  revokedAt DateTime?
-  createdAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -304,17 +303,17 @@ model Session {
 }
 
 model Post {
-  id          String   @id @default(cuid())
+  id          String         @id @default(cuid())
   authorId    String
   communityId String?
   content     String
   imageUrl    String?
   visibility  PostVisibility @default(PUBLIC)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
 
-  author    User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  community Community? @relation(fields: [communityId], references: [id], onDelete: SetNull)
+  author    User        @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  community Community?  @relation(fields: [communityId], references: [id], onDelete: SetNull)
   comments  Comment[]
   reactions Reaction[]
   reports   Report[]
@@ -353,36 +352,36 @@ model PostShare {
 }
 
 model Conversation {
-  id                 String   @id @default(cuid())
-  name               String?
-  isChannel           Boolean  @default(false)
-  disappearingAfterSeconds Int @default(0)
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-  lastMessageAt      DateTime?
-  lastMessagePreview String?
-  ownerId            String?
+  id                       String    @id @default(cuid())
+  name                     String?
+  isChannel                Boolean   @default(false)
+  disappearingAfterSeconds Int       @default(0)
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+  lastMessageAt            DateTime?
+  lastMessagePreview       String?
+  ownerId                  String?
 
-  owner       User?                     @relation("ConversationOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  owner        User?                     @relation("ConversationOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   participants ConversationParticipant[]
-  messages    Message[]
+  messages     Message[]
 
   @@index([ownerId])
   @@index([updatedAt])
 }
 
 model ConversationParticipant {
-  id          String    @id @default(cuid())
+  id             String              @id @default(cuid())
   conversationId String
-  userId      String
-  role        CommunityMemberRole @default(MEMBER)
-  joinedAt    DateTime  @default(now())
-  lastReadAt  DateTime?
-  leftAt      DateTime?
-  pinnedAt    DateTime?
-  archivedAt  DateTime?
-  starredAt   DateTime?
-  mutedUntil  DateTime?
+  userId         String
+  role           CommunityMemberRole @default(MEMBER)
+  joinedAt       DateTime            @default(now())
+  lastReadAt     DateTime?
+  leftAt         DateTime?
+  pinnedAt       DateTime?
+  archivedAt     DateTime?
+  starredAt      DateTime?
+  mutedUntil     DateTime?
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -393,25 +392,25 @@ model ConversationParticipant {
 }
 
 model Message {
-  id            String       @id @default(cuid())
-  conversationId String
-  senderId      String
-  text          String
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-  readAt        DateTime?
-  deletedAt     DateTime?
-  status        MessageStatus @default(SENT)
-  contentType   String        @default("TEXT")
-  mediaUrl      String?
-  metadata      Json?
-  replyToId     String?
+  id              String        @id @default(cuid())
+  conversationId  String
+  senderId        String
+  text            String
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  readAt          DateTime?
+  deletedAt       DateTime?
+  status          MessageStatus @default(SENT)
+  contentType     String        @default("TEXT")
+  mediaUrl        String?
+  metadata        Json?
+  replyToId       String?
   forwardedFromId String?
-  editedAt      DateTime?
-  expiresAt     DateTime?
+  editedAt        DateTime?
+  expiresAt       DateTime?
 
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  sender       User         @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  conversation Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User              @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
   reactions    MessageReaction[]
 
   @@index([conversationId, createdAt])
@@ -444,12 +443,12 @@ model Comment {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  post     Post       @relation(fields: [postId], references: [id], onDelete: Cascade)
-  author   User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  parent   Comment?   @relation("CommentReplies", fields: [parentId], references: [id], onDelete: SetNull)
-  replies  Comment[]  @relation("CommentReplies")
+  post      Post       @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author    User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent    Comment?   @relation("CommentReplies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies   Comment[]  @relation("CommentReplies")
   reactions Reaction[]
-  reports  Report[]
+  reports   Report[]
 
   @@index([postId])
   @@index([authorId])
@@ -503,21 +502,21 @@ model Block {
 }
 
 model Report {
-  id         String       @id @default(cuid())
-  reporterId String
-  postId     String?
-  commentId  String?
+  id           String         @id @default(cuid())
+  reporterId   String
+  postId       String?
+  commentId    String?
   targetUserId String?
-  category   ReportCategory
-  details    String?
-  status     ReportStatus @default(OPEN)
-  createdAt  DateTime     @default(now())
-  resolvedAt DateTime?
+  category     ReportCategory
+  details      String?
+  status       ReportStatus   @default(OPEN)
+  createdAt    DateTime       @default(now())
+  resolvedAt   DateTime?
 
-  reporter User    @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
-  post     Post?   @relation(fields: [postId], references: [id], onDelete: Cascade)
-  comment  Comment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
-  targetUser User? @relation("ReportedUser", fields: [targetUserId], references: [id], onDelete: SetNull)
+  reporter   User     @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  post       Post?    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  comment    Comment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  targetUser User?    @relation("ReportedUser", fields: [targetUserId], references: [id], onDelete: SetNull)
 
   @@index([reporterId])
   @@index([postId])
@@ -527,13 +526,13 @@ model Report {
 }
 
 model Notification {
-  id        String    @id @default(cuid())
+  id          String    @id @default(cuid())
   recipientId String
-  actorId   String?
-  type      String
-  message   String
-  readAt    DateTime?
-  createdAt DateTime  @default(now())
+  actorId     String?
+  type        String
+  message     String
+  readAt      DateTime?
+  createdAt   DateTime  @default(now())
 
   recipient User @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
 
@@ -577,15 +576,15 @@ model Subscription {
 }
 
 model Payment {
-  id                 String   @id @default(cuid())
-  subscriptionId     String
-  userId             String
-  provider           String   @default("local")
-  providerReference  String?
-  amountCents        Int
-  currency           String   @default("USD")
-  status             String   @default("PENDING")
-  createdAt          DateTime @default(now())
+  id                String   @id @default(cuid())
+  subscriptionId    String
+  userId            String
+  provider          String   @default("local")
+  providerReference String?
+  amountCents       Int
+  currency          String   @default("USD")
+  status            String   @default("PENDING")
+  createdAt         DateTime @default(now())
 
   subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
 
@@ -624,20 +623,20 @@ model Entitlement {
 }
 
 model Community {
-  id          String   @id @default(cuid())
+  id          String        @id @default(cuid())
   ownerId     String
   name        String
-  slug        String   @unique
+  slug        String        @unique
   description String?
   avatarUrl   String?
   type        CommunityType @default(COMMUNITY)
   isPrivate   Boolean       @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
 
-  owner    User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  members  CommunityMember[]
-  posts    Post[]
+  owner   User              @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  members CommunityMember[]
+  posts   Post[]
 
   @@index([ownerId])
   @@index([name])
@@ -650,7 +649,7 @@ enum CommunityType {
 }
 
 model CommunityMember {
-  id          String               @id @default(cuid())
+  id          String              @id @default(cuid())
   communityId String
   userId      String
   role        CommunityMemberRole @default(MEMBER)
@@ -665,15 +664,15 @@ model CommunityMember {
 }
 
 model AdminAction {
-  id          String   @id @default(cuid())
-  actorId     String
+  id           String   @id @default(cuid())
+  actorId      String
   targetUserId String?
-  actionType  String
-  details     String?
-  createdAt   DateTime @default(now())
+  actionType   String
+  details      String?
+  createdAt    DateTime @default(now())
 
-  actor       User  @relation("AdminActionActor", fields: [actorId], references: [id], onDelete: Cascade)
-  targetUser  User? @relation("AdminActionTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+  actor      User  @relation("AdminActionActor", fields: [actorId], references: [id], onDelete: Cascade)
+  targetUser User? @relation("AdminActionTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
 
   @@index([actorId])
   @@index([targetUserId])
@@ -691,7 +690,7 @@ model CreatorProfile {
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
-  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user          User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   subscribers   CreatorSubscription[]
   ledgerEntries CreatorLedgerEntry[]
   payouts       CreatorPayoutRequest[]
@@ -700,18 +699,18 @@ model CreatorProfile {
 }
 
 model CreatorSubscription {
-  id                String                   @id @default(cuid())
+  id                String                    @id @default(cuid())
   creatorId         String
   subscriberId      String
   status            CreatorSubscriptionStatus @default(ACTIVE)
-  provider          String                   @default("manual")
+  provider          String                    @default("manual")
   providerReference String?
   amountCents       Int
-  currency          String                   @default("USD")
-  startedAt         DateTime                 @default(now())
+  currency          String                    @default("USD")
+  startedAt         DateTime                  @default(now())
   endsAt            DateTime?
-  createdAt         DateTime                 @default(now())
-  updatedAt         DateTime                 @updatedAt
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
 
   subscriber User           @relation("CreatorSubscriber", fields: [subscriberId], references: [id], onDelete: Cascade)
   profile    CreatorProfile @relation(fields: [creatorId], references: [userId], onDelete: Cascade)
@@ -751,8 +750,8 @@ model CreatorPayoutRequest {
 
   profile CreatorProfile @relation(fields: [creatorId], references: [userId], onDelete: Cascade)
 
-  @@index([creatorId, status])
   @@unique([creatorId, idempotencyKey])
+  @@index([creatorId, status])
 }
 
 model BusinessProfile {
@@ -848,7 +847,7 @@ model MarketplaceProduct {
   createdAt   DateTime                 @default(now())
   updatedAt   DateTime                 @updatedAt
 
-  seller    SellerProfile         @relation(fields: [sellerId], references: [userId], onDelete: Cascade)
+  seller    SellerProfile          @relation(fields: [sellerId], references: [userId], onDelete: Cascade)
   images    ProductImage[]
   items     MarketplaceOrderItem[]
   inquiries ProductInquiry[]
@@ -873,19 +872,19 @@ model ProductImage {
 }
 
 model MarketplaceOrder {
-  id          String                 @id @default(cuid())
-  buyerId     String
-  status      MarketplaceOrderStatus @default(PENDING)
-  paymentStatus String                @default("UNPAID")
-  totalCents  Int
-  currency    String                 @default("USD")
-  createdAt   DateTime               @default(now())
-  updatedAt   DateTime               @updatedAt
-  cancelledAt DateTime?
+  id            String                 @id @default(cuid())
+  buyerId       String
+  status        MarketplaceOrderStatus @default(PENDING)
+  paymentStatus String                 @default("UNPAID")
+  totalCents    Int
+  currency      String                 @default("USD")
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+  cancelledAt   DateTime?
 
-  buyer    User                   @relation("OrderBuyer", fields: [buyerId], references: [id], onDelete: Cascade)
-  items    MarketplaceOrderItem[]
-  disputes MarketplaceDispute[]
+  buyer     User                   @relation("OrderBuyer", fields: [buyerId], references: [id], onDelete: Cascade)
+  items     MarketplaceOrderItem[]
+  disputes  MarketplaceDispute[]
   inquiries ProductInquiry[]
 
   @@index([buyerId, createdAt])
@@ -966,14 +965,14 @@ model PaymentIntent {
 }
 
 model FinancialWebhookEvent {
-  id              String   @id @default(cuid())
-  provider        String
-  providerEventId String
+  id               String    @id @default(cuid())
+  provider         String
+  providerEventId  String
   paymentReference String
-  payloadHash     String
-  status          String   @default("RECEIVED")
-  receivedAt      DateTime @default(now())
-  processedAt     DateTime?
+  payloadHash      String
+  status           String    @default("RECEIVED")
+  receivedAt       DateTime  @default(now())
+  processedAt      DateTime?
 
   @@unique([provider, providerEventId])
   @@index([paymentReference, receivedAt])
@@ -996,35 +995,45 @@ model FinancialLedgerEntry {
 }
 
 model FinancialRefund {
-  id              String   @id @default(cuid())
+  id               String    @id @default(cuid())
   paymentReference String
-  requestorId     String
-  reference       String   @unique
-  amountCents     Int
-  currency        String
-  reason          String
-  status          String   @default("PENDING")
-  reviewedBy      String?
-  reviewedAt      DateTime?
-  reviewReason    String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  requestorId      String
+  reference        String    @unique
+  amountCents      Int
+  currency         String
+  reason           String
+  status           String    @default("PENDING")
+  reviewedBy       String?
+  reviewedAt       DateTime?
+  reviewReason     String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@unique([paymentReference, requestorId])
   @@index([status, createdAt])
 }
 
 model FinancialDispute {
-  id              String   @id @default(cuid())
-  paymentReference String
-  reporterId      String
-  status          String   @default("OPEN")
-  reason          String
-  notes           String?
+  id                String   @id @default(cuid())
+  paymentReference  String
+  reporterId        String
+  status            String   @default("OPEN")
+  reason            String
+  notes             String?
   evidenceReference String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   @@index([paymentReference, status])
   @@index([reporterId, createdAt])
+}
+
+model RegistrationMediaObject {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  bytes       Bytes
+  contentType String
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
 }

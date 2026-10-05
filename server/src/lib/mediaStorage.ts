@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { prisma } from '../lib/prisma.js';
 
 export interface MediaStorage {
   put(bytes: Buffer, contentType: string): Promise<{ key: string; publicUrl: string }>;
@@ -13,27 +14,50 @@ export class MediaStorageUnavailableError extends Error {
   }
 }
 
-class DevelopmentMemoryMediaStorage implements MediaStorage {
-  private readonly objects = new Map<string, { bytes: Buffer; contentType: string }>();
-
+class DatabaseMediaStorage implements MediaStorage {
   async put(bytes: Buffer, contentType: string) {
     const key = `${randomUUID()}.webp`;
-    this.objects.set(key, { bytes: Buffer.from(bytes), contentType });
-    return { key, publicUrl: `/api/media/avatars/${key}` };
+
+    await prisma.registrationMediaObject.create({
+      data: {
+        key,
+        bytes: Buffer.from(bytes),
+        contentType,
+      },
+    });
+
+    return {
+      key,
+      publicUrl: `/api/media/avatars/${key}`,
+    };
   }
 
   async delete(key: string) {
-    this.objects.delete(key);
+    await prisma.registrationMediaObject.deleteMany({
+      where: { key },
+    });
   }
 
   async get(key: string) {
-    const object = this.objects.get(key);
-    return object ? { bytes: Buffer.from(object.bytes), contentType: object.contentType } : null;
+    const object = await prisma.registrationMediaObject.findUnique({
+      where: { key },
+      select: {
+        bytes: true,
+        contentType: true,
+      },
+    });
+
+    if (!object) return null;
+
+    return {
+      bytes: Buffer.from(object.bytes),
+      contentType: object.contentType,
+    };
   }
 }
 
 let installedStorage: MediaStorage | null = null;
-const developmentStorage = new DevelopmentMemoryMediaStorage();
+const databaseStorage = new DatabaseMediaStorage();
 
 export function installMediaStorage(storage: MediaStorage | null) {
   installedStorage = storage;
@@ -41,6 +65,6 @@ export function installMediaStorage(storage: MediaStorage | null) {
 
 export function getMediaStorage(nodeEnv: string): MediaStorage {
   if (installedStorage) return installedStorage;
-  if (nodeEnv === 'production') throw new MediaStorageUnavailableError();
-  return developmentStorage;
+  if (nodeEnv === 'production') return databaseStorage;
+  return databaseStorage;
 }
