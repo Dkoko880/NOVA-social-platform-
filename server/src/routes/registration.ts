@@ -241,13 +241,42 @@ registrationRouter.post('/register/start', async (req, res, next) => {
     if (existingUser) return genericStartResponse(res, randomUUID(), provider?.mode ?? "free");
 
     const currentDraft = await findDraftByPhone(phoneE164);
-    if (currentDraft && !currentDraft.consumedAt && currentDraft.expiresAt > new Date()) {
+    const now = Date.now();
+    const code = provider ? provider.generateCode() : "";
+
+    if (currentDraft) {
+      await updateDraft(currentDraft.id, {
+        countryCode: payload.countryCode,
+        fullName: payload.fullName,
+        otpHash: otpHash(currentDraft.id, code),
+        otpExpiresAt: new Date(now + OTP_TTL_MS),
+        resendAllowedAt: new Date(now + RESEND_COOLDOWN_MS),
+        otpAttempts: 0,
+        verifiedAt: null,
+        sessionTokenHash: null,
+        stage: 1,
+        dateOfBirth: null,
+        region: null,
+        city: null,
+        addressCiphertext: null,
+        addressIv: null,
+        addressTag: null,
+        avatarStorageKey: null,
+        username: null,
+        termsAcceptedAt: null,
+        privacyAcceptedAt: null,
+        guidelinesAcceptedAt: null,
+        consentVersion: null,
+        expiresAt: new Date(now + DRAFT_TTL_MS),
+        consumedAt: null,
+        userId: null,
+      });
+
+      if (provider) await provider.sendCode(phoneE164, code);
       return genericStartResponse(res, currentDraft.id, provider?.mode ?? "free");
     }
 
     const id = randomUUID();
-    const code = provider ? provider.generateCode() : "";
-    const now = Date.now();
     const draft: MemoryDraft = {
       id,
       phoneE164,
