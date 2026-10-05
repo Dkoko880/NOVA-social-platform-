@@ -324,10 +324,15 @@ registrationRouter.post('/register/verify', async (req, res, next) => {
       code: z.string().regex(/^\d{6}$/).optional(),
     }).parse(req.body ?? {});
     const draft = await findDraftById(payload.challengeId);
-    if (!draft || draft.consumedAt || draft.verifiedAt || draft.expiresAt <= new Date() || draft.otpExpiresAt <= new Date()) {
+    if (!draft || draft.consumedAt || draft.verifiedAt || draft.expiresAt <= new Date()) {
       return res.status(400).json({ message: 'The verification code is invalid or expired.' });
     }
-    if (draft.otpAttempts >= MAX_OTP_ATTEMPTS) return res.status(429).json({ message: 'Too many verification attempts. Restart registration later.' });
+    if (!freeRegistration && draft.otpExpiresAt <= new Date()) {
+      return res.status(400).json({ message: 'The verification code is invalid or expired.' });
+    }
+    if (!freeRegistration && draft.otpAttempts >= MAX_OTP_ATTEMPTS) {
+      return res.status(429).json({ message: 'Too many verification attempts. Restart registration later.' });
+    }
 
     if (!freeRegistration && (!payload.code || !validCodeHash(draft.id, payload.code, draft.otpHash))) {
       const attemptedCount = draft.otpAttempts + 1;
