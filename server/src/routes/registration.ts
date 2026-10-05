@@ -135,7 +135,7 @@ function registrationCookieOptions() {
   return {
     httpOnly: true,
     secure: env.NODE_ENV === 'production',
-    sameSite: 'strict' as const,
+    sameSite: env.NODE_ENV === 'production' ? 'none' as const : 'strict' as const,
     maxAge: DRAFT_TTL_MS,
     path: '/api/auth/register',
   };
