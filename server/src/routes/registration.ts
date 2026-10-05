@@ -351,7 +351,16 @@ registrationRouter.post('/register/verify', async (req, res, next) => {
     const now = new Date();
     if (await databaseEnabled()) {
       const claimed = await prisma.registrationDraft.updateMany({
-        where: { id: draft.id, verifiedAt: null, consumedAt: null, expiresAt: { gt: now }, otpExpiresAt: { gt: now }, otpAttempts: { lt: MAX_OTP_ATTEMPTS } },
+        where: {
+          id: draft.id,
+          verifiedAt: null,
+          consumedAt: null,
+          expiresAt: { gt: now },
+          ...(freeRegistration ? {} : {
+            otpExpiresAt: { gt: now },
+            otpAttempts: { lt: MAX_OTP_ATTEMPTS },
+          }),
+        },
         data: { verifiedAt: now, sessionTokenHash: hashSessionToken(registrationToken), stage: 2 },
       });
       if (!claimed.count) return res.status(409).json({ message: 'The verification code has already been used.' });
