@@ -347,11 +347,11 @@ export function MessagesPage() {
   }
 
   return (
-    <div className="min-h-[calc(100dvh-4rem)] w-full bg-slate-50 p-0 sm:p-4">
-      <header className="mx-auto max-w-6xl border-b border-slate-200 bg-white p-3 shadow-sm sm:rounded-t-[24px] sm:border sm:p-5">
+    <div className="h-[calc(100dvh-4rem)] w-full overflow-hidden bg-[#f0f2f5] p-0 sm:p-2">
+      <header className="mx-auto max-w-7xl border-b border-slate-200 bg-[#075e54] p-3 text-white shadow-sm sm:rounded-t-2xl sm:p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div><p className="text-xs font-semibold uppercase tracking-[0.22em] text-sky-200">NOVAKOKO Connect</p><h2 className="mt-1 text-xl font-semibold sm:text-2xl">Messages</h2></div>
-          <p className="text-sm text-blue-100">Your chats, groups, and communities in one place.</p>
+          <p className="text-sm text-emerald-100">Your chats, groups, and communities in one place.</p>
         </div>
         <nav aria-label="Communication sections" className="mt-4 flex gap-2 overflow-x-auto pb-1">
           <Link to="/messages" aria-current="page" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white"><MessageCircleMore className="h-4 w-4" aria-hidden="true" />Chats</Link>
@@ -416,7 +416,7 @@ export function MessagesPage() {
               const peer = conversation.participants.find((participant) => participant.userId !== user?.id)?.user
               const title = conversation.name ?? peer?.name ?? 'Group conversation'
               return (
-                <button key={conversation.id} type="button" onClick={() => { setSelectedId(conversation.id); setSearchResults(null) }} className={`flex w-full items-center gap-3 rounded-[20px] p-3 text-left transition ${selectedId === conversation.id ? 'bg-indigo-50 ring-1 ring-indigo-100' : 'hover:bg-slate-100'}`}>
+                <button key={conversation.id} type="button" onClick={() => { setSelectedId(conversation.id); setSearchResults(null) }} className={`flex w-full items-center gap-3 rounded-xl p-3 text-left transition ${selectedId === conversation.id ? 'bg-indigo-50 ring-1 ring-indigo-100' : 'hover:bg-slate-100'}`}>
                   <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(title)}`} alt={title} size="md" />
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center justify-between gap-2">
@@ -432,7 +432,7 @@ export function MessagesPage() {
           </div>
         </aside>
 
-        <section className={`${selectedId ? 'flex' : 'hidden lg:flex'} h-[calc(100dvh-4rem)] min-h-0 min-w-0 flex-col bg-[#efeae2] p-0 sm:h-[calc(100dvh-8rem)] sm:min-h-[65vh] sm:p-0`}>
+        <section className={`${selectedId ? 'flex' : 'hidden lg:flex'} h-[calc(100dvh-4rem)] min-h-0 min-w-0 flex-col bg-[#efeae2] bg-[radial-gradient(#d8d0c8_1px,transparent_1px)] [background-size:18px_18px] p-0 sm:h-[calc(100dvh-8rem)] sm:min-h-[65vh] sm:p-0`}>
           {error ? <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</div> : null}
           {activeConversation ? (
             <>
