@@ -347,22 +347,22 @@ export function MessagesPage() {
   }
 
   return (
-    <div className="space-y-4 p-3 sm:p-6">
-      <header className="mx-auto max-w-6xl rounded-[24px] bg-gradient-to-r from-[#10214f] via-blue-800 to-indigo-700 p-4 text-white shadow-lg shadow-blue-950/10 sm:p-5">
+    <div className="min-h-[calc(100dvh-4rem)] w-full bg-slate-50 p-0 sm:p-4">
+      <header className="mx-auto max-w-6xl border-b border-slate-200 bg-white p-3 shadow-sm sm:rounded-t-[24px] sm:border sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div><p className="text-xs font-semibold uppercase tracking-[0.22em] text-sky-200">NOVAKOKO Connect</p><h2 className="mt-1 text-xl font-semibold sm:text-2xl">Messages</h2></div>
           <p className="text-sm text-blue-100">Your chats, groups, and communities in one place.</p>
         </div>
         <nav aria-label="Communication sections" className="mt-4 flex gap-2 overflow-x-auto pb-1">
-          <Link to="/messages" aria-current="page" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-blue-800"><MessageCircleMore className="h-4 w-4" aria-hidden="true" />Chats</Link>
-          <Link to="/communities?type=GROUP" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><UsersRound className="h-4 w-4" aria-hidden="true" />Groups</Link>
-          <Link to="/communities?type=COMMUNITY" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><UsersRound className="h-4 w-4" aria-hidden="true" />Communities</Link>
-          <Link to="/communities?type=CHANNEL" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><Megaphone className="h-4 w-4" aria-hidden="true" />Channels</Link>
-          <Link to="/calls" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><Phone className="h-4 w-4" aria-hidden="true" />Calls</Link>
+          <Link to="/messages" aria-current="page" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white"><MessageCircleMore className="h-4 w-4" aria-hidden="true" />Chats</Link>
+          <Link to="/communities?type=GROUP" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50"><UsersRound className="h-4 w-4" aria-hidden="true" />Groups</Link>
+          <Link to="/communities?type=COMMUNITY" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50"><UsersRound className="h-4 w-4" aria-hidden="true" />Communities</Link>
+          <Link to="/communities?type=CHANNEL" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50"><Megaphone className="h-4 w-4" aria-hidden="true" />Channels</Link>
+          <Link to="/calls" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50"><Phone className="h-4 w-4" aria-hidden="true" />Calls</Link>
         </nav>
       </header>
       <div className="mx-auto grid max-w-6xl overflow-hidden rounded-[26px] border border-blue-100 bg-white shadow-[0_18px_60px_-38px_rgba(18,35,87,.35)] lg:grid-cols-[340px_minmax(0,1fr)]">
-        <aside className={`${selectedId ? 'hidden lg:block' : 'block'} min-w-0 border-b border-blue-100 bg-slate-50/80 p-4 lg:border-b-0 lg:border-r`}>
+        <aside className={`${selectedId ? 'hidden lg:block' : 'block'} min-w-0 border-b border-slate-200 bg-white p-3 lg:border-b-0 lg:border-r lg:p-4`}>
           <div className="flex items-center justify-between gap-3">
             <div><h3 className="text-lg font-semibold text-slate-900">Chats</h3><p className="text-xs text-slate-500">Private and group conversations</p></div>
             <Button variant="primary" size="sm" onClick={() => void openNewConversation()}>New chat</Button>
@@ -377,7 +377,7 @@ export function MessagesPage() {
               <p className="mt-3 text-xs font-semibold uppercase text-slate-500">{isGroup ? 'Choose group members' : 'Start a conversation'}</p>
               {isGroup ? <input aria-label="Group name" value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="Group name (optional)" className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" /> : null}
               {directoryError ? <p role="alert" className="mt-2 text-xs text-rose-700">{directoryError}</p> : null}
-              <div className="mt-2 max-h-40 space-y-1 overflow-y-auto">
+              <div className="mt-2 max-h-40 space-y-1 overflow-y-auto overscroll-contain">
                 {directory.map((directoryUser) => (
                   <label key={directoryUser.id} className="flex cursor-pointer items-center gap-2 rounded-xl px-2 py-2 hover:bg-slate-100">
                     {isGroup ? <input type="checkbox" checked={selectedParticipants.includes(directoryUser.id)} onChange={(event) => setSelectedParticipants((current) => event.target.checked ? [...current, directoryUser.id] : current.filter((id) => id !== directoryUser.id))} /> : null}
@@ -432,11 +432,11 @@ export function MessagesPage() {
           </div>
         </aside>
 
-        <section className={`${selectedId ? 'flex' : 'hidden lg:flex'} min-h-[65vh] min-w-0 flex-col bg-white p-3 sm:p-4`}>
+        <section className={`${selectedId ? 'flex' : 'hidden lg:flex'} h-[calc(100dvh-4rem)] min-h-0 min-w-0 flex-col bg-[#efeae2] p-0 sm:h-[calc(100dvh-8rem)] sm:min-h-[65vh] sm:p-0`}>
           {error ? <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</div> : null}
           {activeConversation ? (
             <>
-              <header className="flex flex-wrap items-center justify-between gap-3 border-b border-blue-100 pb-4">
+              <header className="sticky top-0 z-10 flex min-h-14 items-center justify-between gap-1 border-b border-slate-200 bg-white px-1 py-2 shadow-sm">
                 <div className="flex min-w-0 items-center gap-3">
                   <button type="button" onClick={() => setSelectedId('')} aria-label="Back to chats" className="rounded-full p-2 text-slate-500 hover:bg-blue-50 lg:hidden"><ArrowLeft className="h-5 w-5" aria-hidden="true" /></button>
                   <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(activeConversation.name ?? activePeer?.name ?? 'Group')}`} alt={activeConversation.name ?? activePeer?.name ?? 'Group'} size="md" />
@@ -445,24 +445,24 @@ export function MessagesPage() {
                     {activePeer ? <Link to={`/profile/${encodeURIComponent(activePeer.id)}`} className="text-xs text-indigo-700">View profile</Link> : <p className="text-xs text-slate-500">{activeConversation.participants.length} members</p>}
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center gap-1">
-                  <Link to="/calls" title="Open voice and video calls" aria-label="Open calls" className="rounded-lg p-2 text-blue-700 hover:bg-blue-50"><Phone className="h-4 w-4" aria-hidden="true" /></Link>
-                  <button type="button" title="Pin conversation" aria-label="Pin conversation" onClick={() => void updatePreference('pinned')} className={`rounded-lg p-2 ${activeConversation.pinnedAt ? 'text-indigo-700' : 'text-slate-500 hover:bg-slate-100'}`}><Pin className="h-4 w-4" /></button>
-                  <button type="button" title="Star conversation" aria-label="Star conversation" onClick={() => void updatePreference('starred')} className={`rounded-lg p-2 ${activeConversation.starredAt ? 'text-amber-600' : 'text-slate-500 hover:bg-slate-100'}`}><Star className="h-4 w-4" /></button>
-                  <button type="button" title="Mute for 24 hours" aria-label="Mute conversation" onClick={() => void updatePreference('mutedUntil')} className={`rounded-lg p-2 ${activeConversation.mutedUntil && new Date(activeConversation.mutedUntil).getTime() > Date.now() ? 'text-indigo-700' : 'text-slate-500 hover:bg-slate-100'}`}><VolumeX className="h-4 w-4" /></button>
-                  <button type="button" title="Archive conversation" aria-label="Archive conversation" onClick={() => void updatePreference('archived')} className={`rounded-lg p-2 ${activeConversation.archivedAt ? 'text-indigo-700' : 'text-slate-500 hover:bg-slate-100'}`}><Archive className="h-4 w-4" /></button>
-                  <button type="button" title="Shared media" aria-label="Shared media" onClick={() => void toggleMedia()} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><Image className="h-4 w-4" /></button>
+                <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto">
+                  <Link to="/calls" title="Open voice and video calls" aria-label="Open calls" className="rounded-full p-1.5 text-blue-700 hover:bg-blue-50"><Phone className="h-4 w-4" aria-hidden="true" /></Link>
+                  <button type="button" title="Pin conversation" aria-label="Pin conversation" onClick={() => void updatePreference('pinned')} className={`rounded-full p-1.5 ${activeConversation.pinnedAt ? 'text-indigo-700' : 'text-slate-500 hover:bg-slate-100'}`}><Pin className="h-4 w-4" /></button>
+                  <button type="button" title="Star conversation" aria-label="Star conversation" onClick={() => void updatePreference('starred')} className={`rounded-full p-1.5 ${activeConversation.starredAt ? 'text-amber-600' : 'text-slate-500 hover:bg-slate-100'}`}><Star className="h-4 w-4" /></button>
+                  <button type="button" title="Mute for 24 hours" aria-label="Mute conversation" onClick={() => void updatePreference('mutedUntil')} className={`rounded-full p-1.5 ${activeConversation.mutedUntil && new Date(activeConversation.mutedUntil).getTime() > Date.now() ? 'text-indigo-700' : 'text-slate-500 hover:bg-slate-100'}`}><VolumeX className="h-4 w-4" /></button>
+                  <button type="button" title="Archive conversation" aria-label="Archive conversation" onClick={() => void updatePreference('archived')} className={`rounded-full p-1.5 ${activeConversation.archivedAt ? 'text-indigo-700' : 'text-slate-500 hover:bg-slate-100'}`}><Archive className="h-4 w-4" /></button>
+                  <button type="button" title="Shared media" aria-label="Shared media" onClick={() => void toggleMedia()} className="rounded-full p-1.5 text-slate-500 hover:bg-slate-100"><Image className="h-4 w-4" /></button>
                 </div>
               </header>
 
               {showMedia ? <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-3">{media.length ? media.map((item) => item.mediaUrl ? <a key={item.id} href={item.mediaUrl} target="_blank" rel="noreferrer" className="min-w-0 overflow-hidden rounded-lg bg-white text-xs text-indigo-700">{item.contentType === 'IMAGE' ? <img src={item.mediaUrl} alt="Shared image" className="aspect-square w-full object-cover" /> : <span className="block truncate p-2">{item.contentType}: {item.mediaUrl}</span>}</a> : null) : <p className="text-xs text-slate-500">No shared media.</p>}</div> : null}
-              <form onSubmit={(event) => void searchMessages(event)} className="mt-3 flex gap-2">
+              <form onSubmit={(event) => void searchMessages(event)} className="mt-2 flex gap-2 px-1">
                 <input aria-label="Search messages" value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Search messages in this chat" minLength={2} className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none" />
                 <Button type="submit" variant="secondary" size="sm" disabled={messageSearch.trim().length < 2} icon={<Search className="h-4 w-4" aria-hidden="true" />}>Search</Button>
                 {searchResults ? <Button type="button" variant="ghost" size="sm" onClick={() => setSearchResults(null)}>Clear</Button> : null}
               </form>
 
-              <div className="mt-4 min-h-0 flex-1 space-y-4 overflow-y-auto">
+              <div className="mt-2 min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain px-2 pb-2 sm:px-3">
                 {hasMore && !searchResults ? <Button variant="secondary" size="sm" onClick={() => void loadOlderMessages()} disabled={loadingOlder}>{loadingOlder ? 'Loading…' : 'Load older messages'}</Button> : null}
                 {messagesLoading ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">Loading messages…</div> : null}
                 {!messagesLoading && searchResults && searchResults.length === 0 ? <p className="text-center text-sm text-slate-500">No matching messages.</p> : null}
@@ -472,7 +472,7 @@ export function MessagesPage() {
                   const reply = message.replyToId ? messages.find((item) => item.id === message.replyToId) : null
                   return (
                     <div key={message.id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
-                      <div className={`max-w-[min(90%,32rem)] rounded-2xl px-4 py-3 text-sm ${isOwn ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
+                      <div className={`max-w-[78%] rounded-2xl px-3 py-2 text-sm shadow-sm sm:max-w-[70%] ${isOwn ? 'bg-blue-600 text-white' : 'bg-white text-slate-700'}`}>
                         {message.forwardedFromId ? <p className={`mb-1 text-[10px] ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>Forwarded</p> : null}
                         {reply ? <p className={`mb-2 border-l-2 pl-2 text-xs ${isOwn ? 'border-indigo-200 text-indigo-100' : 'border-indigo-400 text-slate-500'}`}>{reply.text}</p> : null}
                         {message.contentType === 'IMAGE' && message.mediaUrl ? <a href={message.mediaUrl} target="_blank" rel="noreferrer"><img src={message.mediaUrl} alt="Message attachment" className="mb-2 max-h-64 rounded-xl object-cover" /></a> : null}
@@ -487,7 +487,7 @@ export function MessagesPage() {
                           {isOwn ? <span>· {message.readAt ? 'Read' : 'Sent'}</span> : null}
                         </div>
                         {message.reactions?.length ? <p className={`mt-1 text-xs ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>{message.reactions.map((reaction) => reaction.type).join(' ')}</p> : null}
-                        {!message.deletedAt ? <div className={`mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>
+                        {!message.deletedAt ? <div className={`mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>
                           <button type="button" onClick={() => setReplyTarget(message)} className="hover:underline">Reply</button>
                           <button type="button" onClick={() => void toggleReaction(message)} className="hover:underline">React</button>
                           <button type="button" onClick={() => { setForwardingId(forwardingId === message.id ? '' : message.id); setForwardTargetId('') }} className="hover:underline">Forward</button>
@@ -503,7 +503,7 @@ export function MessagesPage() {
                 })}
               </div>
 
-              <form onSubmit={(event) => void handleSendMessage(event)} className="mt-4 rounded-[24px] border border-slate-200 bg-slate-50 p-3">
+              <form onSubmit={(event) => void handleSendMessage(event)} className="sticky bottom-0 mt-1 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-lg">
                 {replyTarget ? <div className="mb-2 flex items-center justify-between rounded-xl bg-white px-3 py-2 text-xs text-slate-600"><span className="truncate">Replying to: {replyTarget.text || replyTarget.contentType}</span><button type="button" onClick={() => setReplyTarget(null)} aria-label="Cancel reply">×</button></div> : null}
                 <div className="flex flex-wrap gap-2">
                   <select aria-label="Message type" value={composeType} onChange={(event) => setComposeType(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-2 py-2 text-xs text-slate-700">
@@ -513,7 +513,7 @@ export function MessagesPage() {
                   {composeType === 'CONTACT' ? <><input aria-label="Contact name" value={contactName} onChange={(event) => setContactName(event.target.value)} placeholder="Contact name" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm" /><input aria-label="Contact phone" value={contactPhone} onChange={(event) => setContactPhone(event.target.value)} placeholder="Phone number" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm" /></> : null}
                   {composeType === 'LOCATION' ? <><input aria-label="Location label" value={locationLabel} onChange={(event) => setLocationLabel(event.target.value)} placeholder="Place name" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm" /><input aria-label="Latitude" type="number" step="any" value={latitude} onChange={(event) => setLatitude(event.target.value)} placeholder="Latitude" className="w-28 rounded-xl border border-slate-200 px-3 py-2 text-sm" /><input aria-label="Longitude" type="number" step="any" value={longitude} onChange={(event) => setLongitude(event.target.value)} placeholder="Longitude" className="w-28 rounded-xl border border-slate-200 px-3 py-2 text-sm" /></> : null}
                 </div>
-                <div className="mt-2 flex items-center gap-3">
+                <div className="mt-1 flex items-center gap-2">
                   <input aria-label="Type message" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && composeType === 'TEXT') { event.preventDefault(); void handleSendMessage() } }} placeholder={composeType === 'TEXT' ? 'Write a message…' : 'Optional message'} className="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none" />
                   <Button type="submit" variant="primary" size="sm" disabled={sending || !canSend} icon={<SendHorizontal className="h-4 w-4" aria-hidden="true" />}>{sending ? 'Sending…' : 'Send'}</Button>
                 </div>

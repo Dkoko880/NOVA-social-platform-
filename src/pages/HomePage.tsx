@@ -1,9 +1,7 @@
-import { ArrowRight, MessageCircle, Phone, Plus, RefreshCw, UsersRound } from 'lucide-react'
+import { ArrowRight, Plus } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { Avatar } from '../components/ui/Avatar'
 import { PostCard } from '../components/PostCard'
-import { useAuth } from '../context/AuthContext'
 import { apiRequest } from '../lib/api'
 import type { Post } from '../types'
 
@@ -26,7 +24,6 @@ function toPost(record: any): Post {
 }
 
 export function HomePage() {
-  const { user } = useAuth()
   const [posts, setPosts] = useState<Post[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -47,73 +44,213 @@ export function HomePage() {
   useEffect(() => { void loadFeed() }, [])
 
   return (
-    <div className="mx-auto grid max-w-7xl gap-6 p-4 sm:p-6 xl:grid-cols-[minmax(0,1fr)_300px]">
-      <div className="space-y-6">
-        <section className="relative overflow-hidden rounded-[28px] bg-gradient-to-br from-[#10214f] via-blue-800 to-indigo-700 p-5 text-white shadow-xl shadow-blue-950/15 sm:p-7">
-          <div aria-hidden="true" className="absolute -right-12 -top-20 h-64 w-64 rounded-full bg-sky-400/20 blur-3xl" />
-          <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
-            <div className="relative">
-              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-sky-200">Your people. Your moments.</p>
-              <h2 className="mt-2 text-2xl font-semibold sm:text-3xl">Welcome back, {user?.name.split(' ')[0]}.</h2>
-              <p className="mt-2 max-w-xl text-sm text-blue-100">
-                Catch up with your community and share what matters to you.
-              </p>
+    <div className="min-h-[calc(100dvh-1px)] w-full bg-slate-100">
+      <div className="mx-auto w-full max-w-7xl px-2 py-3 sm:px-4 lg:px-6">
+        {/* Facebook-style quick navigation */}
+        <div className="mb-3 flex w-full gap-2 overflow-x-auto pb-1">
+          <Link to="/" className="shrink-0 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white">
+            Home
+          </Link>
+          <Link to="/explore" className="shrink-0 rounded-full bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm">
+            Explore
+          </Link>
+          <Link to="/messages" className="shrink-0 rounded-full bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm">
+            Messages
+          </Link>
+          <Link to="/communities?type=GROUP" className="shrink-0 rounded-full bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm">
+            Groups
+          </Link>
+          <Link to="/communities?type=CHANNEL" className="shrink-0 rounded-full bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm">
+            Channels
+          </Link>
+          <Link to="/calls" className="shrink-0 rounded-full bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm">
+            Calls
+          </Link>
+          <Link to="/notifications" className="shrink-0 rounded-full bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm">
+            Notifications
+          </Link>
+        </div>
+
+        {/* Stories / highlights */}
+        <section className="mb-3 overflow-hidden rounded-2xl bg-white p-3 shadow-sm ring-1 ring-slate-200">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <h2 className="font-bold text-slate-900">Stories</h2>
+              <p className="text-xs text-slate-500">Share a moment with your community</p>
             </div>
-            <Link to="/explore" className="relative inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-white px-4 py-2.5 text-sm font-semibold text-blue-800 shadow-sm hover:bg-blue-50">
-              Find people <ArrowRight className="h-4 w-4" aria-hidden="true" />
+            <Link to="/create" className="text-sm font-semibold text-blue-700">
+              Create
             </Link>
           </div>
-        </section>
 
-        <section className="rounded-[24px] border border-blue-100 bg-white p-4 shadow-sm sm:p-5">
-          <Link to="/create" className="flex items-center gap-3">
-            <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(user?.name ?? 'NOVAKOKO')}`} alt={user?.name ?? 'NOVAKOKO'} size="md" />
-            <div className="min-w-0 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-500 transition hover:bg-blue-50">
-              Share something with your community…
-            </div>
-            <span className="hidden items-center gap-2 rounded-full bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white sm:inline-flex"><Plus className="h-4 w-4" aria-hidden="true" />Post</span>
-          </Link>
-        </section>
+          <div className="flex gap-3 overflow-x-auto pb-1">
+            <Link
+              to="/create"
+              className="flex h-28 w-20 shrink-0 flex-col items-center justify-center rounded-2xl bg-gradient-to-b from-blue-600 to-indigo-700 text-center text-white"
+            >
+              <Plus className="h-6 w-6" aria-hidden="true" />
+              <span className="mt-2 text-xs font-semibold">Add story</span>
+            </Link>
 
-        <nav aria-label="Social shortcuts" className="grid grid-cols-3 gap-2 sm:gap-3">
-          <Link to="/messages" className="flex items-center justify-center gap-2 rounded-2xl border border-blue-100 bg-white px-2 py-3 text-xs font-semibold text-blue-800 shadow-sm transition hover:bg-blue-50 sm:text-sm">
-            <MessageCircle className="h-4 w-4" aria-hidden="true" />Messages
-          </Link>
-          <Link to="/communities" className="flex items-center justify-center gap-2 rounded-2xl border border-blue-100 bg-white px-2 py-3 text-xs font-semibold text-blue-800 shadow-sm transition hover:bg-blue-50 sm:text-sm">
-            <UsersRound className="h-4 w-4" aria-hidden="true" />Groups
-          </Link>
-          <Link to="/calls" className="flex items-center justify-center gap-2 rounded-2xl border border-blue-100 bg-white px-2 py-3 text-xs font-semibold text-blue-800 shadow-sm transition hover:bg-blue-50 sm:text-sm">
-            <Phone className="h-4 w-4" aria-hidden="true" />Calls
-          </Link>
-        </nav>
-
-        <div className="space-y-5">
-          <div className="flex justify-end">
-            <button type="button" onClick={() => void loadFeed()} disabled={loading} className="inline-flex items-center gap-2 rounded-xl border border-blue-100 bg-white px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50">
-              <RefreshCw className="h-4 w-4" aria-hidden="true" />
-              Refresh feed
-            </button>
+            {['Your friends', 'Creators', 'Communities', 'Trending'].map((label) => (
+              <Link
+                key={label}
+                to="/explore"
+                className="flex h-28 w-20 shrink-0 flex-col justify-end rounded-2xl bg-gradient-to-b from-indigo-500 via-blue-600 to-slate-900 p-2 text-white"
+              >
+                <span className="text-xs font-semibold">{label}</span>
+              </Link>
+            ))}
           </div>
-          {error ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700"><span>{error}</span><button type="button" onClick={() => void loadFeed()} className="font-semibold underline">Retry</button></div> : null}
-          {loading ? <div className="rounded-2xl border border-blue-100 bg-white p-6 text-sm text-slate-500">Loading your feed…</div> : null}
-          {!loading && !error && posts.length === 0 ? <div className="rounded-2xl border border-dashed border-blue-200 bg-white p-8 text-center"><p className="font-semibold text-slate-800">Your feed starts here</p><p className="mt-1 text-sm text-slate-500">Share a post or find people to follow.</p><Link to="/create" className="mt-4 inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Create a post <Plus className="h-4 w-4" /></Link></div> : null}
-          {posts.map((post) => (
-            <PostCard key={post.id} post={post} onDeleted={(postId) => setPosts((current) => current.filter((item) => item.id !== postId))} />
-          ))}
+        </section>
+
+        <div className="grid w-full gap-4 lg:grid-cols-[240px_minmax(0,1fr)_260px]">
+          {/* Left Facebook-style shortcuts */}
+          <aside className="hidden lg:block">
+            <div className="sticky top-3 rounded-2xl bg-white p-3 shadow-sm ring-1 ring-slate-200">
+              <h3 className="mb-3 px-2 text-sm font-bold text-slate-900">Shortcuts</h3>
+
+              <div className="space-y-1">
+                <Link to="/profile" className="block rounded-xl px-3 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50">
+                  My Profile
+                </Link>
+                <Link to="/explore" className="block rounded-xl px-3 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50">
+                  Find People
+                </Link>
+                <Link to="/communities?type=GROUP" className="block rounded-xl px-3 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50">
+                  Groups
+                </Link>
+                <Link to="/communities?type=COMMUNITY" className="block rounded-xl px-3 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50">
+                  Communities
+                </Link>
+                <Link to="/communities?type=CHANNEL" className="block rounded-xl px-3 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50">
+                  Channels
+                </Link>
+                <Link to="/calls" className="block rounded-xl px-3 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50">
+                  Calls
+                </Link>
+                <Link to="/notifications" className="block rounded-xl px-3 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50">
+                  Notifications
+                </Link>
+              </div>
+            </div>
+          </aside>
+
+          {/* Main feed */}
+          <main className="min-w-0">
+            <div className="mb-3 rounded-2xl bg-white p-3 shadow-sm ring-1 ring-slate-200">
+              <div className="flex items-center gap-3">
+                <Link
+                  to="/create"
+                  className="flex min-w-0 flex-1 items-center rounded-full bg-slate-100 px-4 py-3 text-sm text-slate-500 hover:bg-slate-200"
+                >
+                  What&apos;s on your mind?
+                </Link>
+                <Link
+                  to="/create"
+                  className="hidden shrink-0 rounded-full bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white sm:inline-flex"
+                >
+                  <Plus className="mr-1 h-4 w-4" aria-hidden="true" />
+                  Post
+                </Link>
+              </div>
+
+              <div className="mt-3 grid grid-cols-3 border-t border-slate-100 pt-3">
+                <Link to="/create" className="py-2 text-center text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                  Photo / Video
+                </Link>
+                <Link to="/live" className="py-2 text-center text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                  Live
+                </Link>
+                <Link to="/create" className="py-2 text-center text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                  Create Post
+                </Link>
+              </div>
+            </div>
+
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h1 className="text-lg font-bold text-slate-900">Your Feed</h1>
+                <p className="text-xs text-slate-500">Posts from people and communities you follow</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadFeed()}
+                disabled={loading}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-blue-50 disabled:opacity-50"
+              >
+                {loading ? 'Refreshing…' : 'Refresh'}
+              </button>
+            </div>
+
+            {error ? (
+              <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span>{error}</span>
+                  <button type="button" onClick={() => void loadFeed()} className="font-semibold underline">
+                    Retry
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {!loading && !error && posts.length === 0 ? (
+              <div className="rounded-2xl bg-white p-8 text-center shadow-sm ring-1 ring-slate-200">
+                <p className="font-semibold text-slate-800">Your feed starts here</p>
+                <p className="mt-1 text-sm text-slate-500">Create your first post or discover people to follow.</p>
+                <Link to="/create" className="mt-4 inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white">
+                  Create a post
+                  <Plus className="h-4 w-4" aria-hidden="true" />
+                </Link>
+              </div>
+            ) : null}
+
+            <div className="space-y-3">
+              {posts.map((post) => (
+                <PostCard
+                  key={post.id}
+                  post={post}
+                  onDeleted={(postId) => setPosts((current) => current.filter((item) => item.id !== postId))}
+                />
+              ))}
+            </div>
+          </main>
+
+          {/* Right discovery panel */}
+          <aside className="hidden lg:block">
+            <div className="sticky top-3 space-y-3">
+              <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+                <h3 className="font-bold text-slate-900">Discover</h3>
+                <div className="mt-3 space-y-2">
+                  <Link to="/explore" className="block rounded-xl bg-slate-50 p-3 hover:bg-blue-50">
+                    <p className="text-sm font-semibold text-blue-700">Explore people</p>
+                    <p className="mt-1 text-xs text-slate-500">Find people and creators to follow.</p>
+                  </Link>
+                  <Link to="/communities?type=GROUP" className="block rounded-xl bg-slate-50 p-3 hover:bg-blue-50">
+                    <p className="text-sm font-semibold text-blue-700">Groups</p>
+                    <p className="mt-1 text-xs text-slate-500">Join conversations around shared interests.</p>
+                  </Link>
+                  <Link to="/live" className="block rounded-xl bg-slate-50 p-3 hover:bg-blue-50">
+                    <p className="text-sm font-semibold text-blue-700">Live</p>
+                    <p className="mt-1 text-xs text-slate-500">Discover live conversations and broadcasts.</p>
+                  </Link>
+                </div>
+              </div>
+
+              <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+                <h3 className="font-bold text-slate-900">NOVAKOKO</h3>
+                <p className="mt-2 text-sm leading-6 text-slate-600">
+                  Connect • Chat • Share • Live • Grow
+                </p>
+                <Link to="/explore" className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-blue-700">
+                  Explore NOVAKOKO
+                  <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                </Link>
+              </div>
+            </div>
+          </aside>
         </div>
       </div>
-
-      <aside className="space-y-6">
-        <section className="rounded-[24px] border border-blue-100 bg-gradient-to-br from-blue-50 to-indigo-50 p-5">
-          <p className="font-semibold text-blue-950">Find your people</p>
-          <p className="mt-2 text-sm leading-6 text-slate-600">Discover members and communities, then join the conversations that matter to you.</p>
-          <Link to="/explore" className="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-blue-700">Explore NOVAKOKO <ArrowRight className="h-4 w-4" aria-hidden="true" /></Link>
-        </section>
-        <section className="rounded-[24px] border border-slate-200 bg-white p-5">
-          <p className="font-semibold text-slate-900">A thoughtful community</p>
-          <p className="mt-2 text-sm leading-6 text-slate-600">Keep interactions respectful. Posts and comments are subject to NOVAKOKO moderation.</p>
-        </section>
-      </aside>
     </div>
   )
 }
