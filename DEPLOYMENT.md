@@ -1,6 +1,6 @@
 # NOVA production deployment
 
-NOVA deploys as two services: the Express API in `server/` and the Vite build served by Nginx. The frontend must be built with the public API URL; the API must have a reachable PostgreSQL database.
+The production frontend is a Vite application deployed to Vercel from the repository root, and the Express API in `server/` is deployed to Render. The frontend's SPA rewrite is configured in `vercel.json`; `server/Dockerfile` provides the API container. Do not create another service if the existing Vercel and Render services are already connected to this repository.
 
 ## Required configuration
 
@@ -14,7 +14,17 @@ Copy `server/.env.example` to `server/.env` and set:
 - `CORS_ORIGIN` to one or more exact HTTPS web origins separated by commas; wildcards are rejected in production
 - `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX_REQUESTS`, and `AUTH_RATE_LIMIT_MAX`
 
-Copy the root `.env.example` or set `VITE_API_BASE_URL` to the exact public API origin before the frontend build. Production builds fail when this value is missing and never fall back to localhost.
+The frontend API URL is `https://nova-social-platform-api.onrender.com` by default. Set `VITE_API_BASE_URL` to that exact origin in Vercel's project environment settings for production builds; the variable is optional for the current frontend source, which falls back to the same production API URL and does not fall back to localhost. The root `.env.example` contains only the safe, blank variable name.
+
+## Vercel
+
+Use the existing Vercel project and configure it to deploy the repository's `main` branch with the repository root as the project root. Vite's defaults use `npm ci`, `npm run build`, and `dist`; `vercel.json` rewrites browser routes to `index.html` so refreshes on client-side routes work. Set `VITE_API_BASE_URL=https://nova-social-platform-api.onrender.com` in the Vercel environment settings for every deployment target that should use the production API. This is a public API URL, not a secret.
+
+## Render
+
+Use the existing Render API service; do not create a second service. The API is a Docker service with `server/` as its root directory and `Dockerfile` as its Dockerfile path. The image build runs `npm run build` (which generates Prisma, applies committed migrations, and compiles TypeScript); container startup applies migrations again and runs `npm start`. The server listens on `0.0.0.0` and uses Render's `PORT` when provided.
+
+Configure the Render service environment with the required variable names listed below and in `server/.env.example`. Set `CORS_ORIGIN` to the exact HTTPS Vercel production origin(s), comma-separated if there is more than one. The API also explicitly permits the known Vercel production hostnames in `server/src/app.ts`. Store database URLs and signing keys only in Render's environment settings, never in this repository.
 
 ## PostgreSQL and Prisma
 
