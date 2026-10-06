@@ -14,6 +14,29 @@ export class MediaStorageUnavailableError extends Error {
   }
 }
 
+class MemoryMediaStorage implements MediaStorage {
+  private readonly objects = new Map<string, { bytes: Buffer; contentType: string }>();
+
+  async put(bytes: Buffer, contentType: string) {
+    const key = `${randomUUID()}.webp`;
+    this.objects.set(key, { bytes: Buffer.from(bytes), contentType });
+    return { key, publicUrl: `/api/media/avatars/${key}` };
+  }
+
+  async delete(key: string) {
+    this.objects.delete(key);
+  }
+
+  async get(key: string) {
+    const object = this.objects.get(key);
+    if (!object) return null;
+    return {
+      bytes: Buffer.from(object.bytes),
+      contentType: object.contentType,
+    };
+  }
+}
+
 class DatabaseMediaStorage implements MediaStorage {
   async put(bytes: Buffer, contentType: string) {
     const key = `${randomUUID()}.webp`;
@@ -57,6 +80,7 @@ class DatabaseMediaStorage implements MediaStorage {
 }
 
 let installedStorage: MediaStorage | null = null;
+const memoryStorage = new MemoryMediaStorage();
 const databaseStorage = new DatabaseMediaStorage();
 
 export function installMediaStorage(storage: MediaStorage | null) {
@@ -64,7 +88,8 @@ export function installMediaStorage(storage: MediaStorage | null) {
 }
 
 export function getMediaStorage(nodeEnv: string): MediaStorage {
-  if (installedStorage) return installedStorage;
   if (nodeEnv === 'production') return databaseStorage;
+  if (installedStorage) return installedStorage;
+  if (nodeEnv === 'test' || process.env.VITEST === 'true') return memoryStorage;
   return databaseStorage;
 }
