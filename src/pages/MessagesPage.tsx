@@ -376,7 +376,7 @@ export function MessagesPage() {
               </div>
               <p className="mt-3 text-xs font-semibold uppercase text-slate-500">{isGroup ? 'Choose group members' : 'Start a conversation'}</p>
               {isGroup ? <input aria-label="Group name" value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="Group name (optional)" className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" /> : null}
-              {directoryError ? <p role="alert" className="mt-2 text-xs text-rose-700">{directoryError}</p> : null}
+              {directoryError ? <p role="alert" className="mt-2 text-xs text-slate-600">{directoryError}</p> : null}
               <div className="mt-2 max-h-40 space-y-1 overflow-y-auto overscroll-contain">
                 {directory.map((directoryUser) => (
                   <label key={directoryUser.id} className="flex cursor-pointer items-center gap-2 rounded-xl px-2 py-2 hover:bg-slate-100">
@@ -433,7 +433,7 @@ export function MessagesPage() {
         </aside>
 
         <section className={`${selectedId ? 'flex' : 'hidden lg:flex'} h-[calc(100dvh-4rem)] min-h-0 min-w-0 flex-col bg-[#efeae2] bg-[radial-gradient(#d8d0c8_1px,transparent_1px)] [background-size:18px_18px] p-0 sm:h-[calc(100dvh-8rem)] sm:min-h-[65vh] sm:p-0`}>
-          {error ? <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</div> : null}
+          {error ? <div className="mb-3 rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-600" role="alert">{error}</div> : null}
           {activeConversation ? (
             <>
               <header className="sticky top-0 z-10 flex min-h-14 items-center justify-between gap-1 border-b border-slate-200 bg-white px-1 py-2 shadow-sm">

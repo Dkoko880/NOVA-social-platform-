@@ -74,7 +74,7 @@ export function ExplorePage() {
         <input aria-label="Search users" placeholder="Search by name, username, or bio" value={term} onChange={(event) => setTerm(event.target.value)} className="min-w-0 flex-1 bg-transparent text-slate-800 placeholder:text-slate-400 focus:outline-none" />
       </label>
 
-      {error ? <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p> : null}
+      {error ? <p role="alert" className="rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-600">{error}</p> : null}
       {loading ? <p className="rounded-xl bg-white p-4 text-sm text-slate-500">Loading people…</p> : null}
       {!loading && !error && filteredUsers.length === 0 ? <p className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">No users match this search.</p> : null}
 
