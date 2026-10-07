@@ -2,6 +2,7 @@ import { ArrowRight, Plus } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { PostCard } from '../components/PostCard'
+import { Avatar } from '../components/ui/Avatar'
 import { useAuth } from '../context/AuthContext'
 import { apiRequest, resolveMediaUrl, uploadMedia } from '../lib/api'
 import type { Post } from '../types'
@@ -186,7 +187,7 @@ export function HomePage() {
               <button key={story.id} type="button" onClick={() => void openStory(story)} className={`relative flex h-28 w-20 shrink-0 flex-col justify-end overflow-hidden rounded-2xl p-2 text-left text-white ring-2 ${story.viewedByMe ? 'ring-slate-200' : 'ring-indigo-500'}`}>
                 {story.mediaUrl ? <img src={resolveMediaUrl(story.mediaUrl)} crossOrigin={story.mediaUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="" className="absolute inset-0 h-full w-full object-cover" /> : <span className="absolute inset-0 bg-gradient-to-b from-indigo-500 to-blue-800" />}
                 <span className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
-                {story.author.avatar ? <img src={resolveMediaUrl(story.author.avatar)} crossOrigin={story.author.avatar.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="" className="absolute left-2 top-2 h-7 w-7 rounded-full border-2 border-white object-cover" /> : null}
+                <span className="absolute left-2 top-2 rounded-full border-2 border-white"><Avatar src={story.author.avatar} alt={story.author.name} size="sm" /></span>
                 <span className="relative line-clamp-2 text-xs font-semibold">{story.authorId === user?.id ? 'Your story' : story.author.name}</span>
               </button>
             ))}
@@ -304,6 +305,21 @@ export function HomePage() {
               </div>
             ) : null}
 
+            {loading ? (
+              <div className="space-y-3" aria-live="polite" aria-label="Loading your feed">
+                {[0, 1].map((item) => (
+                  <div key={item} className="animate-pulse rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+                    <div className="flex items-center gap-3">
+                      <span className="h-10 w-10 rounded-full bg-slate-200" />
+                      <span className="space-y-2"><span className="block h-3 w-32 rounded bg-slate-200" /><span className="block h-2 w-20 rounded bg-slate-100" /></span>
+                    </div>
+                    <span className="mt-4 block h-3 w-full rounded bg-slate-100" />
+                    <span className="mt-2 block h-3 w-3/4 rounded bg-slate-100" />
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
             {!loading && !error && posts.length === 0 ? (
               <div className="rounded-2xl bg-white p-8 text-center shadow-sm ring-1 ring-slate-200">
                 <p className="font-semibold text-slate-800">Your feed starts here</p>
@@ -316,7 +332,7 @@ export function HomePage() {
             ) : null}
 
             <div className="space-y-3">
-              {posts.map((post) => (
+              {!loading && posts.map((post) => (
                 <PostCard
                   key={post.id}
                   post={post}

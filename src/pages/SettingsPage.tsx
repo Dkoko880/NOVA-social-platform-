@@ -32,6 +32,7 @@ export function SettingsPage() {
   const navigate = useNavigate()
   const { logout } = useAuth()
   const [sessions, setSessions] = useState<Session[]>([])
+  const [sessionsLoading, setSessionsLoading] = useState(true)
   const [sessionError, setSessionError] = useState('')
   const [busy, setBusy] = useState(false)
   const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreference[]>([])
@@ -44,6 +45,7 @@ export function SettingsPage() {
     apiRequest<{ sessions: Session[] }>('/api/auth/sessions')
       .then((response) => { if (mounted) setSessions(response.sessions) })
       .catch(() => { if (mounted) setSessionError('Active sessions could not be loaded.') })
+      .finally(() => { if (mounted) setSessionsLoading(false) })
     return () => { mounted = false }
   }, [])
 
@@ -115,11 +117,12 @@ export function SettingsPage() {
                 <p className="text-sm text-slate-500">Devices currently signed in to your account.</p>
               </div>
             </div>
-            <button type="button" onClick={() => void revokeAllSessions()} disabled={busy || sessions.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-rose-200 px-3 py-2 text-sm font-semibold text-rose-700 disabled:opacity-50">
+            <button type="button" onClick={() => void revokeAllSessions()} disabled={busy || sessionsLoading || sessions.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-rose-200 px-3 py-2 text-sm font-semibold text-rose-700 disabled:opacity-50">
               <LogOut className="h-4 w-4" aria-hidden="true" /> Sign out all devices
             </button>
           </div>
           {sessionError ? <p className="mt-3 text-sm text-rose-700" role="alert">{sessionError}</p> : null}
+          {sessionsLoading ? <p className="mt-4 text-sm text-slate-500" role="status">Loading active sessions…</p> : null}
           <ul className="mt-4 divide-y divide-slate-200">
             {sessions.map((session) => (
               <li key={session.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
@@ -130,7 +133,7 @@ export function SettingsPage() {
                 <button type="button" onClick={() => void revokeSession(session.id)} disabled={busy} className="rounded-lg px-3 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50">Revoke</button>
               </li>
             ))}
-            {sessions.length === 0 ? <li className="py-4 text-sm text-slate-500">No active sessions found.</li> : null}
+            {!sessionsLoading && !sessionError && sessions.length === 0 ? <li className="py-4 text-sm text-slate-500">No active sessions found.</li> : null}
           </ul>
         </section>
 

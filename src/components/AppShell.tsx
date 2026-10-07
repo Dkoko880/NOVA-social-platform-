@@ -58,8 +58,8 @@ export function AppShell({ children }: AppShellProps) {
   }
 
   const userName = user?.name ?? 'NOVAKOKO User'
-  const userHandle = user?.email ?? 'member@novakoko.com'
-  const userAvatar = `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(userName)}`
+  const userHandle = user?.username ? `@${user.username}` : user?.email ?? 'NOVAKOKO member'
+  const userAvatar = ''
 
   return (
     <div className="min-h-screen text-slate-900">
@@ -173,10 +173,9 @@ function MobileNavigation() {
 
   const mobilePaths = ['/', '/explore', '/create', '/messages', '/profile']
   const mobileItems = sidebarItems.filter(({ path }) => mobilePaths.includes(path))
-
-  if (['ADMIN', 'SUPER_ADMIN', 'MODERATOR'].includes(user?.role ?? 'USER')) {
-    mobileItems.push({ label: 'Admin', path: '/admin', icon: BriefcaseBusiness })
-  }
+  const canAccessAdmin = ['ADMIN', 'SUPER_ADMIN', 'MODERATOR'].includes(user?.role ?? 'USER')
+  const moreItems = sidebarItems.filter(({ path }) => !mobilePaths.includes(path))
+  if (canAccessAdmin) moreItems.push({ label: 'Admin', path: '/admin', icon: BriefcaseBusiness })
 
   const handleMobileLogout = async () => {
     try {
@@ -189,31 +188,36 @@ function MobileNavigation() {
   return (
     <>
       <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-indigo-100/80 bg-white/95 px-2 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur-xl lg:hidden">
-        <div className="mx-auto grid max-w-lg grid-cols-5 gap-1">
+        <div className="mx-auto grid max-w-lg grid-cols-6 gap-1">
           {mobileItems.map(({ label, path, icon: Icon }) => (
             <NavLink
               key={path}
               to={path}
+              end={path === '/'}
               className={({ isActive }) =>
                 cn(
-                  'flex min-h-9 flex-col items-center justify-center gap-0.5 rounded-xl px-1 py-1 text-[10px] font-medium transition-colors',
+                  'flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-xl px-1 py-1 text-[10px] font-medium transition-colors',
                   isActive ? 'bg-blue-50 text-blue-700' : 'text-slate-500 hover:text-slate-900',
                 )
               }
+              aria-label={label}
             >
               <Icon className="h-4 w-4" aria-hidden="true" />
               <span>{label}</span>
             </NavLink>
           ))}
-        </div>
-
-        <div className="mx-auto mt-2 flex max-w-lg items-center justify-center gap-2">
           <button
             type="button"
             onClick={() => setMenuOpen(true)}
-            className="rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-blue-50"
+            aria-expanded={menuOpen}
+            aria-label="Open more navigation"
+            className={cn(
+              'flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-xl px-1 py-1 text-[10px] font-medium transition-colors',
+              menuOpen ? 'bg-blue-50 text-blue-700' : 'text-slate-500 hover:text-slate-900',
+            )}
           >
-            Settings & Account
+            <UsersRound className="h-4 w-4" aria-hidden="true" />
+            <span>More</span>
           </button>
         </div>
       </nav>
@@ -226,15 +230,30 @@ function MobileNavigation() {
             aria-label="Close account menu"
             onClick={() => setMenuOpen(false)}
           />
-          <div className="absolute inset-x-3 bottom-24 rounded-3xl bg-white p-4 shadow-2xl">
-            <NavLink
-              to="/settings"
-              onClick={() => setMenuOpen(false)}
-              className="flex items-center gap-3 rounded-2xl px-4 py-3 font-semibold text-slate-700 hover:bg-blue-50"
-            >
-              <Settings className="h-5 w-5" aria-hidden="true" />
-              Settings
-            </NavLink>
+          <div className="absolute inset-x-3 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] mx-auto max-w-lg rounded-3xl border border-slate-200 bg-white p-4 shadow-2xl">
+            <div className="mb-3 flex items-center justify-between px-2">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-700">NOVAKOKO</p>
+                <p className="text-sm font-semibold text-slate-900">More to explore</p>
+              </div>
+              <button type="button" onClick={() => setMenuOpen(false)} aria-label="Close navigation" className="rounded-lg px-3 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100">Close</button>
+            </div>
+            <nav aria-label="More navigation" className="grid grid-cols-2 gap-1">
+              {moreItems.map(({ label, path, icon: Icon }) => (
+                <NavLink
+                  key={path}
+                  to={path}
+                  onClick={() => setMenuOpen(false)}
+                  className={({ isActive }) => cn(
+                    'flex items-center gap-3 rounded-2xl px-3 py-3 text-sm font-medium',
+                    isActive ? 'bg-blue-50 text-blue-700' : 'text-slate-700 hover:bg-slate-50',
+                  )}
+                >
+                  <Icon className="h-4 w-4" aria-hidden="true" />
+                  {label}
+                </NavLink>
+              ))}
+            </nav>
 
             <button
               type="button"

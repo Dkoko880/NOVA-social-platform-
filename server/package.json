@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "prisma generate && tsc -p tsconfig.json",
+    "lint": "oxlint src",
     "start": "node dist/src/server.js",
     "start:prod": "node dist/src/server.js",
     "test": "NODE_ENV=test vitest run",

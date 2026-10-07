@@ -355,22 +355,22 @@ export function MessagesPage() {
   }
 
   return (
-    <div className="h-[calc(100dvh-4rem)] w-full overflow-hidden bg-[#f0f2f5] p-0 sm:p-2">
-      <header className="mx-auto max-w-7xl border-b border-slate-200 bg-[#075e54] p-3 text-white shadow-sm sm:rounded-t-2xl sm:p-4">
+    <div className="flex h-[calc(100dvh-9.5rem)] min-h-0 w-full flex-col overflow-hidden bg-[#f4f6fb] p-0 sm:p-2 lg:h-[calc(100dvh-7rem)]">
+      <header className="mx-auto w-full max-w-7xl shrink-0 border-b border-blue-900/20 bg-gradient-to-r from-[#10214f] via-blue-800 to-indigo-700 p-3 text-white shadow-sm sm:rounded-t-2xl sm:p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div><p className="text-xs font-semibold uppercase tracking-[0.22em] text-sky-200">NOVAKOKO Connect</p><h2 className="mt-1 text-xl font-semibold sm:text-2xl">Messages</h2></div>
-          <p className="text-sm text-emerald-100">Your chats, groups, and communities in one place.</p>
+          <p className="text-sm text-blue-100">Your chats, groups, and communities in one place.</p>
         </div>
         <nav aria-label="Communication sections" className="mt-4 flex gap-2 overflow-x-auto pb-1">
-          <Link to="/messages" aria-current="page" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white"><MessageCircleMore className="h-4 w-4" aria-hidden="true" />Chats</Link>
-          <Link to="/communities?type=GROUP" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50"><UsersRound className="h-4 w-4" aria-hidden="true" />Groups</Link>
-          <Link to="/communities?type=COMMUNITY" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50"><UsersRound className="h-4 w-4" aria-hidden="true" />Communities</Link>
-          <Link to="/communities?type=CHANNEL" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50"><Megaphone className="h-4 w-4" aria-hidden="true" />Channels</Link>
-          <Link to="/calls" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-blue-50"><Phone className="h-4 w-4" aria-hidden="true" />Calls</Link>
+          <Link to="/messages" aria-current="page" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-blue-800"><MessageCircleMore className="h-4 w-4" aria-hidden="true" />Chats</Link>
+          <Link to="/communities?type=GROUP" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><UsersRound className="h-4 w-4" aria-hidden="true" />Groups</Link>
+          <Link to="/communities?type=COMMUNITY" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><UsersRound className="h-4 w-4" aria-hidden="true" />Communities</Link>
+          <Link to="/communities?type=CHANNEL" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><Megaphone className="h-4 w-4" aria-hidden="true" />Channels</Link>
+          <Link to="/calls" className="inline-flex shrink-0 items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20"><Phone className="h-4 w-4" aria-hidden="true" />Calls</Link>
         </nav>
       </header>
-      <div className="mx-auto grid max-w-6xl overflow-hidden rounded-[26px] border border-blue-100 bg-white shadow-[0_18px_60px_-38px_rgba(18,35,87,.35)] lg:grid-cols-[340px_minmax(0,1fr)]">
-        <aside className={`${selectedId ? 'hidden lg:block' : 'block'} min-w-0 border-b border-slate-200 bg-white p-3 lg:border-b-0 lg:border-r lg:p-4`}>
+      <div className="mx-auto grid min-h-0 w-full max-w-6xl flex-1 overflow-hidden rounded-b-[26px] border border-blue-100 bg-white shadow-[0_18px_60px_-38px_rgba(18,35,87,.35)] lg:grid-cols-[340px_minmax(0,1fr)]">
+        <aside className={`${selectedId ? 'hidden lg:block' : 'block'} min-h-0 min-w-0 overflow-y-auto border-b border-slate-200 bg-white p-3 lg:border-b-0 lg:border-r lg:p-4`}>
           <div className="flex items-center justify-between gap-3">
             <div><h3 className="text-lg font-semibold text-slate-900">Chats</h3><p className="text-xs text-slate-500">Private and group conversations</p></div>
             <Button variant="primary" size="sm" onClick={() => void openNewConversation()}>New chat</Button>
@@ -425,7 +425,7 @@ export function MessagesPage() {
               const title = conversation.name ?? peer?.name ?? 'Group conversation'
               return (
                 <button key={conversation.id} type="button" onClick={() => { setSelectedId(conversation.id); setSearchResults(null) }} className={`flex w-full items-center gap-3 rounded-xl p-3 text-left transition ${selectedId === conversation.id ? 'bg-indigo-50 ring-1 ring-indigo-100' : 'hover:bg-slate-100'}`}>
-                  <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(title)}`} alt={title} size="md" />
+                  <Avatar src="" alt={title} size="md" />
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center justify-between gap-2">
                       <span className="truncate font-medium text-slate-900">{title}</span>
@@ -440,14 +440,14 @@ export function MessagesPage() {
           </div>
         </aside>
 
-        <section className={`${selectedId ? 'flex' : 'hidden lg:flex'} h-[calc(100dvh-4rem)] min-h-0 min-w-0 flex-col bg-[#efeae2] bg-[radial-gradient(#d8d0c8_1px,transparent_1px)] [background-size:18px_18px] p-0 sm:h-[calc(100dvh-8rem)] sm:min-h-[65vh] sm:p-0`}>
+        <section className={`${selectedId ? 'flex' : 'hidden lg:flex'} h-full min-h-0 min-w-0 flex-col bg-[#f4f5fb] bg-[radial-gradient(#d9dced_1px,transparent_1px)] [background-size:18px_18px] p-0`}>
           {error ? <div className="mb-3 rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-600" role="alert">{error}</div> : null}
           {activeConversation ? (
             <>
               <header className="sticky top-0 z-10 flex min-h-14 items-center justify-between gap-1 border-b border-slate-200 bg-white px-1 py-2 shadow-sm">
                 <div className="flex min-w-0 items-center gap-3">
                   <button type="button" onClick={() => setSelectedId('')} aria-label="Back to chats" className="rounded-full p-2 text-slate-500 hover:bg-blue-50 lg:hidden"><ArrowLeft className="h-5 w-5" aria-hidden="true" /></button>
-                  <Avatar src={`https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(activeConversation.name ?? activePeer?.name ?? 'Group')}`} alt={activeConversation.name ?? activePeer?.name ?? 'Group'} size="md" />
+                  <Avatar src="" alt={activeConversation.name ?? activePeer?.name ?? 'Group'} size="md" />
                   <div className="min-w-0">
                     <p className="truncate font-semibold text-slate-900">{activeConversation.name ?? activePeer?.name ?? 'Group conversation'}</p>
                     {activePeer ? <Link to={`/profile/${encodeURIComponent(activePeer.id)}`} className="text-xs text-indigo-700">View profile</Link> : <p className="text-xs text-slate-500">{activeConversation.participants.length} members</p>}
