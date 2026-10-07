@@ -88,6 +88,8 @@ export function AuthPage({ mode }: AuthPageProps) {
     } catch (error) {
       if (error instanceof ApiError) {
         setFormError(error.message)
+      } else if (error instanceof Error) {
+        setFormError(error.message)
       } else {
         setFormError('We could not complete your request. Please try again.')
       }
