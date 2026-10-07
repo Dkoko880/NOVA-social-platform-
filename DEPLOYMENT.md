@@ -10,7 +10,7 @@ Copy `server/.env.example` to `server/.env` and set:
 - `HOST=0.0.0.0` and `PORT=4000` (or the values supplied by the runtime)
 - `DATABASE_URL` to the production PostgreSQL connection string
 - `JWT_SECRET` to a unique random value of at least 32 characters, stored only in the deployment secret manager
-- `JWT_EXPIRES_IN`, `COOKIE_NAME`, and `COOKIE_SAME_SITE`; use `COOKIE_SAME_SITE=none` only when the web and API are cross-site and HTTPS is enforced
+- `JWT_EXPIRES_IN`, `COOKIE_NAME`, and `COOKIE_SAME_SITE`; the production default is `none` for the cross-site Vercel/Render deployment, and secure cookies require HTTPS. Use `lax` or `strict` only when the web and API are same-site.
 - `CORS_ORIGIN` to one or more exact HTTPS web origins separated by commas; wildcards are rejected in production
 - `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX_REQUESTS`, and `AUTH_RATE_LIMIT_MAX`
 
@@ -25,6 +25,8 @@ Use the existing Vercel project and configure it to deploy the repository's `mai
 Use the existing Render API service; do not create a second service. The API is a Docker service with `server/` as its root directory and `Dockerfile` as its Dockerfile path. The image build runs `npm run build` to generate Prisma and compile TypeScript without needing production database access. Container startup runs `npm run db:migrate:deploy` before `npm start`, applying committed migrations without resetting application data. The server listens on `0.0.0.0` and uses Render's `PORT` when provided.
 
 Configure the Render service environment with the required variable names listed below and in `server/.env.example`. Set `CORS_ORIGIN` to the exact HTTPS Vercel production origin(s), comma-separated if there is more than one. The API also explicitly permits the known Vercel production hostnames in `server/src/app.ts`. Store database URLs and signing keys only in Render's environment settings, never in this repository.
+
+The Vercel frontend and Render API are cross-site, so production auth cookies must use `SameSite=None; Secure; HttpOnly`. The API defaults to `COOKIE_SAME_SITE=none` when `NODE_ENV=production`; do not override it with `lax` for this deployment. Local development continues to default to `lax`.
 
 ## PostgreSQL and Prisma
 

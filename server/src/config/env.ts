@@ -23,7 +23,9 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32).default(DEVELOPMENT_JWT_SECRET),
   JWT_EXPIRES_IN: z.string().default('7d'),
   COOKIE_NAME: z.string().default('nova_session'),
-  COOKIE_SAME_SITE: z.enum(['lax', 'strict', 'none']).default('lax'),
+  COOKIE_SAME_SITE: z.enum(['lax', 'strict', 'none']).default(
+    process.env.NODE_ENV?.toLowerCase() === 'production' ? 'none' : 'lax',
+  ),
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(900000),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().default(100),

@@ -87,6 +87,26 @@ describe('auth routes', () => {
     expect((await request(app).get('/api/auth/me').set('Cookie', phoneLogin.headers['set-cookie'])).status).toBe(200);
   });
 
+  it('supports bearer-session authentication and revocation', async () => {
+    await request(app).post('/api/auth/register').send({
+      name: 'Bearer User',
+      email: 'bearer@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ identifier: 'bearer@example.com', password: 'Password123' });
+    const sessionCookie = login.headers['set-cookie'][0];
+    const token = sessionCookie.split(';', 1)[0].split('=', 2)[1];
+
+    expect(login.status).toBe(200);
+    expect((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${token}`)).status).toBe(200);
+    expect((await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${token}`)).status).toBe(200);
+    expect((await request(app).get('/api/auth/me').set('Cookie', sessionCookie)).status).toBe(401);
+  });
+
   it('logs in an existing user by email and password', async () => {
     await request(app)
       .post('/api/auth/register')
