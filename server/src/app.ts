@@ -6,6 +6,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import env from './config/env.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { cfRayDiagnostic } from './middleware/cfRayDiagnostic.js';
 import { adminRouter } from './routes/admin.js';
 import { authRouter } from './routes/auth.js';
 import { command2aRouter } from './routes/command2a.js';
@@ -29,6 +30,7 @@ const allowedOrigins = Array.from(
 );
 const connectSources = ["'self'", ...allowedOrigins.filter((origin) => origin !== '*')];
 
+app.use(cfRayDiagnostic);
 app.use(helmet({
   crossOriginResourcePolicy: false,
   contentSecurityPolicy: {
