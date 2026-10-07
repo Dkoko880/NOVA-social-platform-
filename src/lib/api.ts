@@ -82,12 +82,24 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
 
   let response: Response | undefined
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => {
+      controller.abort(new DOMException('The request timed out.', 'TimeoutError'))
+    }, 15000)
+    const abortFromRequest = () => controller.abort(options.signal?.reason)
+
+    if (options.signal?.aborted) {
+      abortFromRequest()
+    } else {
+      options.signal?.addEventListener('abort', abortFromRequest, { once: true })
+    }
+
     try {
       response = await fetch(`${API_BASE_URL}${path}`, {
-        signal: AbortSignal.timeout(15000),
         ...options,
         credentials: 'include',
         headers,
+        signal: controller.signal,
       })
     } catch (error) {
       if (isSafeRead && error instanceof TypeError && attempt < maxAttempts - 1) {
@@ -99,6 +111,9 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
         throw new Error(`Unable to reach the NOVAKOKO API at ${API_BASE_URL}. Please try again shortly.`)
       }
       throw error
+    } finally {
+      clearTimeout(timeoutId)
+      options.signal?.removeEventListener('abort', abortFromRequest)
     }
 
     if (isSafeRead && [502, 503, 504].includes(response.status) && attempt < maxAttempts - 1) {
