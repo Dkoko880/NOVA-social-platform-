@@ -20,6 +20,7 @@ type ConversationListItem = {
   archivedAt?: string | null
   starredAt?: string | null
   mutedUntil?: string | null
+  unreadCount?: number
 }
 type MessageReaction = { id?: string; userId: string; type: string }
 type MessageItem = {
@@ -191,7 +192,7 @@ export function MessagesPage() {
     .filter((conversation) => showArchived || !conversation.archivedAt)
     .filter((conversation) => conversationFilter === 'all'
       || (conversationFilter === 'unread'
-        ? Boolean(conversation.lastMessage && conversation.lastMessage.senderId !== user?.id && !conversation.lastMessage.readAt)
+        ? (conversation.unreadCount ?? 0) > 0
         : conversation.participants.length > 2 || Boolean(conversation.name)))
     .filter((conversation) => {
       const peer = conversation.participants.find((participant) => participant.userId !== user?.id)?.user
@@ -425,7 +426,7 @@ export function MessagesPage() {
                     </span>
                     <span className="block truncate text-xs text-slate-500">{lastMessage?.text ?? conversation.lastMessagePreview ?? 'Start the conversation'}</span>
                   </span>
-                  {lastMessage && lastMessage.senderId !== user?.id && !lastMessage.readAt ? <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-600 text-[10px] font-semibold text-white">1</span> : null}
+                  {conversation.unreadCount ? <span aria-label={`${conversation.unreadCount} unread messages`} className="flex h-5 min-w-5 items-center justify-center rounded-full bg-indigo-600 px-1 text-[10px] font-semibold text-white">{conversation.unreadCount > 99 ? '99+' : conversation.unreadCount}</span> : null}
                 </button>
               )
             })}

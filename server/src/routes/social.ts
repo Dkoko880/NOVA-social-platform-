@@ -5,6 +5,7 @@ import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { socialStore } from '../lib/socialStore.js';
 import { reviewContentForSafety } from '../lib/moderation.js';
+import { isNotificationEnabled } from '../lib/platform.js';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
 
 const updateProfileSchema = z.object({
@@ -22,6 +23,11 @@ const createPostSchema = z.object({
   imageUrl: z.string().trim().max(500).url().optional().or(z.literal('')),
   visibility: z.enum(['PUBLIC', 'FOLLOWERS', 'PRIVATE']).default('PUBLIC'),
 });
+
+const createStorySchema = z.object({
+  text: z.string().trim().max(500).optional(),
+  mediaUrl: z.string().trim().max(2000).url().refine((value) => value.startsWith('https://'), 'Story media must use HTTPS.').optional(),
+}).refine((payload) => Boolean(payload.text || payload.mediaUrl), { message: 'A story needs text or media.' });
 
 const updatePostSchema = z.object({
   content: z.string().trim().min(1).max(2500).optional(),
@@ -246,6 +252,7 @@ async function getBlockStatus(currentUserId: string, targetUserId: string) {
 }
 
 async function addNotification(recipientId: string, actorId: string | null, type: string, message: string) {
+  if (!(await isNotificationEnabled(recipientId, type))) return;
   const dbAvailable = await isDatabaseAvailable();
 
   if (dbAvailable) {
@@ -352,6 +359,124 @@ async function requireAccountAccess(req: any, res: any, next: any) {
 }
 
 socialRouter.use(requireActiveAccountIfAuthenticated);
+
+socialRouter.get('/stories', requireAuth, async (req, res) => {
+  const userId = req.user!.id;
+  const dbAvailable = await isDatabaseAvailable();
+  const followedIds = dbAvailable
+    ? (await prisma.follow.findMany({ where: { followerId: userId }, select: { followingId: true } })).map((follow) => follow.followingId)
+    : socialStore.state.follows.filter((follow) => follow.followerId === userId).map((follow) => follow.followingId);
+  const authorIds = [userId, ...followedIds];
+  const now = new Date();
+  const records = dbAvailable
+    ? await prisma.story.findMany({
+        where: { authorId: { in: authorIds }, expiresAt: { gt: now } },
+        include: {
+          author: { select: { id: true, name: true, email: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } },
+          views: { where: { viewerId: userId }, select: { id: true } },
+          _count: { select: { views: true } },
+        },
+        orderBy: { createdAt: 'asc' },
+        take: 100,
+      })
+    : socialStore.state.stories.filter((story) => authorIds.includes(story.authorId) && new Date(story.expiresAt).getTime() > now.getTime())
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt)).slice(-100);
+
+  const stories = [];
+  for (const story of records) {
+    const authorId = story.authorId;
+    const blockStatus = authorId === userId ? { blockedByMe: false, blockedMe: false } : await getBlockStatus(userId, authorId);
+    if (blockStatus.blockedByMe || blockStatus.blockedMe) continue;
+    const databaseStory = 'author' in story ? story : null;
+    const author = databaseStory ? databaseStory.author : await getUserById(authorId);
+    const views = databaseStory ? databaseStory._count.views : socialStore.state.storyViews.filter((view) => view.storyId === story.id).length;
+    const viewedByMe = authorId === userId || (databaseStory ? databaseStory.views.length > 0 : socialStore.state.storyViews.some((view) => view.storyId === story.id && view.viewerId === userId));
+    stories.push({
+      id: story.id,
+      authorId,
+      text: story.text,
+      mediaUrl: story.mediaUrl,
+      createdAt: story.createdAt,
+      expiresAt: story.expiresAt,
+      viewCount: views,
+      viewedByMe,
+      author: author ? await getUserSummary(author) : null,
+    });
+  }
+
+  return res.json({ stories });
+});
+
+socialRouter.post('/stories', requireAuth, requireAccountAccess, async (req, res) => {
+  const payload = createStorySchema.parse(req.body ?? {});
+  const userId = req.user!.id;
+  const text = payload.text?.trim() || null;
+  const moderation = reviewContentForSafety({ type: 'post', text: text ?? '', userId });
+  if (moderation === 'REMOVE') return res.status(400).json({ message: 'This story violates NOVA Community & Safety Rules.' });
+  if (moderation === 'REVIEW') return res.status(422).json({ message: 'This story requires moderator review before publication.' });
+
+  const now = new Date();
+  const data = { authorId: userId, text, mediaUrl: payload.mediaUrl ?? null, expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000) };
+  const dbAvailable = await isDatabaseAvailable();
+  const story = dbAvailable
+    ? await prisma.story.create({ data })
+    : { id: `story_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, ...data, createdAt: now };
+  if (!dbAvailable) socialStore.state.stories.push({ ...story, createdAt: story.createdAt.toISOString(), expiresAt: story.expiresAt.toISOString() });
+  const author = await getUserById(userId);
+  return res.status(201).json({ story: {
+    ...story,
+    createdAt: story.createdAt.toISOString(),
+    expiresAt: story.expiresAt.toISOString(),
+    viewCount: 0,
+    viewedByMe: true,
+    author: author ? await getUserSummary(author) : null,
+  } });
+});
+
+socialRouter.post('/stories/:id/view', requireAuth, async (req, res) => {
+  const userId = req.user!.id;
+  const storyId = String(req.params.id);
+  const dbAvailable = await isDatabaseAvailable();
+  const story = dbAvailable
+    ? await prisma.story.findFirst({ where: { id: storyId, expiresAt: { gt: new Date() } }, select: { id: true, authorId: true } })
+    : socialStore.state.stories.find((entry) => entry.id === storyId && new Date(entry.expiresAt).getTime() > Date.now());
+  if (!story) return res.status(404).json({ message: 'Story not found.' });
+  if (story.authorId !== userId) {
+    const [following, blockStatus] = await Promise.all([isFollowing(userId, story.authorId), getBlockStatus(userId, story.authorId)]);
+    if (!following || blockStatus.blockedByMe || blockStatus.blockedMe) return res.status(404).json({ message: 'Story not found.' });
+  }
+
+  if (story.authorId === userId) {
+    const viewCount = dbAvailable ? await prisma.storyView.count({ where: { storyId } }) : socialStore.state.storyViews.filter((view) => view.storyId === storyId).length;
+    return res.json({ viewed: true, viewCount });
+  }
+
+  if (dbAvailable) {
+    await prisma.storyView.upsert({ where: { storyId_viewerId: { storyId, viewerId: userId } }, create: { storyId, viewerId: userId }, update: {} });
+    const viewCount = await prisma.storyView.count({ where: { storyId } });
+    return res.json({ viewed: true, viewCount });
+  }
+
+  if (!socialStore.state.storyViews.some((view) => view.storyId === storyId && view.viewerId === userId)) {
+    socialStore.state.storyViews.push({ id: `story_view_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, storyId, viewerId: userId, viewedAt: new Date().toISOString() });
+  }
+  const viewCount = socialStore.state.storyViews.filter((view) => view.storyId === storyId).length;
+  return res.json({ viewed: true, viewCount });
+});
+
+socialRouter.delete('/stories/:id', requireAuth, requireAccountAccess, async (req, res) => {
+  const storyId = String(req.params.id);
+  if (await isDatabaseAvailable()) {
+    const deleted = await prisma.story.deleteMany({ where: { id: storyId, authorId: req.user!.id } });
+    if (!deleted.count) return res.status(404).json({ message: 'Story not found.' });
+  } else {
+    const index = socialStore.state.stories.findIndex((story) => story.id === storyId && story.authorId === req.user!.id);
+    if (index < 0) return res.status(404).json({ message: 'Story not found.' });
+    socialStore.state.stories.splice(index, 1);
+    socialStore.state.storyViews = socialStore.state.storyViews.filter((view) => view.storyId !== storyId);
+  }
+  return res.json({ deleted: true });
+});
 
 socialRouter.get('/users', async (req, res) => {
   const dbAvailable = await isDatabaseAvailable();

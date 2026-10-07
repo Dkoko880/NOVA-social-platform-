@@ -2,8 +2,21 @@ import { ArrowRight, Plus } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { PostCard } from '../components/PostCard'
+import { useAuth } from '../context/AuthContext'
 import { apiRequest } from '../lib/api'
 import type { Post } from '../types'
+
+type StoryRecord = {
+  id: string
+  authorId: string
+  text: string | null
+  mediaUrl: string | null
+  createdAt: string
+  expiresAt: string
+  viewCount: number
+  viewedByMe: boolean
+  author: { id: string; name: string; handle: string; avatar: string }
+}
 
 function toPost(record: any): Post {
   return {
@@ -24,9 +37,18 @@ function toPost(record: any): Post {
 }
 
 export function HomePage() {
+  const { user } = useAuth()
   const [posts, setPosts] = useState<Post[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [stories, setStories] = useState<StoryRecord[]>([])
+  const [storiesLoading, setStoriesLoading] = useState(true)
+  const [storiesError, setStoriesError] = useState('')
+  const [showStoryComposer, setShowStoryComposer] = useState(false)
+  const [storyText, setStoryText] = useState('')
+  const [storyMediaUrl, setStoryMediaUrl] = useState('')
+  const [storyBusy, setStoryBusy] = useState(false)
+  const [activeStory, setActiveStory] = useState<StoryRecord | null>(null)
 
   const loadFeed = async () => {
     setLoading(true)
@@ -42,6 +64,73 @@ export function HomePage() {
   }
 
   useEffect(() => { void loadFeed() }, [])
+
+  const loadStories = async () => {
+    try {
+      const response = await apiRequest<{ stories: StoryRecord[] }>('/api/stories')
+      setStories(response.stories)
+    } catch (loadError) {
+      setStoriesError(loadError instanceof Error ? loadError.message : 'Unable to load stories.')
+    } finally {
+      setStoriesLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    let mounted = true
+    apiRequest<{ stories: StoryRecord[] }>('/api/stories')
+      .then((response) => { if (mounted) setStories(response.stories) })
+      .catch((loadError) => { if (mounted) setStoriesError(loadError instanceof Error ? loadError.message : 'Unable to load stories.') })
+      .finally(() => { if (mounted) setStoriesLoading(false) })
+    return () => { mounted = false }
+  }, [])
+
+  const refreshStories = () => {
+    setStoriesLoading(true)
+    setStoriesError('')
+    void loadStories()
+  }
+
+  const publishStory = async () => {
+    if (storyBusy || (!storyText.trim() && !storyMediaUrl.trim())) return
+    setStoryBusy(true)
+    setStoriesError('')
+    try {
+      const response = await apiRequest<{ story: StoryRecord }>('/api/stories', {
+        method: 'POST',
+        body: JSON.stringify({ ...(storyText.trim() ? { text: storyText.trim() } : {}), ...(storyMediaUrl.trim() ? { mediaUrl: storyMediaUrl.trim() } : {}) }),
+      })
+      setStories((current) => [...current, response.story])
+      setStoryText('')
+      setStoryMediaUrl('')
+      setShowStoryComposer(false)
+    } catch (publishError) {
+      setStoriesError(publishError instanceof Error ? publishError.message : 'Unable to publish this story.')
+    } finally {
+      setStoryBusy(false)
+    }
+  }
+
+  const openStory = async (story: StoryRecord) => {
+    try {
+      const response = await apiRequest<{ viewed: boolean; viewCount: number }>(`/api/stories/${encodeURIComponent(story.id)}/view`, { method: 'POST' })
+      const updatedStory = { ...story, viewedByMe: true, viewCount: response.viewCount }
+      setStories((current) => current.map((item) => item.id === story.id ? updatedStory : item))
+      setActiveStory(updatedStory)
+    } catch (viewError) {
+      setStoriesError(viewError instanceof Error ? viewError.message : 'Unable to open this story.')
+    }
+  }
+
+  const deleteStory = async (story: StoryRecord) => {
+    try {
+      await apiRequest(`/api/stories/${encodeURIComponent(story.id)}`, { method: 'DELETE' })
+      setStories((current) => current.filter((item) => item.id !== story.id))
+      setActiveStory(null)
+    } catch (deleteError) {
+      setStoriesError(deleteError instanceof Error ? deleteError.message : 'Unable to delete this story.')
+    }
+  }
 
   return (
     <div className="min-h-[calc(100dvh-1px)] w-full bg-slate-100">
@@ -71,38 +160,47 @@ export function HomePage() {
           </Link>
         </div>
 
-        {/* Stories / highlights */}
         <section className="mb-3 overflow-hidden rounded-2xl bg-white p-3 shadow-sm ring-1 ring-slate-200">
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h2 className="font-bold text-slate-900">Stories</h2>
               <p className="text-xs text-slate-500">Share a moment with your community</p>
             </div>
-            <Link to="/create" className="text-sm font-semibold text-blue-700">
-              Create
-            </Link>
+            <p className="text-xs text-slate-500">Statuses expire after 24 hours</p>
           </div>
 
           <div className="flex gap-3 overflow-x-auto pb-1">
-            <Link
-              to="/create"
-              className="flex h-28 w-20 shrink-0 flex-col items-center justify-center rounded-2xl bg-gradient-to-b from-blue-600 to-indigo-700 text-center text-white"
-            >
+            <button type="button" onClick={() => setShowStoryComposer((current) => !current)} aria-expanded={showStoryComposer} className="flex h-28 w-20 shrink-0 flex-col items-center justify-center rounded-2xl bg-gradient-to-b from-blue-600 to-indigo-700 text-center text-white">
               <Plus className="h-6 w-6" aria-hidden="true" />
               <span className="mt-2 text-xs font-semibold">Add story</span>
-            </Link>
-
-            {['Your friends', 'Creators', 'Communities', 'Trending'].map((label) => (
-              <Link
-                key={label}
-                to="/explore"
-                className="flex h-28 w-20 shrink-0 flex-col justify-end rounded-2xl bg-gradient-to-b from-indigo-500 via-blue-600 to-slate-900 p-2 text-white"
-              >
-                <span className="text-xs font-semibold">{label}</span>
-              </Link>
+            </button>
+            {stories.map((story) => (
+              <button key={story.id} type="button" onClick={() => void openStory(story)} className={`relative flex h-28 w-20 shrink-0 flex-col justify-end overflow-hidden rounded-2xl p-2 text-left text-white ring-2 ${story.viewedByMe ? 'ring-slate-200' : 'ring-indigo-500'}`}>
+                {story.mediaUrl ? <img src={story.mediaUrl} alt="" className="absolute inset-0 h-full w-full object-cover" /> : <span className="absolute inset-0 bg-gradient-to-b from-indigo-500 to-blue-800" />}
+                <span className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
+                {story.author.avatar ? <img src={story.author.avatar} alt="" className="absolute left-2 top-2 h-7 w-7 rounded-full border-2 border-white object-cover" /> : null}
+                <span className="relative line-clamp-2 text-xs font-semibold">{story.authorId === user?.id ? 'Your story' : story.author.name}</span>
+              </button>
             ))}
           </div>
+          {storiesLoading ? <p className="mt-2 text-xs text-slate-500">Loading stories…</p> : null}
+          {storiesError ? <p role="alert" className="mt-2 flex items-center justify-between gap-2 text-xs text-rose-700"><span>{storiesError}</span><button type="button" onClick={refreshStories} className="shrink-0 font-semibold underline">Retry</button></p> : null}
+          {!storiesLoading && !storiesError && stories.length === 0 ? <p className="mt-2 text-xs text-slate-500">No active stories from you or people you follow.</p> : null}
+          {showStoryComposer ? <form onSubmit={(event) => { event.preventDefault(); void publishStory() }} className="mt-3 grid gap-2 border-t border-slate-100 pt-3 sm:grid-cols-[1fr_1fr_auto]">
+            <input aria-label="Story text" value={storyText} onChange={(event) => setStoryText(event.target.value)} maxLength={500} placeholder="Share a short status" className="min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+            <input aria-label="Story image URL" type="url" value={storyMediaUrl} onChange={(event) => setStoryMediaUrl(event.target.value)} placeholder="Image URL (HTTPS)" className="min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+            <button type="submit" disabled={storyBusy || (!storyText.trim() && !storyMediaUrl.trim())} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{storyBusy ? 'Posting…' : 'Post status'}</button>
+          </form> : null}
         </section>
+
+        {activeStory ? <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4" role="dialog" aria-modal="true" aria-label={`${activeStory.author.name}'s story`}>
+          <div className="relative flex max-h-[90dvh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-slate-950 text-white">
+            {activeStory.mediaUrl ? <img src={activeStory.mediaUrl} alt="Story" className="max-h-[70dvh] w-full object-contain" /> : null}
+            <div className="p-4"><p className="font-semibold">{activeStory.author.name}</p>{activeStory.text ? <p className="mt-2 whitespace-pre-wrap text-sm">{activeStory.text}</p> : null}<p className="mt-2 text-xs text-slate-300">{activeStory.viewCount} views</p></div>
+            <button type="button" onClick={() => setActiveStory(null)} aria-label="Close story" className="absolute right-3 top-3 rounded-full bg-black/60 px-3 py-2 text-sm">Close</button>
+            {activeStory.authorId === user?.id ? <button type="button" onClick={() => void deleteStory(activeStory)} className="m-3 rounded-xl border border-white/30 px-3 py-2 text-sm font-semibold">Delete story</button> : null}
+          </div>
+        </div> : null}
 
         <div className="grid w-full gap-4 lg:grid-cols-[240px_minmax(0,1fr)_260px]">
           {/* Left Facebook-style shortcuts */}

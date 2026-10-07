@@ -146,6 +146,9 @@ model User {
   reportsMade              Report[]                  @relation("Reporter")
   reportsAbout             Report[]                  @relation("ReportedUser")
   notifications            Notification[]            @relation("NotificationRecipient")
+  notificationPreferences  NotificationPreference[]
+  authoredStories          Story[]                    @relation("StoryAuthor")
+  storyViews               StoryView[]                @relation("StoryViewer")
   conversationsOwnedBy     Conversation[]            @relation("ConversationOwner")
   messageSent              Message[]                 @relation("MessageSender")
   messageReactions         MessageReaction[]
@@ -323,6 +326,34 @@ model Post {
   @@index([authorId])
   @@index([communityId])
   @@index([createdAt])
+}
+
+model Story {
+  id        String   @id @default(cuid())
+  authorId  String
+  text      String?
+  mediaUrl  String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  author User        @relation("StoryAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  views  StoryView[]
+
+  @@index([authorId, createdAt])
+  @@index([expiresAt])
+}
+
+model StoryView {
+  id       String   @id @default(cuid())
+  storyId  String
+  viewerId String
+  viewedAt DateTime @default(now())
+
+  story  Story @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  viewer User  @relation("StoryViewer", fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@unique([storyId, viewerId])
+  @@index([viewerId])
 }
 
 model PostSave {
@@ -523,6 +554,20 @@ model Report {
   @@index([commentId])
   @@index([targetUserId])
   @@index([status])
+}
+
+model NotificationPreference {
+  id        String   @id @default(cuid())
+  userId    String
+  key       String
+  enabled   Boolean  @default(true)
+  channel   String   @default("in_app")
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+  @@index([userId])
 }
 
 model Notification {

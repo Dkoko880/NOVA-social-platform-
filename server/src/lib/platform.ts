@@ -129,22 +129,32 @@ function buildNotificationId() {
   return `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function getNotificationPreferences(userId: string) {
-  const preferences = getStore().notificationPreferences[userId] ?? [
+const defaultNotificationPreferences: NotificationPreference[] = [
     { key: 'social', enabled: true, channel: 'in_app' },
     { key: 'messages', enabled: true, channel: 'in_app' },
     { key: 'security', enabled: true, channel: 'in_app' },
     { key: 'live', enabled: true, channel: 'in_app' },
     { key: 'calls', enabled: true, channel: 'in_app' },
     { key: 'mentions', enabled: true, channel: 'in_app' },
-  ];
+];
+
+export async function getNotificationPreferences(userId: string): Promise<NotificationPreference[]> {
+  if (await isDatabaseAvailable()) {
+    const stored = await prisma.notificationPreference.findMany({ where: { userId } });
+    return defaultNotificationPreferences.map((preference) => {
+      const saved = stored.find((entry) => entry.key === preference.key);
+      return saved ? { key: preference.key, enabled: saved.enabled, channel: saved.channel as NotificationPreference['channel'] } : preference;
+    });
+  }
+
+  const preferences = getStore().notificationPreferences[userId] ?? defaultNotificationPreferences;
 
   getStore().notificationPreferences[userId] = preferences;
   return [...preferences];
 }
 
-export function setNotificationPreferences(userId: string, updates: Partial<Record<NotificationPreference['key'], Partial<Pick<NotificationPreference, 'enabled' | 'channel'>>>>) {
-  const current = getNotificationPreferences(userId);
+export async function setNotificationPreferences(userId: string, updates: Partial<Record<NotificationPreference['key'], Partial<Pick<NotificationPreference, 'enabled' | 'channel'>>>>): Promise<NotificationPreference[]> {
+  const current = await getNotificationPreferences(userId);
   const next = current.map((pref) => {
     const patch = updates[pref.key];
     if (!patch) {
@@ -156,11 +166,36 @@ export function setNotificationPreferences(userId: string, updates: Partial<Reco
       ...(patch.channel ? { channel: patch.channel } : {}),
     };
   });
+
+  if (await isDatabaseAvailable()) {
+    await Promise.all(next.map((preference) => prisma.notificationPreference.upsert({
+      where: { userId_key: { userId, key: preference.key } },
+      create: { userId, ...preference },
+      update: { enabled: preference.enabled, channel: preference.channel },
+    })));
+    return next;
+  }
+
   getStore().notificationPreferences[userId] = next;
   return [...next];
 }
 
+export async function isNotificationEnabled(userId: string, type: string) {
+  const key: NotificationPreference['key'] = type.includes('mention') ? 'mentions'
+    : type.includes('message') ? 'messages'
+      : type.includes('security') ? 'security'
+        : type.includes('call') ? 'calls'
+          : type.includes('live') ? 'live'
+            : 'social';
+  if (await isDatabaseAvailable()) {
+    const preference = await prisma.notificationPreference.findUnique({ where: { userId_key: { userId, key } }, select: { enabled: true } });
+    return preference?.enabled ?? true;
+  }
+  return (await getNotificationPreferences(userId)).find((preference) => preference.key === key)?.enabled ?? true;
+}
+
 export async function createNotification(recipientId: string, actorId: string | null, type: string, message: string) {
+  if (!(await isNotificationEnabled(recipientId, type))) return null;
   const dbAvailable = await isDatabaseAvailable();
   const base = {
     id: buildNotificationId(),

@@ -1,5 +1,5 @@
 import { Eye, EyeOff, ShieldCheck, Sparkles } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { getCountries, getCountryCallingCode, type CountryCode } from 'libphonenumber-js'
 import { Button } from '../components/ui/Button'
@@ -210,10 +210,9 @@ export function AuthPage({ mode }: AuthPageProps) {
   const [formError, setFormError] = useState('')
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const isRegister = mode === 'register'
+  const submitLabel = 'Log in'
 
   if (isRegister) return <PhoneRegistrationFlow />
-
-  const submitLabel = useMemo(() => (isRegister ? 'Create account' : 'Log in'), [isRegister])
 
   const handleChange = (field: 'name' | 'email' | 'password' | 'confirmPassword' | 'communityRulesAccepted', value: string | boolean) => {
     setFormData((current) => ({ ...current, [field]: value }))

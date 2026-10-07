@@ -66,6 +66,37 @@ describe('command 2a foundation', () => {
     expect(notifications.body.notifications.length).toBeGreaterThan(0);
   });
 
+  it('persists notification category preferences through the API', async () => {
+    await request(app).post('/api/auth/register').send({
+      name: 'Alice',
+      email: 'alice@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+    const login = await request(app).post('/api/auth/login').send({ email: 'alice@example.com', password: 'Password123' });
+    const auth = getCookieHeader(login);
+
+    const initial = await request(app).get('/api/notifications/preferences').set('Cookie', auth);
+    expect(initial.status).toBe(200);
+    expect(initial.body.preferences.find((item: { key: string }) => item.key === 'messages').enabled).toBe(true);
+
+    const updated = await request(app).put('/api/notifications/preferences').set('Cookie', auth).send({ key: 'messages', enabled: false });
+    expect(updated.status).toBe(200);
+    expect(updated.body.preferences.find((item: { key: string }) => item.key === 'messages').enabled).toBe(false);
+
+    const refreshed = await request(app).get('/api/notifications/preferences').set('Cookie', auth);
+    expect(refreshed.body.preferences.find((item: { key: string }) => item.key === 'messages').enabled).toBe(false);
+
+    await request(app).put('/api/notifications/preferences').set('Cookie', auth).send({ key: 'calls', enabled: false });
+    await request(app).post('/api/auth/register').send({ name: 'Bob', email: 'bob@example.com', password: 'Password123', communityRulesAccepted: true });
+    const bobLogin = await request(app).post('/api/auth/login').send({ email: 'bob@example.com', password: 'Password123' });
+    const alice = login.body.user as { id: string };
+    await request(app).post('/api/calls/start').set('Cookie', getCookieHeader(bobLogin)).send({ targetUserId: alice.id, type: 'voice' });
+    const notifications = await request(app).get('/api/notifications').set('Cookie', auth);
+    expect(notifications.body.notifications.some((item: { type: string }) => item.type === 'call')).toBe(false);
+    await request(app).put('/api/notifications/preferences').set('Cookie', auth).send({ key: 'calls', enabled: true });
+  });
+
   it('updates presence and typing authorization for conversation participants', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',

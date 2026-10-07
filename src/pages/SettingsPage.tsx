@@ -1,17 +1,21 @@
-import { ChevronRight, Lock, ShieldCheck, Bell, UserCog, HelpCircle, SlidersHorizontal, LogOut, MonitorSmartphone } from 'lucide-react'
+import { Bell, LogOut, MonitorSmartphone } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { ApiError, apiRequest } from '../lib/api'
-import { settingsGroups } from '../data/mockData'
+type NotificationPreference = {
+  key: 'social' | 'messages' | 'security' | 'live' | 'calls' | 'mentions'
+  enabled: boolean
+  channel: 'in_app' | 'email' | 'push'
+}
 
-const iconMap = {
-  account: UserCog,
-  privacy: Lock,
-  security: ShieldCheck,
-  notifications: Bell,
-  safety: SlidersHorizontal,
-  help: HelpCircle,
+const notificationLabels: Record<NotificationPreference['key'], string> = {
+  social: 'Social activity',
+  messages: 'Messages',
+  security: 'Security alerts',
+  live: 'Live sessions',
+  calls: 'Calls',
+  mentions: 'Mentions',
 }
 
 type Session = {
@@ -30,6 +34,10 @@ export function SettingsPage() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [sessionError, setSessionError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreference[]>([])
+  const [preferencesLoading, setPreferencesLoading] = useState(true)
+  const [preferencesBusy, setPreferencesBusy] = useState('')
+  const [preferencesError, setPreferencesError] = useState('')
 
   useEffect(() => {
     let mounted = true
@@ -38,6 +46,31 @@ export function SettingsPage() {
       .catch(() => { if (mounted) setSessionError('Active sessions could not be loaded.') })
     return () => { mounted = false }
   }, [])
+
+  useEffect(() => {
+    let mounted = true
+    apiRequest<{ preferences: NotificationPreference[] }>('/api/notifications/preferences')
+      .then((response) => { if (mounted) setNotificationPreferences(response.preferences) })
+      .catch((error) => { if (mounted) setPreferencesError(error instanceof Error ? error.message : 'Notification preferences could not be loaded.') })
+      .finally(() => { if (mounted) setPreferencesLoading(false) })
+    return () => { mounted = false }
+  }, [])
+
+  const updateNotificationPreference = async (preference: NotificationPreference) => {
+    setPreferencesBusy(preference.key)
+    setPreferencesError('')
+    try {
+      const response = await apiRequest<{ preferences: NotificationPreference[] }>('/api/notifications/preferences', {
+        method: 'PUT',
+        body: JSON.stringify({ key: preference.key, enabled: !preference.enabled }),
+      })
+      setNotificationPreferences(response.preferences)
+    } catch (error) {
+      setPreferencesError(error instanceof ApiError ? error.message : 'Notification preference could not be updated.')
+    } finally {
+      setPreferencesBusy('')
+    }
+  }
 
   const revokeSession = async (id: string) => {
     setBusy(true)
@@ -101,33 +134,37 @@ export function SettingsPage() {
           </ul>
         </section>
 
-        <div className="mt-6 space-y-5">
-          {settingsGroups.map((group) => {
-            const Icon = iconMap[group.id as keyof typeof iconMap] ?? UserCog
-
-            return (
-              <section key={group.id} className="rounded-[24px] border border-slate-200 bg-slate-50 p-4">
-                <div className="mb-4 flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-indigo-700 shadow-sm">
-                    <Icon className="h-4 w-4" aria-hidden="true" />
-                  </div>
-                  <p className="font-semibold text-slate-900">{group.title}</p>
-                </div>
-                <div className="space-y-2">
-                  {group.items.map((item) => (
-                    <div key={item.label} className="flex items-center justify-between gap-3 rounded-2xl bg-white px-3 py-3 text-sm">
-                      <span className="text-slate-700">{item.label}</span>
-                      <span className={`inline-flex items-center gap-2 ${item.highlight ? 'font-semibold text-indigo-700' : 'text-slate-500'}`}>
-                        {item.value}
-                        <ChevronRight className="h-4 w-4" aria-hidden="true" />
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )
-          })}
-        </div>
+        <section className="mt-6 border-t border-slate-200 pt-5">
+          <div className="flex items-center gap-3">
+            <Bell className="h-5 w-5 text-indigo-700" aria-hidden="true" />
+            <div>
+              <h3 className="font-semibold text-slate-900">In-app notifications</h3>
+              <p className="text-sm text-slate-500">Choose which activity can notify you.</p>
+            </div>
+          </div>
+          {preferencesError ? <p role="alert" className="mt-3 text-sm text-rose-700">{preferencesError}</p> : null}
+          {preferencesLoading ? <p className="mt-4 text-sm text-slate-500">Loading notification preferences…</p> : null}
+          {!preferencesLoading && !preferencesError ? (
+            <ul className="mt-3 divide-y divide-slate-200">
+              {notificationPreferences.map((preference) => (
+                <li key={preference.key} className="flex items-center justify-between gap-4 py-3">
+                  <span className="text-sm font-medium text-slate-800">{notificationLabels[preference.key]}</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={preference.enabled}
+                    aria-label={notificationLabels[preference.key]}
+                    disabled={Boolean(preferencesBusy)}
+                    onClick={() => void updateNotificationPreference(preference)}
+                    className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50 ${preference.enabled ? 'bg-indigo-600' : 'bg-slate-300'}`}
+                  >
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${preference.enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
       </div>
     </div>
   )

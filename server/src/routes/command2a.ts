@@ -104,12 +104,12 @@ command2aRouter.post('/notifications/read-all', requireAuth, async (req, res) =>
 });
 
 command2aRouter.get('/notifications/preferences', requireAuth, async (req, res) => {
-  return res.json({ preferences: getNotificationPreferences(req.user!.id) });
+  return res.json({ preferences: await getNotificationPreferences(req.user!.id) });
 });
 
 command2aRouter.put('/notifications/preferences', requireAuth, async (req, res) => {
   const payload = notificationPreferenceSchema.parse(req.body ?? {});
-  const next = setNotificationPreferences(req.user!.id, { [payload.key]: { enabled: payload.enabled, channel: payload.channel } });
+  const next = await setNotificationPreferences(req.user!.id, { [payload.key]: { enabled: payload.enabled, channel: payload.channel } });
   return res.json({ preferences: next });
 });
 

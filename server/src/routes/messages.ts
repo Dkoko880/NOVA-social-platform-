@@ -231,7 +231,11 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
   if (dbAvailable) {
     const conversations = await prisma.conversation.findMany({
       where: { participants: { some: { userId } } },
-      include: { participants: { include: { user: { select: { id: true, name: true } } } }, messages: { orderBy: { createdAt: 'desc' }, take: 1 } },
+      include: {
+        participants: { include: { user: { select: { id: true, name: true } } } },
+        messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+        _count: { select: { messages: { where: { senderId: { not: userId }, readAt: null, deletedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] } } } },
+      },
       orderBy: { updatedAt: 'desc' },
     });
 
@@ -247,6 +251,7 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
         archivedAt: currentParticipant?.archivedAt ?? null,
         starredAt: currentParticipant?.starredAt ?? null,
         mutedUntil: currentParticipant?.mutedUntil ?? null,
+        unreadCount: conversation._count.messages,
         participants: conversation.participants.map((participant) => ({ id: participant.id, userId: participant.userId, role: participant.role, user: participant.user })),
         lastMessage: conversation.messages[0] ? messageToPublicShape(conversation.messages[0]) : null,
       };
@@ -267,6 +272,7 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
       archivedAt: currentParticipant?.archivedAt ?? null,
       starredAt: currentParticipant?.starredAt ?? null,
       mutedUntil: currentParticipant?.mutedUntil ?? null,
+      unreadCount: socialStore.state.messages.filter((message) => message.conversationId === conversation.id && message.senderId !== userId && !message.readAt && !message.deletedAt && (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now())).length,
       participants: participants.map((participant) => ({
         ...participant,
         user: findUserById(participant.userId) ? { id: participant.userId, name: findUserById(participant.userId)!.name } : undefined,

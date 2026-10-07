@@ -430,6 +430,67 @@ describe('social platform features', () => {
     expect(refreshed.body.messages.some((entry: { id: string }) => entry.id === message.body.message.id)).toBe(true);
   });
 
+  it('reports the actual unread message count and clears it when the conversation is read', async () => {
+    for (const user of [
+      { name: 'Alice', email: 'alice@example.com' },
+      { name: 'Bob', email: 'bob@example.com' },
+    ]) {
+      await request(app).post('/api/auth/register').send({ ...user, password: 'Password123', communityRulesAccepted: true });
+    }
+    const aliceLogin = await request(app).post('/api/auth/login').send({ email: 'alice@example.com', password: 'Password123' });
+    const bobLogin = await request(app).post('/api/auth/login').send({ email: 'bob@example.com', password: 'Password123' });
+    const bob = (await request(app).get('/api/users')).body.users.find((user: { name: string }) => user.name === 'Bob');
+    const conversation = await request(app).post('/api/conversations').set('Cookie', getCookieHeader(aliceLogin)).send({ participantId: bob.id });
+
+    for (const text of ['First unread message', 'Second unread message']) {
+      const sent = await request(app)
+        .post(`/api/conversations/${conversation.body.conversation.id}/messages`)
+        .set('Cookie', getCookieHeader(bobLogin))
+        .send({ text });
+      expect(sent.status).toBe(201);
+    }
+
+    const unreadList = await request(app).get('/api/conversations').set('Cookie', getCookieHeader(aliceLogin));
+    expect(unreadList.body.conversations.find((item: { id: string }) => item.id === conversation.body.conversation.id).unreadCount).toBe(2);
+
+    await request(app).post(`/api/conversations/${conversation.body.conversation.id}/read`).set('Cookie', getCookieHeader(aliceLogin));
+    const readList = await request(app).get('/api/conversations').set('Cookie', getCookieHeader(aliceLogin));
+    expect(readList.body.conversations.find((item: { id: string }) => item.id === conversation.body.conversation.id).unreadCount).toBe(0);
+  });
+
+  it('limits stories to followed users and tracks each viewer once', async () => {
+    for (const user of [
+      { name: 'Alice', email: 'alice@example.com' },
+      { name: 'Bob', email: 'bob@example.com' },
+      { name: 'Cara', email: 'cara@example.com' },
+    ]) {
+      await request(app).post('/api/auth/register').send({ ...user, password: 'Password123', communityRulesAccepted: true });
+    }
+    const aliceLogin = await request(app).post('/api/auth/login').send({ email: 'alice@example.com', password: 'Password123' });
+    const bobLogin = await request(app).post('/api/auth/login').send({ email: 'bob@example.com', password: 'Password123' });
+    const caraLogin = await request(app).post('/api/auth/login').send({ email: 'cara@example.com', password: 'Password123' });
+    const users = (await request(app).get('/api/users')).body.users as { id: string; name: string }[];
+    const bob = users.find((user) => user.name === 'Bob')!;
+
+    await request(app).post(`/api/users/${bob.id}/follow`).set('Cookie', getCookieHeader(aliceLogin));
+    const bobStory = await request(app).post('/api/stories').set('Cookie', getCookieHeader(bobLogin)).send({ text: 'A real status update' });
+    const caraStory = await request(app).post('/api/stories').set('Cookie', getCookieHeader(caraLogin)).send({ text: 'Only my followers should see this' });
+    expect(bobStory.status).toBe(201);
+    expect(new Date(bobStory.body.story.expiresAt).getTime() - new Date(bobStory.body.story.createdAt).getTime()).toBe(24 * 60 * 60 * 1000);
+
+    const aliceStories = await request(app).get('/api/stories').set('Cookie', getCookieHeader(aliceLogin));
+    expect(aliceStories.body.stories.map((story: { id: string }) => story.id)).toContain(bobStory.body.story.id);
+    expect(aliceStories.body.stories.map((story: { id: string }) => story.id)).not.toContain(caraStory.body.story.id);
+    expect((await request(app).post(`/api/stories/${caraStory.body.story.id}/view`).set('Cookie', getCookieHeader(aliceLogin))).status).toBe(404);
+
+    const firstView = await request(app).post(`/api/stories/${bobStory.body.story.id}/view`).set('Cookie', getCookieHeader(aliceLogin));
+    const duplicateView = await request(app).post(`/api/stories/${bobStory.body.story.id}/view`).set('Cookie', getCookieHeader(aliceLogin));
+    expect(firstView.body.viewCount).toBe(1);
+    expect(duplicateView.body.viewCount).toBe(1);
+    expect((await request(app).delete(`/api/stories/${bobStory.body.story.id}`).set('Cookie', getCookieHeader(aliceLogin))).status).toBe(404);
+    expect((await request(app).delete(`/api/stories/${bobStory.body.story.id}`).set('Cookie', getCookieHeader(bobLogin))).status).toBe(200);
+  });
+
   it('does not create a conversation with a missing user', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',
