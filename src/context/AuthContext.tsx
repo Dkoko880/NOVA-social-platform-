@@ -5,6 +5,7 @@ type AuthContextValue = {
   user: AuthUser | null
   isLoading: boolean
   isAuthenticated: boolean
+  authError: string | null
   login: (identifier: string, password: string) => Promise<AuthUser>
   register: (input: RegisterInput) => Promise<AuthUser>
   logout: () => Promise<void>
@@ -16,9 +17,11 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [authError, setAuthError] = useState<string | null>(null)
 
   const refreshCurrentUser = useCallback(async () => {
     setIsLoading(true)
+    setAuthError(null)
 
     try {
       const nextUser = await getCurrentUser()
@@ -26,6 +29,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return nextUser
     } catch (error) {
       setUser(null)
+      setAuthError(error instanceof Error ? error.message : 'Unable to verify your session.')
       throw error
     } finally {
       setIsLoading(false)
@@ -33,10 +37,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    void refreshCurrentUser()
+    void refreshCurrentUser().catch((error: unknown) => {
+      setAuthError(error instanceof Error ? error.message : 'Unable to verify your session.')
+    })
   }, [refreshCurrentUser])
 
   const login = useCallback(async (identifier: string, password: string) => {
+    setAuthError(null)
     const response = await loginUser({ identifier, password })
     setUser(response.user)
     setIsLoading(false)
@@ -44,6 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const register = useCallback(async (input: RegisterInput) => {
+    setAuthError(null)
     const response = await registerUser(input)
     setUser(response.user)
     setIsLoading(false)
@@ -51,12 +59,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const logout = useCallback(async () => {
-    try {
-      await logoutUser()
-    } finally {
-      setUser(null)
-      setIsLoading(false)
-    }
+    await logoutUser()
+    setUser(null)
+    setAuthError(null)
+    setIsLoading(false)
   }, [])
 
   const value = useMemo<AuthContextValue>(
@@ -64,12 +70,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       isLoading,
       isAuthenticated: Boolean(user),
+      authError,
       login,
       register,
       logout,
       refreshCurrentUser,
     }),
-    [user, isLoading, login, register, logout, refreshCurrentUser],
+    [user, isLoading, authError, login, register, logout, refreshCurrentUser],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

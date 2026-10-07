@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { Phone, Search, Video } from 'lucide-react'
 import { Button } from '../components/ui/Button'
 import { useAuth } from '../context/AuthContext'
-import { apiRequest, API_BASE_URL } from '../lib/api'
+import { apiRequest } from '../lib/api'
+import { openAuthenticatedEventStream } from '../lib/eventStream'
 
 type CallParticipant = { userId: string; status: string; muted: boolean; cameraOn: boolean; speakerOn: boolean }
 type CallSession = {
@@ -47,7 +48,7 @@ export function CallsPage() {
   useEffect(() => { void loadData() }, [user?.id])
 
   useEffect(() => {
-    const source = new EventSource(`${API_BASE_URL}/api/realtime`, { withCredentials: true })
+    const source = openAuthenticatedEventStream('/api/realtime')
     const onCallUpdate = (event: MessageEvent<string>) => {
       try {
         const payload = JSON.parse(event.data) as { call?: CallSession }

@@ -26,6 +26,14 @@ export function verifyAccessToken(token: string) {
   };
 }
 
+export function getAccessTokenExpiration(token: string) {
+  const decoded = jwt.decode(token);
+  if (!decoded || typeof decoded === 'string' || typeof decoded.exp !== 'number') {
+    throw new Error('Access token does not contain a valid expiration.');
+  }
+  return new Date(decoded.exp * 1000);
+}
+
 export function hashSessionToken(token: string) {
   return createHash('sha256').update(token).digest('hex');
 }

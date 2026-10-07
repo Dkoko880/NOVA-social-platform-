@@ -13,7 +13,7 @@ type AuthPageProps = {
 
 export function AuthPage({ mode }: AuthPageProps) {
   const navigate = useNavigate()
-  const { login, register, isLoading: authLoading } = useAuth()
+  const { login, register, isLoading: authLoading, authError } = useAuth()
   const [showPassword, setShowPassword] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [formData, setFormData] = useState({
@@ -226,6 +226,10 @@ export function AuthPage({ mode }: AuthPageProps) {
             {formError ? (
               <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">
                 {formError}
+              </div>
+            ) : authError ? (
+              <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">
+                {authError}
               </div>
             ) : null}
 

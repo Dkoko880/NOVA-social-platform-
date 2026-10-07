@@ -1,13 +1,11 @@
+import { clearStoredAccessToken, getStoredAccessToken } from './session'
+
 const productionApiBaseUrl = 'https://nova-social-platform-api.onrender.com'
 const configuredApiBaseUrl = import.meta.env.PROD
   ? productionApiBaseUrl
-  : import.meta.env.VITE_API_BASE_URL ?? productionApiBaseUrl
+  : import.meta.env.VITE_API_BASE_URL?.trim() || productionApiBaseUrl
 
-if (import.meta.env.PROD && !configuredApiBaseUrl) {
-  throw new Error('VITE_API_BASE_URL must be configured for production frontend builds.')
-}
-
-export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://nova-social-platform-api.onrender.com').replace(/\/$/, '');
+export const API_BASE_URL = configuredApiBaseUrl.replace(/\/$/, '')
 
 export function resolveMediaUrl(url: string | null | undefined) {
   if (!url) return '';
@@ -75,9 +73,14 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   const headers = new Headers(options.headers)
   const isSafeRead = (options.method ?? 'GET').toUpperCase() === 'GET'
   const maxAttempts = isSafeRead ? 3 : 1
+  const isCredentialSubmission = path === '/api/auth/login' || path === '/api/auth/register'
+  const accessToken = isCredentialSubmission ? null : getStoredAccessToken()
 
   if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
+  }
+  if (accessToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${accessToken}`)
   }
 
   let response: Response | undefined
@@ -137,6 +140,9 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   }
 
   if (!response.ok) {
+    if (response.status === 401) {
+      clearStoredAccessToken()
+    }
     throw new ApiError(response.status, extractErrorMessage(payload, 'Something went wrong. Please try again.'), payload)
   }
 

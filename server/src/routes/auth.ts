@@ -1,8 +1,9 @@
 import { Router } from 'express';
+import type { Response } from 'express';
 import { z } from 'zod';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import env from '../config/env.js';
-import { hashPassword, hashSessionToken, sanitizeUser, signAccessToken, verifyPassword } from '../lib/auth.js';
+import { getAccessTokenExpiration, hashPassword, hashSessionToken, sanitizeUser, signAccessToken, verifyPassword } from '../lib/auth.js';
 import { createUser, fallbackStore, getUserByEmail } from '../lib/fallbackStore.js';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -39,6 +40,26 @@ const loginSchema = z.object({
 });
 
 export const authRouter = Router();
+
+function sessionCookieOptions() {
+  return {
+    httpOnly: true,
+    sameSite: env.NODE_ENV === 'production' ? 'none' as const : env.COOKIE_SAME_SITE,
+    secure: env.NODE_ENV === 'production',
+    path: '/',
+  };
+}
+
+function setSessionCookie(res: Response, token: string, expiresAt: Date) {
+  res.cookie(env.COOKIE_NAME, token, {
+    ...sessionCookieOptions(),
+    maxAge: Math.max(0, expiresAt.getTime() - Date.now()),
+  });
+}
+
+function clearSessionCookie(res: Response) {
+  res.clearCookie(env.COOKIE_NAME, sessionCookieOptions());
+}
 
 async function getUserRecordByIdentifier(identifier: string) {
   const normalizedIdentifier = identifier.trim();
@@ -138,17 +159,12 @@ async function persistUser(record: {
   });
 }
 
-function buildAuthResponse(res: any, user: { id: string; email: string | null; name: string; role: string; status: string }, token: string) {
-  res.cookie(env.COOKIE_NAME, token, {
-    httpOnly: true,
-    sameSite: env.COOKIE_SAME_SITE,
-    secure: env.NODE_ENV === 'production',
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-  });
-
+function buildAuthResponse(res: Response, user: { id: string; email: string | null; name: string; role: string; status: string }, token: string, expiresAt: Date, status: number) {
+  setSessionCookie(res, token, expiresAt);
   const safeUser = sanitizeUser(user);
-  return res.status(201).json({
+  return res.status(status).json({
     user: safeUser,
+    token,
   });
 }
 
@@ -157,20 +173,22 @@ function isUniqueConstraintError(error: unknown) {
 }
 
 async function persistSession(req: any, userId: string, token: string) {
+  const expiresAt = getAccessTokenExpiration(token);
   const session = {
     userId,
     tokenHash: hashSessionToken(token),
     userAgent: req.get('user-agent')?.slice(0, 300) ?? null,
     deviceName: req.get('x-device-name')?.slice(0, 100) ?? null,
     ipAddress: req.ip ?? null,
-    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    expiresAt,
     lastSeenAt: new Date(),
   };
   if (await isDatabaseAvailable()) {
     await prisma.session.create({ data: session });
-    return;
+    return expiresAt;
   }
   fallbackStore.createSession({ ...session, expiresAt: session.expiresAt.toISOString(), lastSeenAt: session.lastSeenAt.toISOString() });
+  return expiresAt;
 }
 
 authRouter.post('/register', async (req, res, next) => {
@@ -203,9 +221,9 @@ authRouter.post('/register', async (req, res, next) => {
       role: user.role,
     });
 
-    await persistSession(req, user.id, token);
+    const expiresAt = await persistSession(req, user.id, token);
 
-    return buildAuthResponse(res, user, token);
+    return buildAuthResponse(res, user, token, expiresAt, 201);
   } catch (error) {
     if (error instanceof z.ZodError) {
       const hasCommunityRuleIssue = error.issues.some((issue) => issue.path.includes('communityRulesAccepted') || issue.message.toLowerCase().includes('community') || issue.message.toLowerCase().includes('safety'));
@@ -244,18 +262,9 @@ authRouter.post('/login', async (req, res, next) => {
       role: user.role,
     });
 
-    await persistSession(req, user.id, token);
+    const expiresAt = await persistSession(req, user.id, token);
 
-    res.cookie(env.COOKIE_NAME, token, {
-      httpOnly: true,
-      sameSite: env.COOKIE_SAME_SITE,
-      secure: env.NODE_ENV === 'production',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-
-    return res.json({
-      user: sanitizeUser(user),
-    });
+    return buildAuthResponse(res, user, token, expiresAt, 200);
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ message: 'Invalid login payload.', errors: error.flatten() });
@@ -292,7 +301,7 @@ authRouter.post('/logout', async (req, res, next) => {
       }
     }
 
-    res.clearCookie(env.COOKIE_NAME);
+    clearSessionCookie(res);
     return res.json({ message: 'Logged out successfully.' });
   } catch (error) {
     return next(error);
@@ -345,7 +354,7 @@ authRouter.post('/logout-all', requireAuth, async (req, res, next) => {
     } else {
       fallbackStore.revokeAllSessions(req.user!.id);
     }
-    res.clearCookie(env.COOKIE_NAME);
+    clearSessionCookie(res);
     return res.json({ message: 'All sessions have been logged out.' });
   } catch (error) {
     return next(error);

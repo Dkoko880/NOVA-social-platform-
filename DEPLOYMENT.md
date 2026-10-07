@@ -26,7 +26,7 @@ Use the existing Render API service; do not create a second service. The API is 
 
 Configure the Render service environment with the required variable names listed below and in `server/.env.example`. Set `CORS_ORIGIN` to the exact HTTPS Vercel production origin(s), comma-separated if there is more than one. The API also explicitly permits the known Vercel production hostnames in `server/src/app.ts`. Store database URLs and signing keys only in Render's environment settings, never in this repository.
 
-The Vercel frontend and Render API are cross-site, so production auth cookies must use `SameSite=None; Secure; HttpOnly`. The API defaults to `COOKIE_SAME_SITE=none` when `NODE_ENV=production`; do not override it with `lax` for this deployment. Local development continues to default to `lax`.
+The Vercel frontend and Render API are cross-site, so production auth cookies use `SameSite=None; Secure; HttpOnly; Path=/` with the API host as a host-only cookie (no `Domain` attribute). Browsers that block cross-site cookies can still authenticate: login and registration return the session JWT over HTTPS, the frontend stores it only until its JWT expiry and sends it as a bearer token, and the API validates it against the same hashed, expiring, revocable database session. The API never logs credentials or tokens. Local development continues to default to `SameSite=Lax`.
 
 ## PostgreSQL and Prisma
 

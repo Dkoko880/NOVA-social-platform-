@@ -1,4 +1,5 @@
 import { apiRequest, ApiError } from './api'
+import { clearStoredAccessToken, storeAccessToken } from './session'
 
 export type AuthUser = {
   id: string
@@ -14,7 +15,7 @@ export type AuthUser = {
 
 export type AuthResponse = {
   user: AuthUser
-  token?: string
+  token: string
   message?: string
 }
 
@@ -33,23 +34,29 @@ export type LoginInput = {
 }
 
 export async function registerUser(input: RegisterInput) {
-  return apiRequest<AuthResponse>('/api/auth/register', {
+  const response = await apiRequest<AuthResponse>('/api/auth/register', {
     method: 'POST',
     body: JSON.stringify(input),
   })
+  storeAccessToken(response.token)
+  return response
 }
 
 export async function loginUser(input: LoginInput) {
-  return apiRequest<AuthResponse>('/api/auth/login', {
+  const response = await apiRequest<AuthResponse>('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify(input),
   })
+  storeAccessToken(response.token)
+  return response
 }
 
 export async function logoutUser() {
-  return apiRequest<{ message: string }>('/api/auth/logout', {
+  const response = await apiRequest<{ message: string }>('/api/auth/logout', {
     method: 'POST',
   })
+  clearStoredAccessToken()
+  return response
 }
 
 export async function getCurrentUser(): Promise<AuthUser | null> {

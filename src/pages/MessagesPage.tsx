@@ -5,7 +5,8 @@ import { Avatar } from '../components/ui/Avatar'
 import { Button } from '../components/ui/Button'
 import { EmptyState } from '../components/ui/EmptyState'
 import { useAuth } from '../context/AuthContext'
-import { apiRequest, API_BASE_URL, resolveMediaUrl, uploadMedia } from '../lib/api'
+import { apiRequest, resolveMediaUrl, uploadMedia } from '../lib/api'
+import { openAuthenticatedEventStream } from '../lib/eventStream'
 
 type ConversationParticipant = { userId: string; role?: string; user?: { id: string; name: string } }
 type ConversationListItem = {
@@ -99,7 +100,7 @@ export function MessagesPage() {
   useEffect(() => { void loadConversations() }, [])
 
   useEffect(() => {
-    const source = new EventSource(`${API_BASE_URL}/api/realtime`, { withCredentials: true })
+    const source = openAuthenticatedEventStream('/api/realtime')
     const onMessage = (event: MessageEvent<string>) => {
       try {
         const payload = JSON.parse(event.data) as { conversationId: string; message?: MessageItem; messageId?: string; reactions?: MessageReaction[]; deleted?: boolean }

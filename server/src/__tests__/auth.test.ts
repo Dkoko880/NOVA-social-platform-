@@ -23,7 +23,8 @@ describe('auth routes', () => {
     expect(response.body.user.email).toBe('nova@example.com');
     expect(String(response.headers['set-cookie'])).toContain('nova_session=');
     expect(String(response.headers['set-cookie'])).toContain('HttpOnly');
-    expect(response.body).not.toHaveProperty('token');
+    expect(String(response.headers['set-cookie'])).toContain('Path=/');
+    expect(typeof response.body.token).toBe('string');
     expect(fallbackStore.list()[0].passwordHash).not.toBe('Password123');
     expect(fallbackStore.list()[0].passwordHash).toMatch(/^\$2/);
   });
@@ -99,12 +100,29 @@ describe('auth routes', () => {
       .post('/api/auth/login')
       .send({ identifier: 'bearer@example.com', password: 'Password123' });
     const sessionCookie = login.headers['set-cookie'][0];
-    const token = sessionCookie.split(';', 1)[0].split('=', 2)[1];
+    const token = login.body.token;
 
     expect(login.status).toBe(200);
+    expect(typeof token).toBe('string');
+    expect(String(login.headers['set-cookie'])).toContain('HttpOnly');
+    expect(String(login.headers['set-cookie'])).toContain('Path=/');
+    const tokenClaims = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString()) as { exp: number };
+    expect(fallbackStore.listSessions(login.body.user.id)[0].expiresAt).toBe(new Date(tokenClaims.exp * 1000).toISOString());
     expect((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${token}`)).status).toBe(200);
     expect((await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${token}`)).status).toBe(200);
     expect((await request(app).get('/api/auth/me').set('Cookie', sessionCookie)).status).toBe(401);
+  });
+
+  it('allows the deployed frontend origin to call the credentialed auth API', async () => {
+    const response = await request(app)
+      .options('/api/auth/login')
+      .set('Origin', 'https://nova-social-platform-svx2.vercel.app')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'content-type');
+
+    expect(response.status).toBe(204);
+    expect(response.headers['access-control-allow-origin']).toBe('https://nova-social-platform-svx2.vercel.app');
+    expect(response.headers['access-control-allow-credentials']).toBe('true');
   });
 
   it('logs in an existing user by email and password', async () => {
@@ -124,7 +142,7 @@ describe('auth routes', () => {
     expect(response.status).toBe(200);
     expect(response.body.user.email).toBe('login@example.com');
     expect(String(response.headers['set-cookie'])).toContain('nova_session=');
-    expect(response.body).not.toHaveProperty('token');
+    expect(typeof response.body.token).toBe('string');
   });
 
   it('requires community safety rules acceptance during registration', async () => {
