@@ -7,7 +7,7 @@ import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   try {
     const authHeader = req.headers.authorization;
-    const cookieToken = req.cookies?.[process.env.COOKIE_NAME ?? 'nova_session'];
+    const cookieToken = req.cookies?.[env.COOKIE_NAME];
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : cookieToken;
 
     if (!token) {
@@ -110,7 +110,7 @@ export function requireModeratorAccess(req: Request, res: Response, next: NextFu
 
 export async function requireActiveAccountIfAuthenticated(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : req.cookies?.[process.env.COOKIE_NAME ?? 'nova_session'];
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : req.cookies?.[env.COOKIE_NAME];
 
   if (!token) {
     return next();

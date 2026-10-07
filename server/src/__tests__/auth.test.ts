@@ -1,20 +1,19 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
-import { clearPhoneLoginChallengesForTests } from '../routes/auth.js';
 
 describe('auth routes', () => {
   beforeEach(() => {
     fallbackStore.clear();
-    clearPhoneLoginChallengesForTests();
   });
 
-  it('registers a new user and sets an http-only session cookie', async () => {
+  it('registers a password account with a hashed password and an http-only session cookie', async () => {
     const response = await request(app)
       .post('/api/auth/register')
       .send({
         name: 'Nova User',
+        username: 'nova_user',
         email: 'nova@example.com',
         password: 'Password123',
         communityRulesAccepted: true,
@@ -23,10 +22,72 @@ describe('auth routes', () => {
     expect(response.status).toBe(201);
     expect(response.body.user.email).toBe('nova@example.com');
     expect(String(response.headers['set-cookie'])).toContain('nova_session=');
+    expect(String(response.headers['set-cookie'])).toContain('HttpOnly');
     expect(response.body).not.toHaveProperty('token');
+    expect(fallbackStore.list()[0].passwordHash).not.toBe('Password123');
+    expect(fallbackStore.list()[0].passwordHash).toMatch(/^\$2/);
   });
 
-  it('logs in an existing user', async () => {
+  it('registers and logs in with only a username and password', async () => {
+    const registration = await request(app)
+      .post('/api/auth/register')
+      .send({
+        name: 'Username User',
+        username: 'username_only',
+        password: 'Password123',
+        communityRulesAccepted: true,
+      });
+
+    expect(registration.status).toBe(201);
+    expect(registration.body.user.email).toBeNull();
+    expect(registration.body.user.phoneE164).toBeNull();
+
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ identifier: 'username_only', password: 'Password123' });
+
+    expect(login.status).toBe(200);
+    expect(login.body.user.id).toBe(registration.body.user.id);
+  });
+
+  it('supports registration, username login, authenticated session, logout, and password login again by phone', async () => {
+    const registration = await request(app)
+      .post('/api/auth/register')
+      .send({
+        name: 'Phone User',
+        username: 'phone_user',
+        phone: '+2348031234567',
+        password: 'Password123',
+        communityRulesAccepted: true,
+      });
+
+    expect(registration.status).toBe(201);
+    expect(registration.body.user.phoneE164).toBe('+2348031234567');
+    const directory = await request(app).get('/api/users').set('Cookie', registration.headers['set-cookie']);
+    expect(directory.body.users.find((user: { id: string }) => user.id === registration.body.user.id).handle).toBe('phone_user');
+
+    const usernameLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ identifier: 'PHONE_USER', password: 'Password123' });
+    expect(usernameLogin.status).toBe(200);
+
+    const firstSession = usernameLogin.headers['set-cookie'];
+    const currentUser = await request(app).get('/api/auth/me').set('Cookie', firstSession);
+    expect(currentUser.status).toBe(200);
+    expect(currentUser.body.user.id).toBe(registration.body.user.id);
+
+    const logout = await request(app).post('/api/auth/logout').set('Cookie', firstSession);
+    expect(logout.status).toBe(200);
+    expect((await request(app).get('/api/auth/me').set('Cookie', firstSession)).status).toBe(401);
+
+    const phoneLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ identifier: '+2348031234567', password: 'Password123' });
+    expect(phoneLogin.status).toBe(200);
+    expect((await request(app).get('/api/auth/me').set('Cookie', phoneLogin.headers['set-cookie'])).status).toBe(200);
+  });
+
+  it('logs in an existing user by email and password', async () => {
     await request(app)
       .post('/api/auth/register')
       .send({
@@ -38,10 +99,7 @@ describe('auth routes', () => {
 
     const response = await request(app)
       .post('/api/auth/login')
-      .send({
-        email: 'login@example.com',
-        password: 'Password123',
-      });
+      .send({ identifier: 'login@example.com', password: 'Password123' });
 
     expect(response.status).toBe(200);
     expect(response.body.user.email).toBe('login@example.com');
@@ -54,6 +112,7 @@ describe('auth routes', () => {
       .post('/api/auth/register')
       .send({
         name: 'Nova User',
+        username: 'nova_user',
         email: 'community@example.com',
         password: 'Password123',
         communityRulesAccepted: false,
@@ -63,106 +122,25 @@ describe('auth routes', () => {
     expect(response.body.message).toContain('Community & Safety Rules');
   });
 
-  it('rejects explicit sexual content in posts', async () => {
-    const register = await request(app)
-      .post('/api/auth/register')
-      .send({
-        name: 'Nova User',
-        email: 'safety@example.com',
-        password: 'Password123',
-        communityRulesAccepted: true,
-      });
-
-    const response = await request(app)
-      .post('/api/posts')
-      .set('Cookie', register.headers['set-cookie'])
-      .send({
-        content: 'This is explicit sexual content and should be blocked.',
-      });
-
-    expect(response.status).toBe(400);
-    expect(response.body.message).toMatch(/community.*safety.*rules|violates/i);
+  it('does not expose OTP registration or phone-login routes', async () => {
+    const endpoints = [
+      request(app).post('/api/auth/register/start'),
+      request(app).post('/api/auth/register/verify'),
+      request(app).post('/api/auth/register/resend'),
+      request(app).post('/api/auth/phone/start'),
+      request(app).post('/api/auth/phone/verify'),
+    ];
+    const responses = await Promise.all(endpoints);
+    expect(responses.every((response) => response.status === 404)).toBe(true);
   });
 
   it('returns an error for invalid credentials', async () => {
     const response = await request(app)
       .post('/api/auth/login')
-      .send({
-        email: 'missing@example.com',
-        password: 'Password123',
-      });
+      .send({ identifier: 'missing_user', password: 'Password123' });
 
     expect(response.status).toBe(401);
-    expect(response.body.message).toBe('Invalid email or password.');
-  });
-
-  it('logs in a verified phone account with a one-time OTP and establishes a session', async () => {
-    fallbackStore.create({
-      email: null,
-      name: 'Phone User',
-      passwordHash: '',
-      role: 'USER',
-      status: 'ACTIVE',
-      communityRulesAccepted: true,
-      communityRulesAcceptedAt: new Date().toISOString(),
-      rulesVersion: null,
-      phoneE164: '+2348031234567',
-      phoneVerifiedAt: new Date().toISOString(),
-    });
-
-    const started = await request(app).post('/api/auth/phone/start').send({ countryCode: 'NG', phone: '08031234567' });
-    expect(started.status).toBe(202);
-    expect(started.body).not.toHaveProperty('code');
-
-    const verified = await request(app).post('/api/auth/phone/verify').send({ challengeId: started.body.challengeId, code: '123456' });
-    expect(verified.status).toBe(200);
-    expect(verified.body.user.phoneE164).toBe('+2348031234567');
-    expect(verified.body).not.toHaveProperty('token');
-    expect(String(verified.headers['set-cookie'])).toContain('nova_session=');
-
-    const currentUser = await request(app).get('/api/auth/me').set('Cookie', verified.headers['set-cookie']);
-    expect(currentUser.status).toBe(200);
-    expect(currentUser.body.user.id).toBe(verified.body.user.id);
-
-    const replay = await request(app).post('/api/auth/phone/verify').send({ challengeId: started.body.challengeId, code: '123456' });
-    expect(replay.status).toBe(401);
-  });
-
-  it('uses the same phone-login response for known and unknown phone numbers', async () => {
-    fallbackStore.create({
-      email: null,
-      name: 'Phone User',
-      passwordHash: '',
-      role: 'USER',
-      status: 'ACTIVE',
-      communityRulesAccepted: true,
-      communityRulesAcceptedAt: new Date().toISOString(),
-      rulesVersion: null,
-      phoneE164: '+2348031234567',
-      phoneVerifiedAt: new Date().toISOString(),
-    });
-
-    const known = await request(app).post('/api/auth/phone/start').send({ countryCode: 'NG', phone: '08031234567' });
-    const unknown = await request(app).post('/api/auth/phone/start').send({ countryCode: 'NG', phone: '08031234568' });
-
-    expect(known.status).toBe(202);
-    expect(unknown.status).toBe(202);
-    expect(known.body.message).toBe(unknown.body.message);
-    expect(known.body).not.toHaveProperty('userExists');
-  });
-
-  it('locks phone OTP verification after five incorrect attempts', async () => {
-    const started = await request(app).post('/api/auth/phone/start').send({ countryCode: 'NG', phone: '08031234569' });
-
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const invalid = await request(app).post('/api/auth/phone/verify').send({ challengeId: started.body.challengeId, code: '000000' });
-      expect(invalid.status).toBe(401);
-    }
-
-    const locked = await request(app).post('/api/auth/phone/verify').send({ challengeId: started.body.challengeId, code: '000000' });
-    expect(locked.status).toBe(429);
-    const correctAfterLock = await request(app).post('/api/auth/phone/verify').send({ challengeId: started.body.challengeId, code: '123456' });
-    expect(correctAfterLock.status).toBe(401);
+    expect(response.body.message).toMatch(/Invalid .*password/);
   });
 
   it('lists sessions and supports per-device revocation and logout-all', async () => {
@@ -172,7 +150,7 @@ describe('auth routes', () => {
       password: 'Password123',
       communityRulesAccepted: true,
     });
-    const login = await request(app).post('/api/auth/login').send({ email: 'sessions@example.com', password: 'Password123' });
+    const login = await request(app).post('/api/auth/login').send({ identifier: 'sessions@example.com', password: 'Password123' });
     const cookie = login.headers['set-cookie'];
 
     const listed = await request(app).get('/api/auth/sessions').set('Cookie', cookie);

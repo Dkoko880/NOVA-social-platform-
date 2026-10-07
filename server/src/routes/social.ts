@@ -68,8 +68,8 @@ function getProfileForUserId(userId: string) {
   return socialStore.state.profiles.find((profile) => profile.userId === userId) ?? null;
 }
 
-function makeHandle(user: { email: string | null; name: string }, profile?: { username?: string | null } | null) {
-  const username = profile?.username ?? user.email?.split('@')[0].replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 24);
+function makeHandle(user: { email: string | null; name: string; username?: string | null }, profile?: { username?: string | null } | null) {
+  const username = profile?.username ?? user.username ?? user.email?.split('@')[0].replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 24);
   return username || user.name.replace(/\s+/g, '').toLowerCase();
 }
 

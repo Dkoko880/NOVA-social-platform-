@@ -131,8 +131,6 @@ model User {
   privateDetails           PrivateProfile?
   mfaMethods               MfaMethod[]
   securityAlerts           SecurityAlert[]
-  registrationDrafts       RegistrationDraft[]
-  authOtpChallenges        AuthOtpChallenge[]
   sessions                 Session[]
   posts                    Post[]
   postSaves                PostSave[]
@@ -210,42 +208,6 @@ model PrivateProfile {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
-model RegistrationDraft {
-  id                   String    @id @default(cuid())
-  phoneE164            String    @unique
-  countryCode          String
-  fullName             String
-  otpHash              String
-  otpExpiresAt         DateTime
-  resendAllowedAt      DateTime
-  otpAttempts          Int       @default(0)
-  verifiedAt           DateTime?
-  sessionTokenHash     String?   @unique
-  stage                Int       @default(1)
-  dateOfBirth          DateTime?
-  region               String?
-  city                 String?
-  addressCiphertext    String?
-  addressIv            String?
-  addressTag           String?
-  avatarStorageKey     String?
-  username             String?   @unique
-  termsAcceptedAt      DateTime?
-  privacyAcceptedAt    DateTime?
-  guidelinesAcceptedAt DateTime?
-  consentVersion       String?
-  expiresAt            DateTime
-  consumedAt           DateTime?
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
-  userId               String?
-
-  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
-
-  @@index([expiresAt])
-  @@index([stage, expiresAt])
-}
-
 model MfaMethod {
   id         String    @id @default(cuid())
   userId     String
@@ -257,22 +219,6 @@ model MfaMethod {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, enabledAt])
-}
-
-model AuthOtpChallenge {
-  id         String    @id @default(cuid())
-  phoneE164  String
-  otpHash    String
-  expiresAt  DateTime
-  attempts   Int       @default(0)
-  consumedAt DateTime?
-  userId     String?
-  createdAt  DateTime  @default(now())
-
-  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([phoneE164, createdAt])
-  @@index([expiresAt])
 }
 
 model SecurityAlert {

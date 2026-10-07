@@ -1,12 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { getCurrentUser, loginUser, logoutUser, registerUser, type AuthUser } from '../lib/auth'
+import { getCurrentUser, loginUser, logoutUser, registerUser, type AuthUser, type RegisterInput } from '../lib/auth'
 
 type AuthContextValue = {
   user: AuthUser | null
   isLoading: boolean
   isAuthenticated: boolean
-  login: (email: string, password: string) => Promise<AuthUser>
-  register: (name: string, email: string, password: string, communityRulesAccepted?: boolean) => Promise<AuthUser>
+  login: (identifier: string, password: string) => Promise<AuthUser>
+  register: (input: RegisterInput) => Promise<AuthUser>
   logout: () => Promise<void>
   refreshCurrentUser: () => Promise<AuthUser | null>
 }
@@ -36,15 +36,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void refreshCurrentUser()
   }, [refreshCurrentUser])
 
-  const login = useCallback(async (email: string, password: string) => {
-    const response = await loginUser({ email, password })
+  const login = useCallback(async (identifier: string, password: string) => {
+    const response = await loginUser({ identifier, password })
     setUser(response.user)
     setIsLoading(false)
     return response.user
   }, [])
 
-  const register = useCallback(async (name: string, email: string, password: string, communityRulesAccepted = true) => {
-    const response = await registerUser({ name, email, password, communityRulesAccepted })
+  const register = useCallback(async (input: RegisterInput) => {
+    const response = await registerUser(input)
     setUser(response.user)
     setIsLoading(false)
     return response.user

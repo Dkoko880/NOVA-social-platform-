@@ -1,52 +1,64 @@
 import { Router } from 'express';
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { parsePhoneNumberFromString, type CountryCode } from 'libphonenumber-js';
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import env from '../config/env.js';
 import { hashPassword, hashSessionToken, sanitizeUser, signAccessToken, verifyPassword } from '../lib/auth.js';
 import { createUser, fallbackStore, getUserByEmail } from '../lib/fallbackStore.js';
-import { getOtpProvider, OtpProviderUnavailableError } from '../lib/otpProvider.js';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const registerSchema = z.object({
-  name: z.string().min(2).max(100),
-  email: z.string().email(),
+  name: z.string().trim().min(2).max(100),
+  username: z.string().trim().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/).transform((value) => value.toLowerCase()).optional(),
+  email: z.preprocess(
+    (value) => typeof value === 'string' && !value.trim() ? undefined : value,
+    z.string().trim().email().transform((value) => value.toLowerCase()).optional(),
+  ),
+  phone: z.preprocess(
+    (value) => typeof value === 'string' && !value.trim() ? undefined : value,
+    z.string().trim().min(5).max(40).optional().transform((value) => {
+      if (!value) return undefined;
+      const phone = parsePhoneNumberFromString(value);
+      return phone?.isValid() ? phone.number : null;
+    }),
+  ).refine((value) => value !== null, 'Enter a valid phone number in international format.'),
   password: z.string().min(8).max(128),
   communityRulesAccepted: z.boolean().refine((value) => value === true, {
     message: 'You must accept the NOVA Community & Safety Rules before creating an account.',
   }),
+}).refine((payload) => Boolean(payload.username || payload.email || payload.phone), {
+  message: 'Choose a username, email address, or phone number for your account.',
 });
 
 const loginSchema = z.object({
-  email: z.string().email(),
+  identifier: z.string().trim().min(3).max(254).optional(),
+  email: z.string().trim().email().optional(),
   password: z.string().min(8).max(128),
+}).refine((payload) => Boolean(payload.identifier || payload.email), {
+  message: 'Enter your username, phone number, or email address.',
 });
-
-const phoneLoginStartSchema = z.object({
-  countryCode: z.string().length(2).transform((value) => value.toUpperCase()),
-  phone: z.string().trim().min(5).max(40),
-});
-
-const phoneLoginVerifySchema = z.object({ challengeId: z.string().uuid(), code: z.string().regex(/^\d{6}$/) });
-const phoneLoginOtpHash = (id: string, code: string) => createHmac('sha256', env.JWT_SECRET).update(`login:${id}:${code}`).digest('hex');
-type MemoryPhoneLoginChallenge = { id: string; phoneE164: string; otpHash: string; expiresAt: Date; attempts: number; userId: string | null; consumedAt: Date | null; createdAt: Date };
-const memoryPhoneLoginChallenges = new Map<string, MemoryPhoneLoginChallenge>();
-
-export function clearPhoneLoginChallengesForTests() {
-  memoryPhoneLoginChallenges.clear();
-}
 
 export const authRouter = Router();
 
-async function getUserRecordByEmail(email: string) {
+async function getUserRecordByIdentifier(identifier: string) {
+  const normalizedIdentifier = identifier.trim();
+  const phone = normalizedIdentifier.startsWith('+')
+    ? parsePhoneNumberFromString(normalizedIdentifier)
+    : null;
+  const lookup = phone?.isValid()
+    ? { phoneE164: phone.number }
+    : normalizedIdentifier.includes('@')
+      ? { email: normalizedIdentifier.toLowerCase() }
+      : { profile: { is: { username: { equals: normalizedIdentifier.toLowerCase(), mode: 'insensitive' as const } } } };
+
   const dbAvailable = await isDatabaseAvailable();
   if (dbAvailable) {
-    return prisma.user.findUnique({
-      where: { email },
+    return prisma.user.findFirst({
+      where: lookup,
       select: {
         id: true,
         email: true,
+        phoneE164: true,
         name: true,
         passwordHash: true,
         role: true,
@@ -55,11 +67,15 @@ async function getUserRecordByEmail(email: string) {
     });
   }
 
-  return getUserByEmail(email);
+  if (phone?.isValid()) return fallbackStore.list().find((user) => user.phoneE164 === phone.number) ?? null;
+  if (normalizedIdentifier.includes('@')) return getUserByEmail(normalizedIdentifier.toLowerCase());
+  return fallbackStore.list().find((user) => user.username?.toLowerCase() === normalizedIdentifier.toLowerCase()) ?? null;
 }
 
 async function persistUser(record: {
-  email: string;
+  email: string | null;
+  phoneE164?: string;
+  username?: string;
   name: string;
   passwordHash: string;
   role?: string;
@@ -74,6 +90,7 @@ async function persistUser(record: {
     return prisma.user.create({
       data: {
         email: record.email,
+        phoneE164: record.phoneE164,
         name: record.name,
         passwordHash: record.passwordHash,
         role: (record.role as 'USER' | 'MODERATOR' | 'ADMIN' | 'SUPER_ADMIN') ?? 'USER',
@@ -81,10 +98,19 @@ async function persistUser(record: {
         communityRulesAccepted: Boolean(record.communityRulesAccepted),
         communityRulesAcceptedAt: record.communityRulesAcceptedAt ? new Date(record.communityRulesAcceptedAt) : null,
         rulesVersion: record.rulesVersion ?? 'nova-community-safety-v1',
+        ...(record.username ? {
+          profile: {
+            create: {
+              username: record.username,
+              displayName: record.name,
+            },
+          },
+        } : {}),
       },
       select: {
         id: true,
         email: true,
+        phoneE164: true,
         name: true,
         role: true,
         status: true,
@@ -93,12 +119,15 @@ async function persistUser(record: {
         rulesVersion: true,
         createdAt: true,
         updatedAt: true,
+        profile: { select: { username: true } },
       },
     });
   }
 
   return createUser({
     email: record.email,
+    phoneE164: record.phoneE164,
+    username: record.username,
     name: record.name,
     passwordHash: record.passwordHash,
     role: (record.role as 'USER' | 'MODERATOR' | 'ADMIN' | 'SUPER_ADMIN') ?? 'USER',
@@ -123,6 +152,10 @@ function buildAuthResponse(res: any, user: { id: string; email: string | null; n
   });
 }
 
+function isUniqueConstraintError(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002';
+}
+
 async function persistSession(req: any, userId: string, token: string) {
   const session = {
     userId,
@@ -143,15 +176,20 @@ async function persistSession(req: any, userId: string, token: string) {
 authRouter.post('/register', async (req, res, next) => {
   try {
     const payload = registerSchema.parse(req.body);
-    const existingUser = await getUserRecordByEmail(payload.email);
+    const existingIdentifiers = await Promise.all(
+      [payload.email, payload.phone, payload.username].filter((value): value is string => Boolean(value))
+        .map((identifier) => getUserRecordByIdentifier(identifier)),
+    );
 
-    if (existingUser) {
-      return res.status(409).json({ message: 'An account with this email already exists.' });
+    if (existingIdentifiers.some(Boolean)) {
+      return res.status(409).json({ message: 'That username, email, or phone number is already in use.' });
     }
 
     const passwordHash = await hashPassword(payload.password);
     const user = await persistUser({
-      email: payload.email,
+      email: payload.email ?? null,
+      phoneE164: payload.phone ?? undefined,
+      username: payload.username,
       name: payload.name,
       passwordHash,
       communityRulesAccepted: payload.communityRulesAccepted,
@@ -179,6 +217,10 @@ authRouter.post('/register', async (req, res, next) => {
       return res.status(400).json({ message: 'Invalid registration payload.', errors: error.flatten() });
     }
 
+    if (isUniqueConstraintError(error)) {
+      return res.status(409).json({ message: 'That username, email, or phone number is already in use.' });
+    }
+
     return next(error);
   }
 });
@@ -186,10 +228,14 @@ authRouter.post('/register', async (req, res, next) => {
 authRouter.post('/login', async (req, res, next) => {
   try {
     const payload = loginSchema.parse(req.body);
-    const user = await getUserRecordByEmail(payload.email);
+    const identifier = payload.identifier ?? payload.email;
+    if (!identifier) {
+      return res.status(400).json({ message: 'Enter your username, phone number, or email address.' });
+    }
+    const user = await getUserRecordByIdentifier(identifier);
 
     if (!user || !(await verifyPassword(payload.password, user.passwordHash))) {
-      return res.status(401).json({ message: 'Invalid email or password.' });
+      return res.status(401).json({ message: 'Invalid username, phone number, email, or password.' });
     }
 
     const token = signAccessToken({
@@ -219,123 +265,6 @@ authRouter.post('/login', async (req, res, next) => {
   }
 });
 
-authRouter.post('/phone/start', async (req, res, next) => {
-  try {
-    const payload = phoneLoginStartSchema.parse(req.body ?? {});
-    const parsedPhone = parsePhoneNumberFromString(payload.phone, payload.countryCode as CountryCode);
-    if (!parsedPhone?.isValid() || (parsedPhone.country && parsedPhone.country !== payload.countryCode)) {
-      return res.status(400).json({ message: 'Enter a valid phone number for the selected country.' });
-    }
-    const provider = getOtpProvider(env.NODE_ENV);
-    const phoneE164 = parsedPhone.number;
-    const dbAvailable = await isDatabaseAvailable();
-    const user = dbAvailable
-      ? await prisma.user.findUnique({ where: { phoneE164 }, select: { id: true } })
-      : fallbackStore.list().find((entry) => entry.phoneE164 === phoneE164) ?? null;
-    const latestChallenge = dbAvailable
-      ? await prisma.authOtpChallenge.findFirst({ where: { phoneE164 }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } })
-      : [...memoryPhoneLoginChallenges.values()].reverse().find((item) => item.phoneE164 === phoneE164 && item.expiresAt.getTime() > Date.now());
-    const latestCreatedAt = latestChallenge?.createdAt.getTime();
-    if (latestCreatedAt !== undefined && Date.now() - latestCreatedAt < 60_000) {
-      return res.status(202).json({ message: 'If this number has an account, a verification code will be sent shortly.', deliveryMode: provider.mode });
-    }
-
-    const id = randomUUID();
-    const code = provider.generateCode();
-    const expiresAt = new Date(Date.now() + 10 * 60_000);
-    if (dbAvailable) {
-      await prisma.authOtpChallenge.create({
-        data: { id, phoneE164, otpHash: phoneLoginOtpHash(id, code), expiresAt, userId: user?.id ?? null },
-      });
-    } else {
-      memoryPhoneLoginChallenges.set(id, { id, phoneE164, otpHash: phoneLoginOtpHash(id, code), expiresAt, attempts: 0, userId: user?.id ?? null, consumedAt: null, createdAt: new Date() });
-    }
-    if (user) await provider.sendCode(phoneE164, code);
-    return res.status(202).json({ challengeId: id, message: 'If this number has an account, a verification code will be sent shortly.', deliveryMode: provider.mode });
-  } catch (error) {
-    if (error instanceof z.ZodError) return res.status(400).json({ message: 'Invalid phone login request.' });
-    if (error instanceof OtpProviderUnavailableError) return res.status(503).json({ message: 'Phone verification is temporarily unavailable.' });
-    return next(error);
-  }
-});
-
-authRouter.post('/phone/verify', async (req, res, next) => {
-  try {
-    const payload = phoneLoginVerifySchema.parse(req.body ?? {});
-    const dbAvailable = await isDatabaseAvailable();
-    const challenge = dbAvailable
-      ? await prisma.authOtpChallenge.findUnique({ where: { id: payload.challengeId } })
-      : memoryPhoneLoginChallenges.get(payload.challengeId) ?? null;
-    if (!challenge || challenge.consumedAt || challenge.expiresAt <= new Date() || challenge.attempts >= 5) {
-      return res.status(401).json({ message: 'Phone verification failed.' });
-    }
-    const submittedHash = Buffer.from(phoneLoginOtpHash(payload.challengeId, payload.code), 'hex');
-    const savedHash = Buffer.from(challenge.otpHash, 'hex');
-    const matches = submittedHash.length === savedHash.length && timingSafeEqual(submittedHash, savedHash);
-    if (!matches) {
-      const attemptedCount = challenge.attempts + 1;
-      if (dbAvailable) {
-        await prisma.authOtpChallenge.updateMany({ where: { id: challenge.id, consumedAt: null, attempts: { lt: 5 } }, data: { attempts: { increment: 1 } } });
-      } else {
-        challenge.attempts += 1;
-      }
-      return res.status(attemptedCount >= 5 ? 429 : 401).json({ message: 'Phone verification failed.' });
-    }
-
-    const now = new Date();
-    let user = null as any;
-    if (dbAvailable) {
-      const result = await prisma.$transaction(async (tx) => {
-        const claimed = await tx.authOtpChallenge.updateMany({
-          where: { id: challenge.id, consumedAt: null, expiresAt: { gt: now }, attempts: { lt: 5 } },
-          data: { consumedAt: now },
-        });
-        if (!claimed.count) return null;
-        const account = challenge.userId ? await tx.user.findUnique({ where: { id: challenge.userId } }) : null;
-        if (!account || account.status !== 'ACTIVE') return null;
-        const token = signAccessToken({ sub: account.id, email: account.email, role: account.role });
-        await tx.session.create({
-          data: {
-            userId: account.id,
-            tokenHash: hashSessionToken(token),
-            userAgent: req.get('user-agent')?.slice(0, 300) ?? null,
-            deviceName: req.get('x-device-name')?.slice(0, 100) ?? null,
-            ipAddress: req.ip ?? null,
-            expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
-            lastSeenAt: now,
-          },
-        });
-        return { account, token };
-      }, { isolationLevel: 'Serializable' });
-      if (!result) return res.status(401).json({ message: 'Phone verification failed.' });
-      user = result.account;
-      res.cookie(env.COOKIE_NAME, result.token, {
-        httpOnly: true,
-        secure: env.NODE_ENV === 'production',
-        sameSite: env.COOKIE_SAME_SITE,
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
-    } else {
-      const memoryChallenge = memoryPhoneLoginChallenges.get(payload.challengeId)!;
-      memoryPhoneLoginChallenges.delete(payload.challengeId);
-      user = memoryChallenge.userId ? fallbackStore.findById(memoryChallenge.userId) : null;
-      if (!user || user.status !== 'ACTIVE') return res.status(401).json({ message: 'Phone verification failed.' });
-      const token = signAccessToken({ sub: user.id, email: user.email, role: user.role });
-      await persistSession(req, user.id, token);
-      res.cookie(env.COOKIE_NAME, token, {
-        httpOnly: true,
-        secure: env.NODE_ENV === 'production',
-        sameSite: env.COOKIE_SAME_SITE,
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
-    }
-    return res.json({ user: sanitizeUser(user) });
-  } catch (error) {
-    if (error instanceof z.ZodError) return res.status(400).json({ message: 'Invalid phone verification request.' });
-    return next(error);
-  }
-});
-
 authRouter.get('/me', requireAuth, async (req, res) => {
   const user = req.user;
 
@@ -351,16 +280,20 @@ authRouter.post('/logout', async (req, res, next) => {
     const token = req.headers.authorization?.startsWith('Bearer ')
       ? req.headers.authorization.slice(7)
       : req.cookies?.[env.COOKIE_NAME];
-    if (token && await isDatabaseAvailable()) {
-      await prisma.session.updateMany({
-        where: { tokenHash: hashSessionToken(token), revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-    } else if (token) {
-      fallbackStore.revokeSessionByTokenHash(hashSessionToken(token));
+
+    if (token) {
+      if (await isDatabaseAvailable()) {
+        await prisma.session.updateMany({
+          where: { tokenHash: hashSessionToken(token), revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      } else {
+        fallbackStore.revokeSessionByTokenHash(hashSessionToken(token));
+      }
     }
-  res.clearCookie(env.COOKIE_NAME);
-  return res.json({ message: 'Logged out successfully.' });
+
+    res.clearCookie(env.COOKIE_NAME);
+    return res.json({ message: 'Logged out successfully.' });
   } catch (error) {
     return next(error);
   }

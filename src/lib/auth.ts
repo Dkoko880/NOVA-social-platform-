@@ -20,13 +20,15 @@ export type AuthResponse = {
 
 export type RegisterInput = {
   name: string
-  email: string
+  username: string
+  phone?: string
+  email?: string
   password: string
   communityRulesAccepted: boolean
 }
 
 export type LoginInput = {
-  email: string
+  identifier: string
   password: string
 }
 

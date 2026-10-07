@@ -68,7 +68,7 @@ Point the web domain at the Nginx service and the API domain at the Express serv
 
 Calls and live video are deliberately unavailable: the existing realtime event hub is process-local and there is no real media/signaling service or TURN configuration. The API returns HTTP 503 rather than creating calls or streams that cannot carry media; the UI disables those actions and does not claim a connection. Enabling them requires integrating a production signaling/media service (or a durable cross-instance signaling layer plus an appropriately operated WebRTC/SFU service) and TURN relay infrastructure, then validating that a peer media session was established before changing call state to connected. No provider/account is currently configured.
 
-Phone-first registration and phone login require an SMS OTP adapter. No production SMS provider is configured; these routes return HTTP 503 rather than using the fixed non-delivering development code. Configure and wire a real SMS provider before enabling phone verification. `FREE_REGISTRATION=true` is ignored in production.
+Registration is password-based and does not require email verification, phone verification, an OTP, or a paid provider. Users may choose a username and password and optionally add an email address or phone number; login accepts the username, email address, or phone number with that password. Passwords are stored as bcrypt hashes, and successful registration/login establish revocable, server-tracked sessions in secure HTTP-only cookies. Optional MFA can be introduced later through the existing `MfaMethod` model without making verification a prerequisite for account creation.
 
 AI assistance endpoints also return HTTP 503 until a real AI provider is integrated. They do not return generated-looking placeholder summaries, captions, or replies.
 
@@ -91,4 +91,4 @@ Payment records are provider-agnostic and remain `PENDING` until a real provider
 
 ## Verification
 
-After deployment, verify `GET /api/health` returns HTTP 200 with `status: ok` and `database: ok`, load the web domain, register/login with community rules accepted, create a post, send a message, open the realtime stream, and confirm an admin-only endpoint rejects a normal user. Inspect logs for startup and database errors without exposing secret values.
+After deployment, verify `GET /api/health` returns HTTP 200 with `status: ok` and `database: ok`, load the web domain, register with a username/password and community rules accepted, log in with the username or optional phone/email, create a post, send a message, open the realtime stream, and confirm an admin-only endpoint rejects a normal user. Inspect logs for startup and database errors without exposing secret values.
