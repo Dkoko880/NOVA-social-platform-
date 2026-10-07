@@ -194,6 +194,13 @@ describe('phone-first registration', () => {
     const uploaded = await request(app).post('/api/auth/register/avatar').set('Cookie', cookie).attach('avatar', png, { filename: '../avatar.png', contentType: 'image/png' });
     expect(uploaded.status).toBe(200);
     expect(uploaded.body.avatarUrl).toMatch(/^\/api\/media\/avatars\/[0-9a-f-]+\.webp$/);
+    expect((await request(app).get(uploaded.body.avatarUrl)).status).toBe(404);
+    await request(app).patch('/api/auth/register/stage/4').set('Cookie', cookie).send({
+      username: 'media_owner', termsAccepted: true, privacyAccepted: true, guidelinesAccepted: true,
+    });
+    const completed = await request(app).post('/api/auth/register/complete').set('Cookie', cookie);
+    expect(completed.status).toBe(201);
+    expect((await request(app).get(uploaded.body.avatarUrl).set('Cookie', cookieHeader(completed))).status).toBe(200);
 
     const another = await startRegistration('08031234568');
     const nextVerified = await verifyRegistration(another.body.challengeId);

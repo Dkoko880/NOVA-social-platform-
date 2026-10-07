@@ -2,12 +2,13 @@ import { Image, ShieldAlert } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '../components/ui/Button'
-import { apiRequest } from '../lib/api'
+import { apiRequest, uploadMedia } from '../lib/api'
 
 export function CreatePage() {
   const navigate = useNavigate()
   const [content, setContent] = useState('')
   const [imageUrl, setImageUrl] = useState('')
+  const [imageFile, setImageFile] = useState<File | null>(null)
   const [visibility, setVisibility] = useState<'PUBLIC' | 'FOLLOWERS' | 'PRIVATE'>('PUBLIC')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -17,9 +18,10 @@ export function CreatePage() {
     setSubmitting(true)
     setError('')
     try {
+      const uploaded = imageFile ? await uploadMedia(imageFile) : null
       await apiRequest('/api/posts', {
         method: 'POST',
-        body: JSON.stringify({ content: content.trim(), ...(imageUrl.trim() ? { imageUrl: imageUrl.trim() } : {}), visibility }),
+        body: JSON.stringify({ content: content.trim(), ...((uploaded?.mediaUrl ?? imageUrl.trim()) ? { imageUrl: uploaded?.mediaUrl ?? imageUrl.trim() } : {}), visibility }),
       })
       navigate('/')
     } catch (publishError) {
@@ -58,8 +60,18 @@ export function CreatePage() {
             aria-label="Image URL"
             placeholder="Image URL (https://...)"
             value={imageUrl}
-            onChange={(event) => setImageUrl(event.target.value)}
+            onChange={(event) => { setImageUrl(event.target.value); setImageFile(null) }}
             className="min-w-0 flex-1 bg-transparent text-slate-800 placeholder:text-slate-400 focus:outline-none"
+          />
+        </label>
+        <label className="mt-3 block rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+          <span className="mb-2 block font-medium">Or upload an image (JPEG, PNG, or WebP; up to 10 MB)</span>
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            aria-label="Upload post image"
+            onChange={(event) => { setImageFile(event.target.files?.[0] ?? null); setImageUrl('') }}
+            className="block w-full text-sm text-slate-600 file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:font-semibold file:text-indigo-700"
           />
         </label>
         <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
@@ -75,6 +87,7 @@ export function CreatePage() {
             <option value="PRIVATE">Only me</option>
           </select>
         </label>
+        {imageFile ? <p className="mt-2 text-xs text-slate-500">{imageFile.name} · {(imageFile.size / 1024 / 1024).toFixed(1)} MB</p> : null}
         {imageUrl ? <img src={imageUrl} alt="Post preview" className="mt-3 max-h-80 w-full rounded-2xl object-cover" /> : null}
 
         <div className="mt-6 rounded-[24px] border border-slate-200 bg-slate-50 p-4">

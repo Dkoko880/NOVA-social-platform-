@@ -9,6 +9,20 @@ if (import.meta.env.PROD && !configuredApiBaseUrl) {
 
 export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://nova-social-platform-api.onrender.com').replace(/\/$/, '');
 
+export function resolveMediaUrl(url: string | null | undefined) {
+  if (!url) return '';
+  return url.startsWith('/api/media/') ? `${API_BASE_URL}${url}` : url;
+}
+
+export async function uploadMedia(file: File) {
+  const body = new FormData();
+  body.append('file', file);
+  return apiRequest<{ mediaUrl: string; contentType: string }>('/api/media/uploads', {
+    method: 'POST',
+    body,
+  });
+}
+
 export class ApiError extends Error {
   status: number
   details?: unknown

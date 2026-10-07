@@ -346,31 +346,6 @@ export function listCallHistory(userId: string) {
   return getStore().callSessions.filter((call) => call.participants.some((participant) => participant.userId === userId) && call.status !== 'cancelled');
 }
 
-export function createCallSession(input: { callerId: string; targetUserId: string | null; type: CallType; participants?: CallParticipantState[] }) {
-  const callId = `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const participants: CallParticipantState[] = input.participants ?? [
-    { userId: input.callerId, status: 'pending', muted: false, cameraOn: input.type === 'video', speakerOn: true },
-    ...(input.targetUserId ? [{ userId: input.targetUserId, status: 'pending' as const, muted: false, cameraOn: input.type === 'video', speakerOn: true }] : []),
-  ];
-
-  const session: CallSession = {
-    id: callId,
-    callerId: input.callerId,
-    targetUserId: input.targetUserId,
-    type: input.type,
-    status: 'ringing',
-    participants,
-    provider: 'local-dev',
-    providerConfigured: false,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-
-  getStore().callSessions.push(session);
-  realtimeHub.emit('call:update', { call: session, allowedUserIds: participants.map((participant) => participant.userId) });
-  return session;
-}
-
 export function getCallSession(callId: string) {
   return getStore().callSessions.find((call) => call.id === callId) ?? null;
 }
@@ -403,35 +378,6 @@ export function updateCallSession(callId: string, changes: Partial<Pick<CallSess
   return session;
 }
 
-export function createLiveSession(input: { hostId: string; title: string; description?: string | null; visibility?: LiveVisibility; }) {
-  const session: LiveSession = {
-    id: `live_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    hostId: input.hostId,
-    title: input.title,
-    description: input.description ?? null,
-    visibility: input.visibility ?? 'public',
-    status: 'paused',
-    viewerCount: 0,
-    moderators: [],
-    viewers: [],
-    guests: [],
-    comments: [],
-    reactions: [],
-    replayUrl: null,
-    recordingUrl: null,
-    recordingStatus: 'UNAVAILABLE',
-    analyticsHook: null,
-    provider: 'local-dev',
-    providerConfigured: false,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-
-  getStore().liveSessions.push(session);
-  realtimeHub.emit('live:update', { live: session, allowedUserIds: [input.hostId] });
-  return session;
-}
-
 export function getLiveSession(liveId: string) {
   return getStore().liveSessions.find((session) => session.id === liveId) ?? null;
 }
@@ -452,34 +398,6 @@ export function updateLiveSession(liveId: string, updater: (session: LiveSession
   getStore().liveSessions[index] = next;
   realtimeHub.emit('live:update', { live: next, allowedUserIds: [next.hostId, ...next.moderators, ...next.viewers.map((viewer) => viewer.userId)] });
   return next;
-}
-
-export function createAiProvider() {
-  return {
-    name: 'local-dev-mock',
-    configured: false,
-    async translateText(input: string, language: string) {
-      return { provider: 'local-dev-mock', configured: false, language, output: input, note: 'No external translation provider configured.' };
-    },
-    async transcribeSpeech(audioBase64: string) {
-      return { provider: 'local-dev-mock', configured: false, transcript: audioBase64 ? '[mock transcript unavailable without provider credentials]' : '', note: 'No speech provider configured.' };
-    },
-    async generateSmartReply(text: string) {
-      return { provider: 'local-dev-mock', configured: false, suggestions: [text.trim() ? 'Thanks for the update.' : 'Let me think about that.'], note: 'No AI reply provider configured.' };
-    },
-    async generateCaptions(text: string) {
-      return { provider: 'local-dev-mock', configured: false, captions: [text], note: 'No captioning provider configured.' };
-    },
-    async summarizeText(text: string) {
-      return { provider: 'local-dev-mock', configured: false, summary: text.length > 180 ? `${text.slice(0, 180).trim()}...` : text, note: 'No summarization provider configured.' };
-    },
-    async moderateContent(input: { text?: string; type?: string }) {
-      return { provider: 'local-dev-mock', configured: false, decision: 'ALLOW', reason: 'Using local safety rules only.', details: input };
-    },
-    async detectSpamScam(input: { text?: string; source?: string }) {
-      return { provider: 'local-dev-mock', configured: false, risk: 'LOW', reason: 'No external scam detection provider connected.', details: input };
-    },
-  };
 }
 
 export function clearCommand2AStores() {

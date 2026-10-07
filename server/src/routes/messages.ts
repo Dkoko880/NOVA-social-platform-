@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 import { socialStore, type MessageRecord } from '../lib/socialStore.js';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
+import { mediaKeyFromUrl, uploadedMediaBelongsTo } from '../lib/mediaStorage.js';
 import { reviewContentForSafety } from '../lib/moderation.js';
 import { emitConversationEvent, subscribeToUserEvents } from '../lib/realtime.js';
 import { findUserById } from '../lib/fallbackStore.js';
@@ -19,10 +20,19 @@ const createConversationSchema = z.object({
   message: 'Group participants must be unique.',
 });
 
+function isAllowedMessageMediaUrl(value: string) {
+  if (mediaKeyFromUrl(value)) return true;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 const messageSchema = z.object({
   contentType: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'CONTACT', 'LOCATION']).default('TEXT'),
   text: z.string().trim().max(2000).optional(),
-  mediaUrl: z.string().url().max(2000).optional(),
+  mediaUrl: z.string().trim().max(2000).refine(isAllowedMessageMediaUrl, 'Use an HTTPS URL or an uploaded NOVAKOKO image.').optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   replyToId: z.string().min(1).optional(),
   status: z.enum(['SENT', 'DELIVERED', 'READ', 'FAILED']).optional(),
@@ -291,7 +301,6 @@ messagesRouter.get('/conversations/:id', requireAuth, async (req, res) => {
   if (!(await canViewConversation(conversationId, userId))) {
     return res.status(403).json({ message: 'You do not have access to this conversation.' });
   }
-
   const dbAvailable = await isDatabaseAvailable();
 
   if (dbAvailable) {
@@ -344,6 +353,9 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
 
   if (!(await canViewConversation(conversationId, userId))) {
     return res.status(403).json({ message: 'You do not have access to this conversation.' });
+  }
+  if (payload.mediaUrl && !(await uploadedMediaBelongsTo(payload.mediaUrl, userId, process.env.NODE_ENV ?? 'development'))) {
+    return res.status(403).json({ message: 'You can only attach images that you uploaded.' });
   }
 
   const dbAvailable = await isDatabaseAvailable();

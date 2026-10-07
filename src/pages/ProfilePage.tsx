@@ -5,7 +5,7 @@ import { Avatar } from '../components/ui/Avatar'
 import { Button } from '../components/ui/Button'
 import { PostCard } from '../components/PostCard'
 import { useAuth } from '../context/AuthContext'
-import { apiRequest } from '../lib/api'
+import { apiRequest, resolveMediaUrl, uploadMedia } from '../lib/api'
 import type { Post } from '../types'
 
 type ProfileRecord = {
@@ -71,7 +71,7 @@ export function ProfilePage() {
   useEffect(() => { void loadProfile() }, [profileId])
 
   const displayName = profile?.profile?.displayName ?? profile?.name ?? 'NOVAKOKO user'
-  const avatar = profile?.profile?.avatarUrl ?? `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(displayName)}`
+  const avatar = profile?.profile?.avatarUrl ?? ''
   const relationship = profile?.relationship
 
   const startEditing = () => {
@@ -98,6 +98,20 @@ export function ProfilePage() {
       await loadProfile()
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : 'Unable to update your profile.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const uploadProfileImage = async (field: 'avatarUrl' | 'coverUrl', file: File | undefined) => {
+    if (!file) return
+    setBusy(true)
+    setError('')
+    try {
+      const uploaded = await uploadMedia(file)
+      setEditDraft((current) => ({ ...current, [field]: uploaded.mediaUrl }))
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : 'Unable to upload this image.')
     } finally {
       setBusy(false)
     }
@@ -158,7 +172,7 @@ export function ProfilePage() {
         {error ? <p className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p> : null}
         {notice ? <p className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700" role="status">{notice}</p> : null}
         <section className="overflow-hidden rounded-[32px] border border-slate-200 bg-white shadow-sm">
-          {profile.profile.coverUrl ? <img src={profile.profile.coverUrl} alt="Profile cover" className="h-40 w-full object-cover" /> : <div className="h-40 bg-gradient-to-r from-violet-600 via-indigo-600 to-cyan-500" />}
+          {profile.profile.coverUrl ? <img src={resolveMediaUrl(profile.profile.coverUrl)} crossOrigin={profile.profile.coverUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="Profile cover" className="h-40 w-full object-cover" /> : <div className="h-40 bg-gradient-to-r from-violet-600 via-indigo-600 to-cyan-500" />}
           <div className="relative p-4 sm:p-6">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
               <div className="flex items-end gap-4">
@@ -197,6 +211,12 @@ export function ProfilePage() {
                     <input value={editDraft[key]} maxLength={key === 'bio' ? 220 : undefined} onChange={(event) => setEditDraft((current) => ({ ...current, [key]: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-400 focus:outline-none" />
                   </label>
                 ))}
+                <label className="text-xs font-medium text-slate-600">Upload avatar image
+                  <input type="file" accept="image/jpeg,image/png,image/webp" aria-label="Upload avatar image" disabled={busy} onChange={(event) => void uploadProfileImage('avatarUrl', event.target.files?.[0])} className="mt-1 block w-full text-sm" />
+                </label>
+                <label className="text-xs font-medium text-slate-600">Upload cover image
+                  <input type="file" accept="image/jpeg,image/png,image/webp" aria-label="Upload cover image" disabled={busy} onChange={(event) => void uploadProfileImage('coverUrl', event.target.files?.[0])} className="mt-1 block w-full text-sm" />
+                </label>
                 <div className="flex gap-2 sm:col-span-2">
                   <Button type="submit" variant="primary" size="sm" disabled={busy}>{busy ? 'Saving…' : 'Save profile'}</Button>
                   <Button type="button" variant="secondary" size="sm" onClick={() => setEditing(false)}>Cancel</Button>

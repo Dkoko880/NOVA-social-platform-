@@ -4,7 +4,7 @@ import { Bookmark, MessageCircle, PencilLine, Share2, ShieldAlert, ThumbsUp, Tra
 import { Avatar } from './ui/Avatar'
 import { Button } from './ui/Button'
 import { useAuth } from '../context/AuthContext'
-import { apiRequest } from '../lib/api'
+import { apiRequest, resolveMediaUrl } from '../lib/api'
 import type { Post } from '../types'
 
 type CommentRecord = {
@@ -276,7 +276,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
       ) : (
         <>
           {content ? <p className="mt-4 whitespace-pre-wrap text-[15px] leading-7 text-slate-700">{content}</p> : null}
-          {imageUrl ? <img src={imageUrl} alt="Post attachment" className="mt-4 max-h-[32rem] w-full rounded-[24px] object-cover" /> : null}
+          {imageUrl ? <img src={resolveMediaUrl(imageUrl)} crossOrigin={imageUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="Post attachment" className="mt-4 max-h-[32rem] w-full rounded-[24px] object-cover" /> : null}
           <p className="mt-2 text-xs text-slate-500">{visibility === 'PUBLIC' ? 'Everyone' : visibility === 'FOLLOWERS' ? 'Followers' : 'Only me'}</p>
         </>
       )}

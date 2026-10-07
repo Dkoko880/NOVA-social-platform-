@@ -26,7 +26,6 @@ export function CallsPage() {
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState('')
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
 
   const loadData = async () => {
     setLoading(true)
@@ -67,23 +66,6 @@ export function CallsPage() {
 
   const filteredUsers = useMemo(() => users.filter((person) => `${person.name} ${person.handle}`.toLowerCase().includes(query.toLowerCase())), [users, query])
 
-  const startCall = async (target: DirectoryUser, type: 'voice' | 'video') => {
-    setBusyId(target.id)
-    setError('')
-    setNotice('')
-    try {
-      const response = await apiRequest<{ call: CallSession }>('/api/calls/start', { method: 'POST', body: JSON.stringify({ targetUserId: target.id, type }) })
-      setCalls((current) => [response.call, ...current.filter((call) => call.id !== response.call.id)])
-      setNotice(response.call.providerConfigured
-        ? `${type === 'voice' ? 'Voice' : 'Video'} call started.`
-        : 'Call request was recorded, but audio/video is unavailable because no calling provider is configured.')
-    } catch (startError) {
-      setError(startError instanceof Error ? startError.message : 'Unable to start this call.')
-    } finally {
-      setBusyId('')
-    }
-  }
-
   const callAction = async (call: CallSession, action: 'accept' | 'reject' | 'cancel' | 'end' | 'leave') => {
     setBusyId(call.id)
     setError('')
@@ -103,15 +85,14 @@ export function CallsPage() {
   return (
     <div className="space-y-5 p-4 sm:p-6">
       <header><p className="text-xs font-semibold uppercase text-indigo-700">Calls</p><h2 className="mt-2 text-2xl font-semibold text-slate-900">Call history</h2></header>
-      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status">Audio and video calling require a configured media provider. Call signaling and invitations are available; media is currently unavailable.</div>
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status">Calls are unavailable because real-time media and signaling are not configured. No calls will be shown as connected until a real media session is established.</div>
       {error ? <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p> : null}
-      {notice ? <p role="status" className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-900">{notice}</p> : null}
 
       <section className="rounded-2xl border border-slate-200 bg-white p-4">
         <h3 className="font-semibold text-slate-900">Start a call</h3>
         <label className="mt-3 flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-500"><Search className="h-4 w-4" aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a person" aria-label="Find a person to call" className="min-w-0 flex-1 bg-transparent text-slate-800 outline-none" /></label>
         <ul className="mt-3 divide-y divide-slate-100">
-          {filteredUsers.map((person) => <li key={person.id} className="flex flex-wrap items-center gap-3 py-3"><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-slate-900">{person.name}</span><span className="text-xs text-slate-500">@{person.handle}</span></span><Button variant="secondary" size="sm" disabled={busyId === person.id} onClick={() => void startCall(person, 'voice')} icon={<Phone className="h-4 w-4" aria-hidden="true" />}>Voice</Button><Button variant="secondary" size="sm" disabled={busyId === person.id} onClick={() => void startCall(person, 'video')} icon={<Video className="h-4 w-4" aria-hidden="true" />}>Video</Button></li>)}
+          {filteredUsers.map((person) => <li key={person.id} className="flex flex-wrap items-center gap-3 py-3"><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-slate-900">{person.name}</span><span className="text-xs text-slate-500">@{person.handle}</span></span><Button variant="secondary" size="sm" disabled icon={<Phone className="h-4 w-4" aria-hidden="true" />}>Voice unavailable</Button><Button variant="secondary" size="sm" disabled icon={<Video className="h-4 w-4" aria-hidden="true" />}>Video unavailable</Button></li>)}
           {!loading && filteredUsers.length === 0 ? <li className="py-4 text-sm text-slate-500">No people match this search.</li> : null}
         </ul>
       </section>
@@ -125,10 +106,10 @@ export function CallsPage() {
             const own = call.participants.find((participant) => participant.userId === user?.id)
             const counterparties = call.participants.filter((participant) => participant.userId !== user?.id).map((participant) => nameFor(participant.userId)).join(', ')
             const incoming = call.callerId !== user?.id && own?.status === 'pending'
-            return <li key={call.id} className="flex flex-wrap items-center gap-3 p-4"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 text-slate-600">{call.type === 'video' ? <Video className="h-5 w-5" /> : <Phone className="h-5 w-5" />}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-slate-900">{counterparties || 'Call'}</p><p className="mt-1 text-xs text-slate-500">{call.type} · {call.status} · {new Date(call.createdAt).toLocaleString()}</p>{call.providerConfigured === false ? <p className="mt-1 text-xs text-amber-700">Media unavailable: provider not configured</p> : null}</div>{incoming ? <><Button variant="primary" size="sm" disabled={busyId === call.id} onClick={() => void callAction(call, 'accept')}>Accept</Button><Button variant="secondary" size="sm" disabled={busyId === call.id} onClick={() => void callAction(call, 'reject')}>Decline</Button></> : null}{call.callerId === user?.id && call.status === 'ringing' ? <Button variant="secondary" size="sm" disabled={busyId === call.id} onClick={() => void callAction(call, 'cancel')}>Cancel</Button> : null}{call.status === 'connected' && own?.status !== 'left' ? <Button variant="secondary" size="sm" disabled={busyId === call.id} onClick={() => void callAction(call, 'leave')}>Leave</Button> : null}</li>
+            return <li key={call.id} className="flex flex-wrap items-center gap-3 p-4"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 text-slate-600">{call.type === 'video' ? <Video className="h-5 w-5" /> : <Phone className="h-5 w-5" />}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-slate-900">{counterparties || 'Call'}</p><p className="mt-1 text-xs text-slate-500">{call.type} · {call.status} · {new Date(call.createdAt).toLocaleString()}</p>{call.providerConfigured === false ? <p className="mt-1 text-xs text-amber-700">Media unavailable: provider not configured</p> : null}</div>{incoming ? <><Button variant="primary" size="sm" disabled>Accept unavailable</Button><Button variant="secondary" size="sm" disabled={busyId === call.id} onClick={() => void callAction(call, 'reject')}>Decline</Button></> : null}{call.callerId === user?.id && call.status === 'ringing' ? <Button variant="secondary" size="sm" disabled={busyId === call.id} onClick={() => void callAction(call, 'cancel')}>Cancel</Button> : null}{call.status === 'connected' && own?.status !== 'left' ? <Button variant="secondary" size="sm" disabled={busyId === call.id} onClick={() => void callAction(call, 'leave')}>Leave</Button> : null}</li>
           })}
         </ul>
-        {activeCalls.length > 0 ? <p className="mt-2 text-xs text-slate-500">Active call sessions are synchronized with the server. Audio/video remains unavailable until a provider is configured.</p> : null}
+        {activeCalls.length > 0 ? <p className="mt-2 text-xs text-slate-500">Call actions are restricted while media and signaling are unavailable.</p> : null}
       </section>
     </div>
   )

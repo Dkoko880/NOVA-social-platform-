@@ -5,7 +5,7 @@ import { Avatar } from '../components/ui/Avatar'
 import { Button } from '../components/ui/Button'
 import { EmptyState } from '../components/ui/EmptyState'
 import { useAuth } from '../context/AuthContext'
-import { apiRequest, API_BASE_URL } from '../lib/api'
+import { apiRequest, API_BASE_URL, resolveMediaUrl, uploadMedia } from '../lib/api'
 
 type ConversationParticipant = { userId: string; role?: string; user?: { id: string; name: string } }
 type ConversationListItem = {
@@ -74,6 +74,7 @@ export function MessagesPage() {
   const [media, setMedia] = useState<MessageItem[]>([])
   const [composeType, setComposeType] = useState('TEXT')
   const [mediaUrl, setMediaUrl] = useState('')
+  const [mediaFile, setMediaFile] = useState<File | null>(null)
   const [contactName, setContactName] = useState('')
   const [contactPhone, setContactPhone] = useState('')
   const [locationLabel, setLocationLabel] = useState('')
@@ -215,7 +216,7 @@ export function MessagesPage() {
   }
 
   const canSend = composeType === 'TEXT' ? Boolean(draft.trim())
-    : ['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE'].includes(composeType) ? Boolean(mediaUrl.trim())
+    : ['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE'].includes(composeType) ? Boolean(mediaUrl.trim() || (composeType === 'IMAGE' && mediaFile))
       : composeType === 'CONTACT' ? Boolean(contactName.trim() && contactPhone.trim())
         : Boolean(latitude.trim() && longitude.trim())
 
@@ -228,12 +229,17 @@ export function MessagesPage() {
     try {
       setSending(true)
       setError('')
+      const attachmentUrl = mediaFile ? (await uploadMedia(mediaFile)).mediaUrl : mediaUrl.trim()
+      if (mediaFile) {
+        setMediaUrl(attachmentUrl)
+        setMediaFile(null)
+      }
       const response = await apiRequest<{ message: MessageItem }>(`/api/conversations/${encodeURIComponent(selectedId)}/messages`, {
         method: 'POST',
         body: JSON.stringify({
           contentType: composeType,
           ...(draft.trim() ? { text: draft.trim() } : {}),
-          ...(mediaUrl.trim() ? { mediaUrl: mediaUrl.trim() } : {}),
+          ...(attachmentUrl ? { mediaUrl: attachmentUrl } : {}),
           ...(metadata ? { metadata } : {}),
           ...(replyTarget ? { replyToId: replyTarget.id } : {}),
         }),
@@ -241,6 +247,7 @@ export function MessagesPage() {
       setMessages((current) => current.some((message) => message.id === response.message.id) ? current : [...current, response.message])
       setDraft('')
       setMediaUrl('')
+      setMediaFile(null)
       setContactName('')
       setContactPhone('')
       setLocationLabel('')
@@ -456,7 +463,7 @@ export function MessagesPage() {
                 </div>
               </header>
 
-              {showMedia ? <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-3">{media.length ? media.map((item) => item.mediaUrl ? <a key={item.id} href={item.mediaUrl} target="_blank" rel="noreferrer" className="min-w-0 overflow-hidden rounded-lg bg-white text-xs text-indigo-700">{item.contentType === 'IMAGE' ? <img src={item.mediaUrl} alt="Shared image" className="aspect-square w-full object-cover" /> : <span className="block truncate p-2">{item.contentType}: {item.mediaUrl}</span>}</a> : null) : <p className="text-xs text-slate-500">No shared media.</p>}</div> : null}
+              {showMedia ? <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-3">{media.length ? media.map((item) => item.mediaUrl ? <a key={item.id} href={resolveMediaUrl(item.mediaUrl)} target="_blank" rel="noreferrer" className="min-w-0 overflow-hidden rounded-lg bg-white text-xs text-indigo-700">{item.contentType === 'IMAGE' ? <img src={resolveMediaUrl(item.mediaUrl)} crossOrigin={item.mediaUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="Shared image" className="aspect-square w-full object-cover" /> : <span className="block truncate p-2">{item.contentType}: {item.mediaUrl}</span>}</a> : null) : <p className="text-xs text-slate-500">No shared media.</p>}</div> : null}
               <form onSubmit={(event) => void searchMessages(event)} className="mt-2 flex gap-2 px-1">
                 <input aria-label="Search messages" value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Search messages in this chat" minLength={2} className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none" />
                 <Button type="submit" variant="secondary" size="sm" disabled={messageSearch.trim().length < 2} icon={<Search className="h-4 w-4" aria-hidden="true" />}>Search</Button>
@@ -476,7 +483,7 @@ export function MessagesPage() {
                       <div className={`max-w-[78%] rounded-2xl px-3 py-2 text-sm shadow-sm sm:max-w-[70%] ${isOwn ? 'bg-blue-600 text-white' : 'bg-white text-slate-700'}`}>
                         {message.forwardedFromId ? <p className={`mb-1 text-[10px] ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>Forwarded</p> : null}
                         {reply ? <p className={`mb-2 border-l-2 pl-2 text-xs ${isOwn ? 'border-indigo-200 text-indigo-100' : 'border-indigo-400 text-slate-500'}`}>{reply.text}</p> : null}
-                        {message.contentType === 'IMAGE' && message.mediaUrl ? <a href={message.mediaUrl} target="_blank" rel="noreferrer"><img src={message.mediaUrl} alt="Message attachment" className="mb-2 max-h-64 rounded-xl object-cover" /></a> : null}
+                        {message.contentType === 'IMAGE' && message.mediaUrl ? <a href={resolveMediaUrl(message.mediaUrl)} target="_blank" rel="noreferrer"><img src={resolveMediaUrl(message.mediaUrl)} crossOrigin={message.mediaUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="Message attachment" className="mb-2 max-h-64 rounded-xl object-cover" /></a> : null}
                         {message.contentType === 'VIDEO' && message.mediaUrl ? <video controls src={message.mediaUrl} className="mb-2 max-h-64 rounded-xl" /> : null}
                         {message.text ? <p className="whitespace-pre-wrap">{message.text}</p> : null}
                         {message.contentType === 'CONTACT' && message.metadata ? <p>{String(message.metadata.name ?? 'Contact')} · {String(message.metadata.phone ?? '')}</p> : null}
@@ -507,10 +514,13 @@ export function MessagesPage() {
               <form onSubmit={(event) => void handleSendMessage(event)} className="sticky bottom-0 mt-1 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-lg">
                 {replyTarget ? <div className="mb-2 flex items-center justify-between rounded-xl bg-white px-3 py-2 text-xs text-slate-600"><span className="truncate">Replying to: {replyTarget.text || replyTarget.contentType}</span><button type="button" onClick={() => setReplyTarget(null)} aria-label="Cancel reply">×</button></div> : null}
                 <div className="flex flex-wrap gap-2">
-                  <select aria-label="Message type" value={composeType} onChange={(event) => setComposeType(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-2 py-2 text-xs text-slate-700">
+                  <select aria-label="Message type" value={composeType} onChange={(event) => { setComposeType(event.target.value); setMediaFile(null); setMediaUrl('') }} className="rounded-xl border border-slate-200 bg-white px-2 py-2 text-xs text-slate-700">
                     {['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'CONTACT', 'LOCATION'].map((type) => <option key={type} value={type}>{type[0] + type.slice(1).toLowerCase()}</option>)}
                   </select>
-                  {['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE'].includes(composeType) ? <input type="url" aria-label="Attachment URL" value={mediaUrl} onChange={(event) => setMediaUrl(event.target.value)} placeholder="Attachment URL" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm" /> : null}
+                  {['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE'].includes(composeType) ? <input type="url" aria-label="Attachment URL" value={mediaUrl} onChange={(event) => { setMediaUrl(event.target.value); setMediaFile(null) }} placeholder="Attachment URL" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm" /> : null}
+                  {composeType === 'IMAGE' ? <label className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600">Or upload an image (up to 10 MB)
+                    <input type="file" accept="image/jpeg,image/png,image/webp" aria-label="Upload message image" onChange={(event) => { setMediaFile(event.target.files?.[0] ?? null); setMediaUrl('') }} className="mt-1 block w-full text-xs" />
+                  </label> : null}
                   {composeType === 'CONTACT' ? <><input aria-label="Contact name" value={contactName} onChange={(event) => setContactName(event.target.value)} placeholder="Contact name" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm" /><input aria-label="Contact phone" value={contactPhone} onChange={(event) => setContactPhone(event.target.value)} placeholder="Phone number" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm" /></> : null}
                   {composeType === 'LOCATION' ? <><input aria-label="Location label" value={locationLabel} onChange={(event) => setLocationLabel(event.target.value)} placeholder="Place name" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm" /><input aria-label="Latitude" type="number" step="any" value={latitude} onChange={(event) => setLatitude(event.target.value)} placeholder="Latitude" className="w-28 rounded-xl border border-slate-200 px-3 py-2 text-sm" /><input aria-label="Longitude" type="number" step="any" value={longitude} onChange={(event) => setLongitude(event.target.value)} placeholder="Longitude" className="w-28 rounded-xl border border-slate-200 px-3 py-2 text-sm" /></> : null}
                 </div>

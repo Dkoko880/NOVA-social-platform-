@@ -1,7 +1,7 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
-import { createAiProvider, createCallSession, createLiveSession, createNotification, getCallSession, getLiveSession, getNotificationPreferences, listCallHistory, listLiveSessions, markAllNotificationsRead, markNotificationRead, setNotificationPreferences, setPresence, setTypingState, updateCallSession, updateLiveSession } from '../lib/platform.js';
+import { createNotification, getCallSession, getLiveSession, getNotificationPreferences, listCallHistory, listLiveSessions, markAllNotificationsRead, markNotificationRead, setNotificationPreferences, setPresence, setTypingState, updateCallSession, updateLiveSession } from '../lib/platform.js';
 import { socialStore } from '../lib/socialStore.js';
 import { findUserById } from '../lib/fallbackStore.js';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
@@ -144,37 +144,8 @@ command2aRouter.post('/conversations/:id/typing', requireAuth, async (req, res) 
 });
 
 command2aRouter.post('/calls/start', requireAuth, async (req, res) => {
-  const payload = callSchema.parse(req.body ?? {});
-  const callerId = req.user!.id;
-  const targetSources = Number(Boolean(payload.targetUserId)) + Number(Boolean(payload.targetUserIds)) + Number(Boolean(payload.conversationId));
-  if (targetSources !== 1) return res.status(400).json({ message: 'Provide one user, a user list, or a conversation.' });
-  let targetIds = payload.targetUserIds ?? (payload.targetUserId ? [payload.targetUserId] : []);
-  if (payload.conversationId) {
-    if (!(await canViewConversation(payload.conversationId, callerId))) return res.status(403).json({ message: 'You do not have access to this conversation.' });
-    targetIds = await (async () => await isDatabaseAvailable()
-      ? (await prisma.conversationParticipant.findMany({ where: { conversationId: payload.conversationId }, select: { userId: true } })).map((participant) => participant.userId)
-      : socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === payload.conversationId).map((participant) => participant.userId))();
-  }
-  targetIds = [...new Set(targetIds)].filter((targetId) => targetId !== callerId);
-  if (!targetIds.length || targetIds.length > 49) return res.status(400).json({ message: 'A call must include at least one other participant and no more than 50 people.' });
-
-  const targetUsers: Array<{ id: string; name: string }> = [];
-  for (const targetId of targetIds) {
-    if (await isBlocked(callerId, targetId)) return res.status(403).json({ message: 'You cannot call a user who has blocked you or who you have blocked.' });
-    const target = await (async () => await isDatabaseAvailable()
-      ? prisma.user.findUnique({ where: { id: targetId }, select: { id: true, name: true } })
-      : findUserById(targetId))();
-    if (!target) return res.status(404).json({ message: 'User not found.' });
-    targetUsers.push(target);
-  }
-
-  const participants = [
-    { userId: callerId, status: 'connected' as const, muted: false, cameraOn: payload.type === 'video', speakerOn: true },
-    ...targetIds.map((userId) => ({ userId, status: 'pending' as const, muted: false, cameraOn: payload.type === 'video', speakerOn: true })),
-  ];
-  const call = createCallSession({ callerId, targetUserId: targetIds.length === 1 ? targetIds[0] : null, type: payload.type, participants });
-  await Promise.all(targetUsers.map((target) => createNotification(target.id, callerId, 'call', `${req.user!.name} started a ${payload.type} call.`)));
-  return res.json({ call, message: 'Call started.' });
+  callSchema.parse(req.body ?? {});
+  return res.status(503).json({ message: 'Calls are unavailable until real-time media and signaling are configured.' });
 });
 
 command2aRouter.get('/calls/history', requireAuth, async (req, res) => {
@@ -202,6 +173,9 @@ command2aRouter.post('/calls/:id/accept', requireAuth, async (req, res) => {
   }
   if (!isCallParticipant(call, req.user!.id)) {
     return res.status(403).json({ message: 'You do not have access to this call.' });
+  }
+  if (!call.providerConfigured) {
+    return res.status(503).json({ message: 'This call cannot connect because real-time media and signaling are not configured.' });
   }
 
   const next = updateCallSession(call.id, { status: 'connected' }, [
@@ -295,9 +269,8 @@ command2aRouter.post('/calls/:id/speaker', requireAuth, async (req, res) => {
 });
 
 command2aRouter.post('/live/create', requireAuth, async (req, res) => {
-  const payload = liveCreateSchema.parse(req.body ?? {});
-  const live = createLiveSession({ hostId: req.user!.id, title: payload.title, description: payload.description, visibility: payload.visibility });
-  return res.status(201).json({ live, message: 'Live session created.' });
+  liveCreateSchema.parse(req.body ?? {});
+  return res.status(503).json({ message: 'Live streaming is unavailable until a real-time media service is configured.' });
 });
 
 command2aRouter.get('/live', requireAuth, async (req, res) => {
@@ -320,6 +293,7 @@ command2aRouter.post('/live/:id/start', requireAuth, async (req, res) => {
   const live = getLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the host can start this live session.' });
+  if (!live.providerConfigured) return res.status(503).json({ message: 'Live streaming is unavailable until a real-time media service is configured.' });
   const next = updateLiveSession(live.id, (session) => ({ ...session, status: 'live', viewerCount: Math.max(0, session.viewerCount) }));
   return res.json({ live: next, message: 'Live session started.' });
 });
@@ -335,6 +309,7 @@ command2aRouter.post('/live/:id/end', requireAuth, async (req, res) => {
 command2aRouter.post('/live/:id/comment', requireAuth, async (req, res) => {
   const live = getLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
+  if (!live.providerConfigured) return res.status(503).json({ message: 'Live interactions are unavailable until a real-time media service is configured.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'Comments are available while the live session is running.' });
   if (await isBlocked(req.user!.id, live.hostId)) return res.status(403).json({ message: 'You cannot interact with this live session.' });
   const payload = liveCommentSchema.parse(req.body ?? {});
@@ -351,6 +326,7 @@ command2aRouter.post('/live/:id/comment', requireAuth, async (req, res) => {
 command2aRouter.post('/live/:id/react', requireAuth, async (req, res) => {
   const live = getLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
+  if (!live.providerConfigured) return res.status(503).json({ message: 'Live interactions are unavailable until a real-time media service is configured.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'Reactions are available while the live session is running.' });
   const payload = liveReactionSchema.parse(req.body ?? {});
   const next = updateLiveSession(live.id, (session) => ({
@@ -419,6 +395,7 @@ command2aRouter.post('/live/:id/moderators/:userId/remove', requireAuth, async (
 command2aRouter.post('/live/:id/viewers/join', requireAuth, async (req, res) => {
   const live = getLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
+  if (!live.providerConfigured) return res.status(503).json({ message: 'Live streaming is unavailable until a real-time media service is configured.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'This live session is not running.' });
   if (live.visibility === 'private' && !canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'This live session is private.' });
   if (await isBlocked(req.user!.id, live.hostId)) return res.status(403).json({ message: 'You cannot join this live session.' });
@@ -558,47 +535,16 @@ command2aRouter.post('/live/:id/share', requireAuth, async (req, res) => {
   return res.json({ shared: true, live });
 });
 
-command2aRouter.post('/ai/summarize', async (req, res) => {
-  const provider = createAiProvider();
-  const content = typeof req.body?.content === 'string' ? req.body.content : '';
-  const result = await provider.summarizeText(content);
-  return res.json(result);
-});
+function aiUnavailable(_req: Request, res: Response) {
+  return res.status(503).json({ message: 'AI assistance is unavailable because no AI provider is configured.' });
+}
 
-command2aRouter.post('/ai/translate', async (req, res) => {
-  const provider = createAiProvider();
-  const result = await provider.translateText(String(req.body?.text ?? ''), String(req.body?.language ?? 'en'));
-  return res.json(result);
-});
-
-command2aRouter.post('/ai/speech-to-text', async (req, res) => {
-  const provider = createAiProvider();
-  const result = await provider.transcribeSpeech(String(req.body?.audioBase64 ?? ''));
-  return res.json(result);
-});
-
-command2aRouter.post('/ai/smart-replies', async (req, res) => {
-  const provider = createAiProvider();
-  const result = await provider.generateSmartReply(String(req.body?.text ?? ''));
-  return res.json(result);
-});
-
-command2aRouter.post('/ai/captions', async (req, res) => {
-  const provider = createAiProvider();
-  const result = await provider.generateCaptions(String(req.body?.text ?? ''));
-  return res.json(result);
-});
-
-command2aRouter.post('/ai/moderate', async (req, res) => {
-  const provider = createAiProvider();
-  const result = await provider.moderateContent({ text: String(req.body?.text ?? ''), type: String(req.body?.type ?? 'content') });
-  return res.json(result);
-});
-
-command2aRouter.post('/ai/spam-scam-detect', async (req, res) => {
-  const provider = createAiProvider();
-  const result = await provider.detectSpamScam({ text: String(req.body?.text ?? ''), source: String(req.body?.source ?? 'chat') });
-  return res.json(result);
-});
+command2aRouter.post('/ai/summarize', aiUnavailable);
+command2aRouter.post('/ai/translate', aiUnavailable);
+command2aRouter.post('/ai/speech-to-text', aiUnavailable);
+command2aRouter.post('/ai/smart-replies', aiUnavailable);
+command2aRouter.post('/ai/captions', aiUnavailable);
+command2aRouter.post('/ai/moderate', aiUnavailable);
+command2aRouter.post('/ai/spam-scam-detect', aiUnavailable);
 
 export { command2aRouter };

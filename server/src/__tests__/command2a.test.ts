@@ -146,7 +146,7 @@ describe('command 2a foundation', () => {
     expect(unauthorized.status).toBe(404);
   });
 
-  it('enforces call authorization and blocked user restrictions', async () => {
+  it('does not create or report calls as connected without a media and signaling service', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',
       email: 'alice@example.com',
@@ -171,9 +171,8 @@ describe('command 2a foundation', () => {
       .set('Cookie', getCookieHeader(aliceLogin))
       .send({ targetUserId: bobUser.id, type: 'voice' });
 
-    expect(started.status).toBe(200);
-    expect(started.body.call.type).toBe('voice');
-    expect(['ringing', 'outgoing', 'connected']).toContain(started.body.call.status);
+    expect(started.status).toBe(503);
+    expect(started.body.message).toMatch(/media and signaling/i);
 
     await request(app)
       .post(`/api/users/${bobUser.id}/block`)
@@ -184,11 +183,11 @@ describe('command 2a foundation', () => {
       .set('Cookie', getCookieHeader(aliceLogin))
       .send({ targetUserId: bobUser.id, type: 'video' });
 
-    expect(blocked.status).toBe(403);
-    expect(blocked.body.message).toMatch(/blocked|block/i);
+    expect(blocked.status).toBe(503);
+    expect((await request(app).get('/api/calls/history').set('Cookie', getCookieHeader(aliceLogin))).body.calls).toHaveLength(0);
   });
 
-  it('enforces live host and moderator permissions', async () => {
+  it('does not create a live session without a real-time media service', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',
       email: 'alice@example.com',
@@ -206,41 +205,24 @@ describe('command 2a foundation', () => {
       email: 'alice@example.com',
       password: 'Password123',
     });
-    const bobUser = (await request(app).get('/api/users')).body.users.find((user: { email: string }) => user.email === 'bob@example.com');
-
     const live = await request(app)
       .post('/api/live/create')
       .set('Cookie', getCookieHeader(aliceLogin))
       .send({ title: 'Launch stream', visibility: 'public' });
 
-    expect(live.status).toBe(201);
-
-    const bobLogin = await request(app).post('/api/auth/login').send({
-      email: 'bob@example.com',
-      password: 'Password123',
-    });
-
-    const viewerKick = await request(app)
-      .post(`/api/live/${live.body.live.id}/viewer/${bobUser.id}/remove`)
-      .set('Cookie', getCookieHeader(bobLogin));
-
-    expect(viewerKick.status).toBe(403);
-
-    const hostEnd = await request(app)
-      .post(`/api/live/${live.body.live.id}/end`)
-      .set('Cookie', getCookieHeader(aliceLogin));
-
-    expect(hostEnd.status).toBe(200);
-    expect(hostEnd.body.live.status).toBe('ended');
+    expect(live.status).toBe(503);
+    expect(live.body.message).toMatch(/real-time media/i);
+    expect((await request(app).get('/api/live').set('Cookie', getCookieHeader(aliceLogin))).body.lives).toHaveLength(0);
   });
 
-  it('exposes the AI provider abstraction without exposing keys', async () => {
+  it('reports AI assistance unavailable instead of returning fabricated generated content', async () => {
     const response = await request(app)
       .post('/api/ai/summarize')
       .send({ content: 'This should summarize cleanly.' });
 
-    expect(response.status).toBe(200);
-    expect(response.body.provider).toMatch(/mock|local|development/i);
+    expect(response.status).toBe(503);
+    expect(response.body.message).toMatch(/no AI provider is configured/i);
+    expect(response.body.summary).toBeUndefined();
     expect(JSON.stringify(response.body)).not.toMatch(/sk-|api[_-]?key|secret/i);
   });
 });

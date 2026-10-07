@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { PostCard } from '../components/PostCard'
 import { useAuth } from '../context/AuthContext'
-import { apiRequest } from '../lib/api'
+import { apiRequest, resolveMediaUrl, uploadMedia } from '../lib/api'
 import type { Post } from '../types'
 
 type StoryRecord = {
@@ -47,6 +47,8 @@ export function HomePage() {
   const [showStoryComposer, setShowStoryComposer] = useState(false)
   const [storyText, setStoryText] = useState('')
   const [storyMediaUrl, setStoryMediaUrl] = useState('')
+  const [storyImageFile, setStoryImageFile] = useState<File | null>(null)
+  const [uploadedStoryMediaUrl, setUploadedStoryMediaUrl] = useState('')
   const [storyBusy, setStoryBusy] = useState(false)
   const [activeStory, setActiveStory] = useState<StoryRecord | null>(null)
 
@@ -92,17 +94,23 @@ export function HomePage() {
   }
 
   const publishStory = async () => {
-    if (storyBusy || (!storyText.trim() && !storyMediaUrl.trim())) return
+    if (storyBusy || (!storyText.trim() && !storyMediaUrl.trim() && !storyImageFile)) return
     setStoryBusy(true)
     setStoriesError('')
     try {
+      const mediaUrl = storyImageFile
+        ? uploadedStoryMediaUrl || (await uploadMedia(storyImageFile)).mediaUrl
+        : storyMediaUrl.trim()
+      if (storyImageFile && mediaUrl !== uploadedStoryMediaUrl) setUploadedStoryMediaUrl(mediaUrl)
       const response = await apiRequest<{ story: StoryRecord }>('/api/stories', {
         method: 'POST',
-        body: JSON.stringify({ ...(storyText.trim() ? { text: storyText.trim() } : {}), ...(storyMediaUrl.trim() ? { mediaUrl: storyMediaUrl.trim() } : {}) }),
+        body: JSON.stringify({ ...(storyText.trim() ? { text: storyText.trim() } : {}), ...(mediaUrl ? { mediaUrl } : {}) }),
       })
       setStories((current) => [...current, response.story])
       setStoryText('')
       setStoryMediaUrl('')
+      setStoryImageFile(null)
+      setUploadedStoryMediaUrl('')
       setShowStoryComposer(false)
     } catch (publishError) {
       setStoriesError(publishError instanceof Error ? publishError.message : 'Unable to publish this story.')
@@ -176,9 +184,9 @@ export function HomePage() {
             </button>
             {stories.map((story) => (
               <button key={story.id} type="button" onClick={() => void openStory(story)} className={`relative flex h-28 w-20 shrink-0 flex-col justify-end overflow-hidden rounded-2xl p-2 text-left text-white ring-2 ${story.viewedByMe ? 'ring-slate-200' : 'ring-indigo-500'}`}>
-                {story.mediaUrl ? <img src={story.mediaUrl} alt="" className="absolute inset-0 h-full w-full object-cover" /> : <span className="absolute inset-0 bg-gradient-to-b from-indigo-500 to-blue-800" />}
+                {story.mediaUrl ? <img src={resolveMediaUrl(story.mediaUrl)} crossOrigin={story.mediaUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="" className="absolute inset-0 h-full w-full object-cover" /> : <span className="absolute inset-0 bg-gradient-to-b from-indigo-500 to-blue-800" />}
                 <span className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
-                {story.author.avatar ? <img src={story.author.avatar} alt="" className="absolute left-2 top-2 h-7 w-7 rounded-full border-2 border-white object-cover" /> : null}
+                {story.author.avatar ? <img src={resolveMediaUrl(story.author.avatar)} crossOrigin={story.author.avatar.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="" className="absolute left-2 top-2 h-7 w-7 rounded-full border-2 border-white object-cover" /> : null}
                 <span className="relative line-clamp-2 text-xs font-semibold">{story.authorId === user?.id ? 'Your story' : story.author.name}</span>
               </button>
             ))}
@@ -188,14 +196,18 @@ export function HomePage() {
           {!storiesLoading && !storiesError && stories.length === 0 ? <p className="mt-2 text-xs text-slate-500">No active stories from you or people you follow.</p> : null}
           {showStoryComposer ? <form onSubmit={(event) => { event.preventDefault(); void publishStory() }} className="mt-3 grid gap-2 border-t border-slate-100 pt-3 sm:grid-cols-[1fr_1fr_auto]">
             <input aria-label="Story text" value={storyText} onChange={(event) => setStoryText(event.target.value)} maxLength={500} placeholder="Share a short status" className="min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-            <input aria-label="Story image URL" type="url" value={storyMediaUrl} onChange={(event) => setStoryMediaUrl(event.target.value)} placeholder="Image URL (HTTPS)" className="min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-            <button type="submit" disabled={storyBusy || (!storyText.trim() && !storyMediaUrl.trim())} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{storyBusy ? 'Posting…' : 'Post status'}</button>
+            <label className="min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600">
+              <span className="block">Story image (JPEG, PNG, WebP; up to 10 MB)</span>
+              <input aria-label="Upload story image" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { setStoryImageFile(event.target.files?.[0] ?? null); setUploadedStoryMediaUrl(''); setStoryMediaUrl('') }} className="mt-1 block w-full text-xs" />
+            </label>
+            <input aria-label="Story image URL" type="url" value={storyMediaUrl} onChange={(event) => { setStoryMediaUrl(event.target.value); setStoryImageFile(null); setUploadedStoryMediaUrl('') }} placeholder="Or image URL (HTTPS)" className="min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+            <button type="submit" disabled={storyBusy || (!storyText.trim() && !storyMediaUrl.trim() && !storyImageFile)} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{storyBusy ? 'Posting…' : 'Post status'}</button>
           </form> : null}
         </section>
 
         {activeStory ? <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4" role="dialog" aria-modal="true" aria-label={`${activeStory.author.name}'s story`}>
           <div className="relative flex max-h-[90dvh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-slate-950 text-white">
-            {activeStory.mediaUrl ? <img src={activeStory.mediaUrl} alt="Story" className="max-h-[70dvh] w-full object-contain" /> : null}
+            {activeStory.mediaUrl ? <img src={resolveMediaUrl(activeStory.mediaUrl)} crossOrigin={activeStory.mediaUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="Story" className="max-h-[70dvh] w-full object-contain" /> : null}
             <div className="p-4"><p className="font-semibold">{activeStory.author.name}</p>{activeStory.text ? <p className="mt-2 whitespace-pre-wrap text-sm">{activeStory.text}</p> : null}<p className="mt-2 text-xs text-slate-300">{activeStory.viewCount} views</p></div>
             <button type="button" onClick={() => setActiveStory(null)} aria-label="Close story" className="absolute right-3 top-3 rounded-full bg-black/60 px-3 py-2 text-sm">Close</button>
             {activeStory.authorId === user?.id ? <button type="button" onClick={() => void deleteStory(activeStory)} className="m-3 rounded-xl border border-white/30 px-3 py-2 text-sm font-semibold">Delete story</button> : null}

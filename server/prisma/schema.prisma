@@ -170,6 +170,7 @@ model User {
   productInquiries         ProductInquiry[]          @relation("InquiryBuyer")
   marketplaceDisputes      MarketplaceDispute[]      @relation("DisputeReporter")
   financialPaymentIntents  PaymentIntent[]           @relation("PaymentPayer")
+  uploadedMedia            RegistrationMediaObject[]
 
   @@index([email])
   @@index([phoneE164])
@@ -1078,7 +1079,11 @@ model RegistrationMediaObject {
   key         String   @unique
   bytes       Bytes
   contentType String
+  ownerUserId String?
   createdAt   DateTime @default(now())
 
+  owner User? @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+
   @@index([createdAt])
+  @@index([ownerUserId])
 }

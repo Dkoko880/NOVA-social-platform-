@@ -7,31 +7,41 @@ import { socialStore } from '../lib/socialStore.js';
 import { reviewContentForSafety } from '../lib/moderation.js';
 import { isNotificationEnabled } from '../lib/platform.js';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
+import { mediaKeyFromUrl, uploadedMediaBelongsTo } from '../lib/mediaStorage.js';
+
+function isSafeMediaUrl(value: string) {
+  if (value === '' || mediaKeyFromUrl(value)) return true;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
 
 const updateProfileSchema = z.object({
   displayName: z.string().trim().min(1).max(60).optional(),
   username: z.string().trim().min(2).max(32).regex(/^[a-zA-Z0-9_.-]+$/).optional(),
   bio: z.string().trim().max(220).optional(),
-  avatarUrl: z.string().trim().max(500).url().optional().or(z.literal('')),
-  coverUrl: z.string().trim().max(500).url().optional().or(z.literal('')),
+  avatarUrl: z.string().trim().max(500).refine(isSafeMediaUrl, 'Use an HTTPS image URL or an uploaded NOVAKOKO image.').optional(),
+  coverUrl: z.string().trim().max(500).refine(isSafeMediaUrl, 'Use an HTTPS image URL or an uploaded NOVAKOKO image.').optional(),
   website: z.string().trim().max(200).url().optional().or(z.literal('')),
   location: z.string().trim().max(80).optional(),
 });
 
 const createPostSchema = z.object({
   content: z.string().trim().min(1).max(2500),
-  imageUrl: z.string().trim().max(500).url().optional().or(z.literal('')),
+  imageUrl: z.string().trim().max(500).refine(isSafeMediaUrl, 'Use an HTTPS image URL or an uploaded NOVAKOKO image.').optional(),
   visibility: z.enum(['PUBLIC', 'FOLLOWERS', 'PRIVATE']).default('PUBLIC'),
 });
 
 const createStorySchema = z.object({
   text: z.string().trim().max(500).optional(),
-  mediaUrl: z.string().trim().max(2000).url().refine((value) => value.startsWith('https://'), 'Story media must use HTTPS.').optional(),
+  mediaUrl: z.string().trim().max(2000).refine(isSafeMediaUrl, 'Use an HTTPS image URL or an uploaded NOVAKOKO image.').optional(),
 }).refine((payload) => Boolean(payload.text || payload.mediaUrl), { message: 'A story needs text or media.' });
 
 const updatePostSchema = z.object({
   content: z.string().trim().min(1).max(2500).optional(),
-  imageUrl: z.string().trim().max(500).url().optional().or(z.literal('')),
+  imageUrl: z.string().trim().max(500).refine(isSafeMediaUrl, 'Use an HTTPS image URL or an uploaded NOVAKOKO image.').optional(),
   visibility: z.enum(['PUBLIC', 'FOLLOWERS', 'PRIVATE']).optional(),
 });
 
@@ -100,8 +110,8 @@ async function getUserSummary(user: any) {
         displayName: profile.displayName ?? user.name,
         username: profile.username ?? makeHandle(user, profile),
         bio: profile.bio ?? null,
-        avatarUrl: profile.avatarUrl ?? 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
-        coverUrl: profile.coverUrl ?? 'https://images.unsplash.com/photo-1517849845537-4d257902454a?auto=format&fit=crop&w=1200&q=80',
+        avatarUrl: profile.avatarUrl ?? null,
+        coverUrl: profile.coverUrl ?? null,
         website: profile.website ?? null,
         location: profile.location ?? null,
       }
@@ -109,8 +119,8 @@ async function getUserSummary(user: any) {
         displayName: user.name,
         username: makeHandle(user),
         bio: null,
-        avatarUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
-        coverUrl: 'https://images.unsplash.com/photo-1517849845537-4d257902454a?auto=format&fit=crop&w=1200&q=80',
+        avatarUrl: null,
+        coverUrl: null,
         website: null,
         location: null,
       };
@@ -126,7 +136,7 @@ async function getUserSummary(user: any) {
       username: safeProfile.username ?? makeHandle(user),
     },
     handle: safeProfile.username ?? makeHandle(user),
-    avatar: safeProfile.avatarUrl ?? 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
+    avatar: safeProfile.avatarUrl ?? '',
   };
 }
 
@@ -328,7 +338,7 @@ async function serializePost(post: any, currentUserId?: string) {
       name: 'Unknown user',
       email: '',
       handle: 'unknown',
-      avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
+      avatar: '',
       profile: null,
     },
     likes: likeCount,
@@ -410,6 +420,9 @@ socialRouter.get('/stories', requireAuth, async (req, res) => {
 socialRouter.post('/stories', requireAuth, requireAccountAccess, async (req, res) => {
   const payload = createStorySchema.parse(req.body ?? {});
   const userId = req.user!.id;
+  if (payload.mediaUrl && !(await uploadedMediaBelongsTo(payload.mediaUrl, userId, process.env.NODE_ENV ?? 'development'))) {
+    return res.status(403).json({ message: 'You can only publish images that you uploaded.' });
+  }
   const text = payload.text?.trim() || null;
   const moderation = reviewContentForSafety({ type: 'post', text: text ?? '', userId });
   if (moderation === 'REMOVE') return res.status(400).json({ message: 'This story violates NOVA Community & Safety Rules.' });
@@ -579,6 +592,11 @@ socialRouter.get('/users/:id/profile', async (req, res: Response) => {
 socialRouter.put('/users/me/profile', requireAuth, requireAccountAccess, async (req, res) => {
   const payload = updateProfileSchema.parse(req.body ?? {});
   const userId = req.user!.id;
+  for (const mediaUrl of [payload.avatarUrl, payload.coverUrl]) {
+    if (mediaUrl && !(await uploadedMediaBelongsTo(mediaUrl, userId, process.env.NODE_ENV ?? 'development'))) {
+      return res.status(403).json({ message: 'You can only use images that you uploaded.' });
+    }
+  }
   const dbAvailable = await isDatabaseAvailable();
 
   const profileData = {
@@ -740,6 +758,9 @@ socialRouter.delete('/users/:id/follow', requireAuth, requireAccountAccess, asyn
 socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) => {
   const payload = createPostSchema.parse(req.body ?? {});
   const userId = req.user!.id;
+  if (payload.imageUrl && !(await uploadedMediaBelongsTo(payload.imageUrl, userId, process.env.NODE_ENV ?? 'development'))) {
+    return res.status(403).json({ message: 'You can only publish images that you uploaded.' });
+  }
 
   const moderation = reviewContentForSafety({ type: 'post', text: payload.content, userId });
   if (moderation === 'REMOVE') {
@@ -847,6 +868,9 @@ socialRouter.patch('/posts/:id', requireAuth, requireAccountAccess, async (req, 
   const postId = String(req.params.id);
   const payload = updatePostSchema.parse(req.body ?? {});
   const userId = req.user!.id;
+  if (payload.imageUrl && !(await uploadedMediaBelongsTo(payload.imageUrl, userId, process.env.NODE_ENV ?? 'development'))) {
+    return res.status(403).json({ message: 'You can only use images that you uploaded.' });
+  }
   const dbAvailable = await isDatabaseAvailable();
   const post = dbAvailable
     ? await prisma.post.findUnique({ where: { id: postId } })
@@ -1166,7 +1190,7 @@ socialRouter.post('/posts/:id/comments', requireAuth, requireAccountAccess, asyn
       id: authorSummary?.id ?? userId,
       name: authorSummary?.name ?? 'Unknown user',
       handle: authorSummary?.handle ?? 'unknown',
-      avatar: authorSummary?.avatar ?? 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
+      avatar: authorSummary?.avatar ?? '',
       profile: authorSummary?.profile ?? null,
     },
   };
@@ -1207,7 +1231,7 @@ socialRouter.get('/posts/:id/comments', async (req, res) => {
         name: comment.author.name,
         email: comment.author.email,
         handle: comment.author.profile?.displayName ?? comment.author.email?.split('@')[0] ?? 'member',
-        avatar: comment.author.profile?.avatarUrl ?? 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
+        avatar: comment.author.profile?.avatarUrl ?? '',
       },
     })) });
   }

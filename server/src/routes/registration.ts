@@ -10,12 +10,15 @@ import { getMediaStorage, MediaStorageUnavailableError } from '../lib/mediaStora
 import { getOtpProvider, OtpProviderUnavailableError } from '../lib/otpProvider.js';
 import { hashSessionToken, sanitizeUser, signAccessToken } from '../lib/auth.js';
 import { isDatabaseAvailable, prisma } from '../lib/prisma.js';
+import { requireActiveAccountIfAuthenticated, requireAuth } from '../middleware/auth.js';
+import { socialStore } from '../lib/socialStore.js';
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 const DRAFT_TTL_MS = 30 * 60 * 1000;
 const RESEND_COOLDOWN_MS = 60 * 1000;
 const MAX_OTP_ATTEMPTS = 5;
 const MAX_AVATAR_BYTES = 4 * 1024 * 1024;
+const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 const CONSENT_VERSION = 'novakoko-2026-01';
 const REGISTRATION_COOKIE = 'nova_registration';
 const RESERVED_USERNAMES = new Set([
@@ -232,7 +235,7 @@ registrationRouter.post('/register/start', async (req, res, next) => {
     const phoneE164 = normalizePhone(payload.countryCode, payload.phone);
     if (!phoneE164) return res.status(400).json({ message: 'Enter a valid phone number for the selected country.' });
 
-    const freeRegistration = process.env.FREE_REGISTRATION === "true";
+    const freeRegistration = env.NODE_ENV !== 'production' && process.env.FREE_REGISTRATION === 'true';
    const provider = freeRegistration ? null : getOtpProvider(env.NODE_ENV);
     const useDb = await databaseEnabled();
     const existingUser = useDb
@@ -323,7 +326,7 @@ registrationRouter.post('/register/resend', async (req, res, next) => {
       return res.status(400).json({ message: 'This verification request is invalid or expired.' });
     }
     if (draft.resendAllowedAt > new Date()) return res.status(429).json({ message: 'Please wait before requesting another code.' });
-    const freeRegistration = process.env.FREE_REGISTRATION === "true";
+    const freeRegistration = env.NODE_ENV !== 'production' && process.env.FREE_REGISTRATION === 'true';
     if (freeRegistration) {
       return res.json({ deliveryMode: "free", message: "Free registration mode does not require an OTP." });
     }
@@ -347,7 +350,7 @@ registrationRouter.post('/register/resend', async (req, res, next) => {
 
 registrationRouter.post('/register/verify', async (req, res, next) => {
   try {
-    const freeRegistration = process.env.FREE_REGISTRATION === "true";
+    const freeRegistration = env.NODE_ENV !== 'production' && process.env.FREE_REGISTRATION === 'true';
     const payload = z.object({
       challengeId: z.string().uuid(),
       code: z.string().regex(/^\d{6}$/).optional(),
@@ -569,6 +572,13 @@ registrationRouter.post('/register/complete', registrationAuth, async (req, res,
           },
           select: { id: true, email: true, phoneE164: true, name: true, role: true, status: true, createdAt: true, updatedAt: true },
         });
+        if (draft.avatarStorageKey) {
+          const mediaOwnership = await tx.registrationMediaObject.updateMany({
+            where: { key: draft.avatarStorageKey, ownerUserId: null },
+            data: { ownerUserId: record.id },
+          });
+          if (mediaOwnership.count !== 1) throw new Error('Registration avatar is missing or already assigned.');
+        }
         token = signAccessToken({ sub: record.id, role: record.role });
         await tx.session.create({
           data: {
@@ -602,6 +612,9 @@ registrationRouter.post('/register/complete', registrationAuth, async (req, res,
         rulesVersion: CONSENT_VERSION,
         username: draft.username,
       });
+      if (draft.avatarStorageKey && !(await getMediaStorage(env.NODE_ENV).setOwner(draft.avatarStorageKey, user.id))) {
+        throw new Error('Registration avatar is missing or already assigned.');
+      }
       token = signAccessToken({ sub: user.id, role: user.role });
       fallbackStore.createSession({
         userId: user.id,
@@ -643,14 +656,141 @@ registrationRouter.delete('/register/avatar', registrationAuth, async (req, res,
 });
 
 export const registrationMediaRouter = Router();
-registrationMediaRouter.get('/avatars/:key', async (req, res, next) => {
+function uploadMediaFile(req: Request, res: Response, next: NextFunction) {
+  multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_MEDIA_BYTES, files: 1 },
+    fileFilter(_request, file, callback) {
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) {
+        callback(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'file'));
+        return;
+      }
+      callback(null, true);
+    },
+  }).single('file')(req, res, (error) => {
+    if (error instanceof multer.MulterError) {
+      const tooLarge = error.code === 'LIMIT_FILE_SIZE';
+      return res.status(tooLarge ? 413 : 400).json({
+        message: tooLarge ? 'Images must be 10 MB or smaller.' : 'Choose a JPEG, PNG, or WebP image.',
+      });
+    }
+    return next(error);
+  });
+}
+
+async function canReadUploadedMedia(key: string, ownerUserId: string, viewerId: string) {
+  if (ownerUserId === viewerId) return true;
+  const mediaUrl = `/api/media/avatars/${key}`;
+  const dbAvailable = await isDatabaseAvailable();
+  if (!dbAvailable) {
+    const profile = socialStore.state.profiles.find((entry) => entry.userId === ownerUserId);
+    const referencedByProfile = profile?.avatarUrl === mediaUrl || profile?.coverUrl === mediaUrl;
+    const isBlocked = socialStore.state.blocks.some((block) =>
+      (block.blockerId === viewerId && block.blockedId === ownerUserId)
+      || (block.blockerId === ownerUserId && block.blockedId === viewerId),
+    );
+    if (isBlocked) return false;
+    const followsOwner = socialStore.state.follows.some((follow) => follow.followerId === viewerId && follow.followingId === ownerUserId);
+    const referencedByPost = socialStore.state.posts.some((post) =>
+      post.authorId === ownerUserId
+      && post.imageUrl === mediaUrl
+      && (post.visibility === 'PUBLIC' || (post.visibility === 'FOLLOWERS' && followsOwner)),
+    );
+    const referencedByStory = socialStore.state.stories.some((story) =>
+      story.authorId === ownerUserId
+      && story.mediaUrl === mediaUrl
+      && new Date(story.expiresAt).getTime() > Date.now()
+      && followsOwner,
+    );
+    const referencedByMessage = socialStore.state.messages.some((message) =>
+      message.mediaUrl === mediaUrl
+      && !message.deletedAt
+      && (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now())
+      && socialStore.state.conversationParticipants.some((participant) =>
+        participant.conversationId === message.conversationId
+        && participant.userId === viewerId
+        && !participant.leftAt,
+      ),
+    );
+    return Boolean(referencedByProfile || referencedByPost || referencedByStory || referencedByMessage);
+  }
+
+  const blocked = await prisma.block.findFirst({
+    where: {
+      OR: [
+        { blockerId: viewerId, blockedId: ownerUserId },
+        { blockerId: ownerUserId, blockedId: viewerId },
+      ],
+    },
+    select: { id: true },
+  });
+  if (blocked) return false;
+
+  const profile = await prisma.profile.findFirst({
+    where: { userId: ownerUserId, OR: [{ avatarUrl: mediaUrl }, { coverUrl: mediaUrl }] },
+    select: { id: true },
+  });
+  if (profile) return true;
+
+  const [follow, posts, stories, message] = await Promise.all([
+    prisma.follow.findUnique({
+      where: { followerId_followingId: { followerId: viewerId, followingId: ownerUserId } },
+      select: { id: true },
+    }),
+    prisma.post.findMany({
+      where: { authorId: ownerUserId, imageUrl: mediaUrl },
+      select: { visibility: true },
+    }),
+    prisma.story.findFirst({
+      where: { authorId: ownerUserId, mediaUrl, expiresAt: { gt: new Date() } },
+      select: { id: true },
+    }),
+    prisma.message.findFirst({
+      where: {
+        mediaUrl,
+        deletedAt: null,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        conversation: { participants: { some: { userId: viewerId, leftAt: null } } },
+      },
+      select: { id: true },
+    }),
+  ]);
+
+  return posts.some((post) => post.visibility === 'PUBLIC' || (post.visibility === 'FOLLOWERS' && Boolean(follow))) || Boolean((stories && follow) || message);
+}
+
+registrationMediaRouter.post('/uploads', requireAuth, uploadMediaFile, async (req, res, next) => {
   try {
-    if (!/^[0-9a-f-]{36}\.webp$/.test(req.params.key)) return res.status(404).end();
-    const object = await getMediaStorage(env.NODE_ENV).get(req.params.key);
+    if (!req.file) return res.status(400).json({ message: 'Choose an image to upload.' });
+    const image = await sharp(req.file.buffer, { limitInputPixels: 20_000_000 })
+      .rotate()
+      .resize({ width: 1920, height: 1920, fit: 'inside', withoutEnlargement: true })
+      .webp({ quality: 82 })
+      .toBuffer();
+    const stored = await getMediaStorage(env.NODE_ENV).put(image, 'image/webp', req.user!.id);
+    return res.status(201).json({ mediaUrl: stored.publicUrl, contentType: 'image/webp' });
+  } catch (error) {
+    if (error instanceof MediaStorageUnavailableError) return res.status(503).json({ message: 'Persistent image storage is not configured.' });
+    if (error instanceof Error && /Input buffer|unsupported image|corrupt|pixel limit/i.test(error.message)) {
+      return res.status(400).json({ message: 'The uploaded file is not a valid supported image.' });
+    }
+    return next(error);
+  }
+});
+
+registrationMediaRouter.get('/avatars/:key', requireActiveAccountIfAuthenticated, async (req, res, next) => {
+  try {
+    const key = String(req.params.key);
+    if (!/^[0-9a-f-]{36}\.webp$/.test(key)) return res.status(404).end();
+    const object = await getMediaStorage(env.NODE_ENV).get(key);
     if (!object) return res.status(404).end();
+    if (!object.ownerUserId || !req.user || !(await canReadUploadedMedia(key, object.ownerUserId, req.user.id))) {
+      return res.status(404).end();
+    }
     res.setHeader('Content-Type', 'image/webp');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('Vary', 'Cookie, Authorization');
     return res.send(object.bytes);
   } catch (error) {
     if (error instanceof MediaStorageUnavailableError) return res.status(503).json({ message: 'Profile image storage is not configured.' });

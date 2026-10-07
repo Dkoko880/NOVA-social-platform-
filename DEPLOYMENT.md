@@ -22,7 +22,7 @@ Use the existing Vercel project and configure it to deploy the repository's `mai
 
 ## Render
 
-Use the existing Render API service; do not create a second service. The API is a Docker service with `server/` as its root directory and `Dockerfile` as its Dockerfile path. The image build runs `npm run build` (which generates Prisma, applies committed migrations, and compiles TypeScript); container startup applies migrations again and runs `npm start`. The server listens on `0.0.0.0` and uses Render's `PORT` when provided.
+Use the existing Render API service; do not create a second service. The API is a Docker service with `server/` as its root directory and `Dockerfile` as its Dockerfile path. The image build runs `npm run build` to generate Prisma and compile TypeScript without needing production database access. Container startup runs `npm run db:migrate:deploy` before `npm start`, applying committed migrations without resetting application data. The server listens on `0.0.0.0` and uses Render's `PORT` when provided.
 
 Configure the Render service environment with the required variable names listed below and in `server/.env.example`. Set `CORS_ORIGIN` to the exact HTTPS Vercel production origin(s), comma-separated if there is more than one. The API also explicitly permits the known Vercel production hostnames in `server/src/app.ts`. Store database URLs and signing keys only in Render's environment settings, never in this repository.
 
@@ -41,7 +41,7 @@ npm run db:migrate:status
 
 ## Build and start
 
-Backend:
+Backend (set `DATABASE_URL` in the runtime environment before migrating or starting the API):
 
 ```sh
 npm --prefix server ci
@@ -50,6 +50,8 @@ npm --prefix server run db:migrate:deploy
 npm --prefix server run build
 npm --prefix server start
 ```
+
+`npm --prefix server run build` never applies migrations. Run `npm --prefix server run db:migrate:deploy` against the intended database as a deployment/release step, then verify it with `npm --prefix server run db:migrate:status`. The production Docker container runs the deploy command on startup.
 
 Frontend:
 
@@ -63,6 +65,16 @@ The included `docker-compose.production.yml` builds the API and Nginx web servic
 ## Domains and realtime
 
 Point the web domain at the Nginx service and the API domain at the Express service. Set `CORS_ORIGIN` to the web origin exactly, including scheme and port where applicable. Keep HTTPS termination in front of both services. Messaging realtime currently uses authenticated Server-Sent Events at `/api/realtime`; the proxy must allow long-lived connections, forward cookies, disable response buffering for that route, and permit keep-alive connections.
+
+Calls and live video are deliberately unavailable: the existing realtime event hub is process-local and there is no real media/signaling service or TURN configuration. The API returns HTTP 503 rather than creating calls or streams that cannot carry media; the UI disables those actions and does not claim a connection. Enabling them requires integrating a production signaling/media service (or a durable cross-instance signaling layer plus an appropriately operated WebRTC/SFU service) and TURN relay infrastructure, then validating that a peer media session was established before changing call state to connected. No provider/account is currently configured.
+
+Phone-first registration and phone login require an SMS OTP adapter. No production SMS provider is configured; these routes return HTTP 503 rather than using the fixed non-delivering development code. Configure and wire a real SMS provider before enabling phone verification. `FREE_REGISTRATION=true` is ignored in production.
+
+AI assistance endpoints also return HTTP 503 until a real AI provider is integrated. They do not return generated-looking placeholder summaries, captions, or replies.
+
+## User media
+
+Authenticated image uploads use `POST /api/media/uploads` with a `file` form field. JPEG, PNG, and WebP inputs up to 10 MB are decoded, orientation-corrected, resized, and re-encoded as WebP. Objects are stored persistently in PostgreSQL using the existing media-object storage; production never falls back to process memory. The returned media URL is only usable by its owner until it is attached to a profile, visible post, or active story. Story/post visibility and account blocks are checked when serving owned media. Anonymous, unattached uploads are not served; the migration backfills ownership for referenced legacy media, and deleting an owner cascades to their uploaded objects. The database migration for media ownership is deployed by the normal `prisma migrate deploy` release step.
 
 ## Payments
 

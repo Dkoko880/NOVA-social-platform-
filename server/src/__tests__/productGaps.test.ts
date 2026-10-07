@@ -85,43 +85,22 @@ describe('product area gaps', () => {
     expect((await request(app).delete(`/api/communities/${created.body.community.id}/members/${member.user.id}`).set('Cookie', owner.auth)).status).toBe(200);
   });
 
-  it('lets a participant leave a group call without ending it for others', async () => {
+  it('refuses to create a group call when no real media/signaling service exists', async () => {
     const caller = await register('CallCaller');
     const one = await register('CallOne');
     const two = await register('CallTwo');
     const started = await request(app).post('/api/calls/start').set('Cookie', caller.auth).send({ targetUserIds: [one.user.id, two.user.id], type: 'video' });
-    expect(started.status).toBe(200);
-    const callId = started.body.call.id;
-    await request(app).post(`/api/calls/${callId}/accept`).set('Cookie', one.auth);
-    const leave = await request(app).post(`/api/calls/${callId}/leave`).set('Cookie', one.auth);
-    expect(leave.status).toBe(200);
-    expect(leave.body.call.status).toBe('connected');
-    expect(leave.body.call.participants.find((entry: { userId: string }) => entry.userId === one.user.id).status).toBe('left');
-    await request(app).post(`/api/calls/${callId}/accept`).set('Cookie', two.auth);
-    const declined = await request(app).post(`/api/calls/${callId}/reject`).set('Cookie', two.auth);
-    expect(declined.body.call.status).toBe('connected');
-    expect(declined.body.call.participants.find((entry: { userId: string }) => entry.userId === two.user.id).status).toBe('left');
+    expect(started.status).toBe(503);
+    expect(started.body.message).toMatch(/media and signaling/i);
+    expect((await request(app).get('/api/calls/history').set('Cookie', caller.auth)).body.calls).toHaveLength(0);
   });
 
-  it('supports live guest approval and recording lifecycle foundations', async () => {
+  it('does not create a live session or viewers without real media service', async () => {
     const host = await register('LiveHost');
     const viewer = await register('LiveGuest');
     const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Community stream' });
-    const liveId = created.body.live.id;
-    await request(app).post(`/api/live/${liveId}/start`).set('Cookie', host.auth);
-    await request(app).post(`/api/live/${liveId}/viewers/join`).set('Cookie', viewer.auth);
-    const comment = await request(app).post(`/api/live/${liveId}/comment`).set('Cookie', viewer.auth).send({ text: 'Great stream!' });
-    expect(comment.status).toBe(201);
-    const muted = await request(app).post(`/api/live/${liveId}/viewer/${viewer.user.id}/mute`).set('Cookie', host.auth).send({ isMuted: true });
-    expect(muted.body.viewer.isMuted).toBe(true);
-    expect((await request(app).post(`/api/live/${liveId}/comments/${comment.body.comment.id}/remove`).set('Cookie', host.auth)).status).toBe(200);
-    const guestRequest = await request(app).post(`/api/live/${liveId}/guests/request`).set('Cookie', viewer.auth).send({ role: 'COHOST' });
-    expect(guestRequest.status).toBe(201);
-    const approved = await request(app).post(`/api/live/${liveId}/guests/${viewer.user.id}/approve`).set('Cookie', host.auth);
-    expect(approved.body.guest.status).toBe('LIVE');
-    expect((await request(app).post(`/api/live/${liveId}/recording/start`).set('Cookie', host.auth)).body.live.recordingStatus).toBe('RECORDING');
-    const stopped = await request(app).post(`/api/live/${liveId}/recording/stop`).set('Cookie', host.auth);
-    expect(stopped.status).toBe(200);
-    expect(stopped.body.live.recordingStatus).toBe('UNAVAILABLE');
+    expect(created.status).toBe(503);
+    expect(created.body.message).toMatch(/real-time media/i);
+    expect((await request(app).get('/api/live').set('Cookie', viewer.auth)).body.lives).toHaveLength(0);
   });
 });
