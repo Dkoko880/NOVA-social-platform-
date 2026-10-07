@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { prisma } from '../lib/prisma.js';
+import { isDatabaseAvailable, prisma } from '../lib/prisma.js';
+import { socialStore } from './socialStore.js';
 
 export interface MediaStorage {
   put(bytes: Buffer, contentType: string, ownerUserId?: string): Promise<{ key: string; publicUrl: string }>;
@@ -123,6 +124,36 @@ export async function uploadedMediaBelongsTo(url: string, userId: string, nodeEn
   if (!url.startsWith('/api/media/')) return true;
   const key = mediaKeyFromUrl(url);
   if (!key) return false;
+
   const object = await getMediaStorage(nodeEnv).get(key);
-  return object?.ownerUserId === userId;
+  if (object?.ownerUserId === userId) return true;
+  if (object && object.ownerUserId !== null && object.ownerUserId !== userId) return false;
+
+  if (!(await isDatabaseAvailable())) {
+    return socialStore.state.profiles.some((profile) => profile.userId === userId && (profile.avatarUrl === url || profile.coverUrl === url))
+      || socialStore.state.posts.some((post) => post.authorId === userId && post.imageUrl === url)
+      || socialStore.state.stories.some((story) => story.authorId === userId && story.mediaUrl === url)
+      || socialStore.state.messages.some((message) => message.senderId === userId && message.mediaUrl === url);
+  }
+
+  const [profile, posts, stories, message] = await Promise.all([
+    prisma.profile.findFirst({
+      where: { userId, OR: [{ avatarUrl: url }, { coverUrl: url }] },
+      select: { id: true },
+    }),
+    prisma.post.findMany({
+      where: { authorId: userId, imageUrl: url },
+      select: { id: true },
+    }),
+    prisma.story.findFirst({
+      where: { authorId: userId, mediaUrl: url },
+      select: { id: true },
+    }),
+    prisma.message.findFirst({
+      where: { senderId: userId, mediaUrl: url },
+      select: { id: true },
+    }),
+  ]);
+
+  return Boolean(profile || posts.length || stories || message);
 }

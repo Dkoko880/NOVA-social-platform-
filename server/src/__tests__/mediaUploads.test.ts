@@ -3,6 +3,7 @@ import request from 'supertest';
 import sharp from 'sharp';
 import { app } from '../app.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
+import { getMediaStorage, uploadedMediaBelongsTo } from '../lib/mediaStorage.js';
 import { socialStore } from '../lib/socialStore.js';
 
 function cookie(response: { headers: Record<string, string | string[] | undefined> }) {
@@ -22,6 +23,27 @@ describe('authenticated media uploads', () => {
   beforeEach(() => {
     fallbackStore.clear();
     socialStore.clear();
+  });
+
+  it('accepts media ownership when the owner is inferred from a profile reference even before metadata is assigned', async () => {
+    const alice = await register('LegacyMediaAlice');
+    const bob = await register('LegacyMediaBob');
+    const stored = await getMediaStorage('test').put(Buffer.from('legacy-image'), 'image/webp');
+
+    socialStore.state.profiles.push({
+      userId: alice.user.id,
+      displayName: alice.user.name,
+      username: alice.user.handle,
+      bio: null,
+      avatarUrl: stored.publicUrl,
+      coverUrl: null,
+      website: null,
+      location: null,
+      updatedAt: new Date().toISOString(),
+    });
+
+    expect(await uploadedMediaBelongsTo(stored.publicUrl, alice.user.id, 'test')).toBe(true);
+    expect(await uploadedMediaBelongsTo(stored.publicUrl, bob.user.id, 'test')).toBe(false);
   });
 
   it('validates, stores, and serves owned images only to their owner or authorized story viewers', async () => {
