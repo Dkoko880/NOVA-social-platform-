@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { authSessionReducer, initialAuthSessionState } from '../src/lib/authSession'
+import { apiRequest, ApiError } from '../src/lib/api'
 import { loginUser, logoutUser } from '../src/lib/auth'
 import { openAuthenticatedEventStream } from '../src/lib/eventStream'
 import { storeAccessToken } from '../src/lib/session'
@@ -41,6 +43,7 @@ describe('browser authentication session', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
 
@@ -85,6 +88,116 @@ describe('browser authentication session', () => {
     expect(await getCurrentUser()).toBeNull()
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization')).toBeNull()
     expect(storedValues.size).toBe(0)
+  })
+
+  it('ends initial loading after a /me network failure so public auth routes remain reachable', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    const { getCurrentUser } = await import('../src/lib/auth')
+    await expect(getCurrentUser()).rejects.toMatchObject({ code: 'NETWORK_ERROR', status: null })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+
+    expect(authSessionReducer(initialAuthSessionState, {
+      type: 'verification-failed',
+      message: 'Unable to reach the API.',
+    })).toEqual({
+      user: null,
+      isLoading: false,
+      authError: 'Unable to reach the API.',
+    })
+  })
+
+  it('preserves a known authenticated user when /me has a network failure', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    const { getCurrentUser } = await import('../src/lib/auth')
+    await expect(getCurrentUser()).rejects.toMatchObject({ code: 'NETWORK_ERROR', status: null })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+
+    const authenticatedState = {
+      user: { id: 'user_1', email: 'user@example.com', name: 'Nova User' },
+      isLoading: true,
+      authError: null,
+    }
+    expect(authSessionReducer(authenticatedState, {
+      type: 'verification-failed',
+      message: 'Unable to reach the API.',
+    })).toEqual({
+      user: authenticatedState.user,
+      isLoading: false,
+      authError: 'Unable to reach the API.',
+    })
+  })
+
+  it('ends initial loading after a /me timeout', async () => {
+    fetchMock.mockRejectedValue(new DOMException('The request timed out.', 'TimeoutError'))
+
+    const { getCurrentUser } = await import('../src/lib/auth')
+    await expect(getCurrentUser()).rejects.toMatchObject({ code: 'TIMEOUT', status: null })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+
+    expect(authSessionReducer(initialAuthSessionState, {
+      type: 'verification-failed',
+      message: 'The request timed out.',
+    })).toEqual({
+      user: null,
+      isLoading: false,
+      authError: 'The request timed out.',
+    })
+  })
+
+  it.each([401, 403])('clears the session after /me confirms HTTP %i', async (status) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'Authentication required.' }, status))
+    const { getCurrentUser } = await import('../src/lib/auth')
+    const user = { id: 'user_1', email: 'user@example.com', name: 'Nova User' }
+    const invalidSessionUser = await getCurrentUser()
+
+    expect(invalidSessionUser).toBeNull()
+    expect(authSessionReducer({
+      user,
+      isLoading: true,
+      authError: null,
+    }, {
+      type: 'verification-succeeded',
+      user: invalidSessionUser,
+    })).toEqual({ user: null, isLoading: false, authError: null })
+  })
+
+  it('updates the authenticated user after successful /me verification', async () => {
+    const user = { id: 'user_2', email: 'updated@example.com', name: 'Updated User' }
+    fetchMock.mockResolvedValueOnce(jsonResponse({ user }))
+    const { getCurrentUser } = await import('../src/lib/auth')
+    const verifiedUser = await getCurrentUser()
+
+    expect(authSessionReducer(initialAuthSessionState, {
+      type: 'verification-succeeded',
+      user: verifiedUser,
+    })).toEqual({ user, isLoading: false, authError: null })
+  })
+
+  it('classifies HTTP errors for other API consumers without logging credentials', async () => {
+    const token = createToken()
+    storeAccessToken(token)
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'Forbidden.' }, 403))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+
+    await expect(apiRequest('/api/posts')).rejects.toMatchObject({
+      code: 'AUTH_ERROR',
+      status: 403,
+    } satisfies Partial<ApiError>)
+    expect(consoleError).not.toHaveBeenCalled()
+    expect(consoleWarn).not.toHaveBeenCalled()
+    expect(consoleLog).not.toHaveBeenCalled()
+    expect(fetchMock.mock.calls[0][1]?.credentials).toBe('include')
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization')).toBe(`Bearer ${token}`)
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'Validation failed.' }, 422))
+    await expect(apiRequest('/api/posts')).rejects.toMatchObject({
+      code: 'API_ERROR',
+      status: 422,
+    })
   })
 
   it('sends the persisted bearer session on authenticated real-time streams', async () => {

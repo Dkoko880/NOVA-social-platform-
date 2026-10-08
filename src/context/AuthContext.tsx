@@ -1,5 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, type ReactNode } from 'react'
 import { getCurrentUser, loginUser, logoutUser, registerUser, type AuthUser, type RegisterInput } from '../lib/auth'
+import { authSessionReducer, initialAuthSessionState } from '../lib/authSession'
 
 type AuthContextValue = {
   user: AuthUser | null
@@ -15,54 +16,45 @@ type AuthContextValue = {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [authError, setAuthError] = useState<string | null>(null)
+  const [{ user, isLoading, authError }, dispatch] = useReducer(authSessionReducer, initialAuthSessionState)
 
   const refreshCurrentUser = useCallback(async () => {
-    setIsLoading(true)
-    setAuthError(null)
+    dispatch({ type: 'verification-started' })
 
     try {
       const nextUser = await getCurrentUser()
-      setUser(nextUser)
+      dispatch({ type: 'verification-succeeded', user: nextUser })
       return nextUser
     } catch (error) {
-      setUser(null)
-      setAuthError(error instanceof Error ? error.message : 'Unable to verify your session.')
+      dispatch({
+        type: 'verification-failed',
+        message: error instanceof Error ? error.message : 'Unable to verify your session.',
+      })
       throw error
-    } finally {
-      setIsLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    void refreshCurrentUser().catch((error: unknown) => {
-      setAuthError(error instanceof Error ? error.message : 'Unable to verify your session.')
-    })
+    void refreshCurrentUser().catch(() => undefined)
   }, [refreshCurrentUser])
 
   const login = useCallback(async (identifier: string, password: string) => {
-    setAuthError(null)
+    dispatch({ type: 'clear-error' })
     const response = await loginUser({ identifier, password })
-    setUser(response.user)
-    setIsLoading(false)
+    dispatch({ type: 'authenticated', user: response.user })
     return response.user
   }, [])
 
   const register = useCallback(async (input: RegisterInput) => {
-    setAuthError(null)
+    dispatch({ type: 'clear-error' })
     const response = await registerUser(input)
-    setUser(response.user)
-    setIsLoading(false)
+    dispatch({ type: 'authenticated', user: response.user })
     return response.user
   }, [])
 
   const logout = useCallback(async () => {
     await logoutUser()
-    setUser(null)
-    setAuthError(null)
-    setIsLoading(false)
+    dispatch({ type: 'logged-out' })
   }, [])
 
   const value = useMemo<AuthContextValue>(

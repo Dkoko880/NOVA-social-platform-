@@ -22,15 +22,30 @@ export async function uploadMedia(file: File) {
 }
 
 export class ApiError extends Error {
-  status: number
+  status: number | null
   details?: unknown
+  code: ApiErrorCode
 
-  constructor(status: number, message: string, details?: unknown) {
+  constructor(status: number | null, message: string, details?: unknown, code?: ApiErrorCode) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.details = details
+    this.code = code ?? (status === 401 || status === 403 ? 'AUTH_ERROR' : 'API_ERROR')
   }
+}
+
+export type ApiErrorCode = 'NETWORK_ERROR' | 'TIMEOUT' | 'AUTH_ERROR' | 'API_ERROR'
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
+}
+
+function createTransportError(code: 'NETWORK_ERROR' | 'TIMEOUT') {
+  const message = code === 'TIMEOUT'
+    ? 'The NOVAKOKO API request timed out. Please try again shortly.'
+    : `Unable to reach the NOVAKOKO API at ${API_BASE_URL}. Please try again shortly.`
+  return new ApiError(null, message, undefined, code)
 }
 
 function extractErrorMessage(payload: unknown, fallback: string) {
@@ -105,13 +120,23 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
         signal: controller.signal,
       })
     } catch (error) {
-      if (isSafeRead && error instanceof TypeError && attempt < maxAttempts - 1) {
+      const isTimeout = controller.signal.aborted || isAbortError(error)
+      const isNetworkError = error instanceof TypeError
+      const shouldRetry = isSafeRead
+        && !options.signal?.aborted
+        && attempt < maxAttempts - 1
+        && (isTimeout || isNetworkError)
+
+      if (shouldRetry) {
         await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)))
         continue
       }
 
-      if (error instanceof TypeError) {
-        throw new Error(`Unable to reach the NOVAKOKO API at ${API_BASE_URL}. Please try again shortly.`)
+      if (isTimeout) {
+        throw createTransportError('TIMEOUT')
+      }
+      if (isNetworkError) {
+        throw createTransportError('NETWORK_ERROR')
       }
       throw error
     } finally {
@@ -128,7 +153,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   }
 
   if (!response) {
-    throw new Error(`Unable to reach the NOVAKOKO API at ${API_BASE_URL}. Please try again shortly.`)
+    throw createTransportError('NETWORK_ERROR')
   }
 
   const rawText = await response.text()
