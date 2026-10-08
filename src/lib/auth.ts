@@ -65,6 +65,7 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
     return response.user ?? null
   } catch (error) {
     if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+      clearStoredAccessToken()
       return null
     }
 

@@ -2,7 +2,7 @@ import { clearStoredAccessToken, getStoredAccessToken } from './session'
 
 const productionApiBaseUrl = 'https://nova-social-platform-api.onrender.com'
 const configuredApiBaseUrl = import.meta.env.PROD
-  ? productionApiBaseUrl
+  ? ''
   : import.meta.env.VITE_API_BASE_URL?.trim() || productionApiBaseUrl
 
 export const API_BASE_URL = configuredApiBaseUrl.replace(/\/$/, '')
@@ -44,7 +44,7 @@ function isAbortError(error: unknown) {
 function createTransportError(code: 'NETWORK_ERROR' | 'TIMEOUT') {
   const message = code === 'TIMEOUT'
     ? 'The NOVAKOKO API request timed out. Please try again shortly.'
-    : `Unable to reach the NOVAKOKO API at ${API_BASE_URL}. Please try again shortly.`
+    : 'Unable to reach the NOVAKOKO API. Check your connection and try again shortly.'
   return new ApiError(null, message, undefined, code)
 }
 
@@ -94,14 +94,18 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  if (accessToken && !headers.has('Authorization')) {
+  if (accessToken) {
     headers.set('Authorization', `Bearer ${accessToken}`)
+  } else {
+    headers.delete('Authorization')
   }
 
   let response: Response | undefined
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const controller = new AbortController()
+    let timedOut = false
     const timeoutId = setTimeout(() => {
+      timedOut = true
       controller.abort(new DOMException('The request timed out.', 'TimeoutError'))
     }, 15000)
     const abortFromRequest = () => controller.abort(options.signal?.reason)
@@ -120,10 +124,11 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
         signal: controller.signal,
       })
     } catch (error) {
-      const isTimeout = controller.signal.aborted || isAbortError(error)
+      const callerAborted = options.signal?.aborted ?? false
+      const isTimeout = timedOut || (!callerAborted && isAbortError(error))
       const isNetworkError = error instanceof TypeError
       const shouldRetry = isSafeRead
-        && !options.signal?.aborted
+        && !callerAborted
         && attempt < maxAttempts - 1
         && (isTimeout || isNetworkError)
 
@@ -134,6 +139,9 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
 
       if (isTimeout) {
         throw createTransportError('TIMEOUT')
+      }
+      if (callerAborted) {
+        throw error
       }
       if (isNetworkError) {
         throw createTransportError('NETWORK_ERROR')
@@ -157,11 +165,13 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   }
 
   const rawText = await response.text()
-  let payload: unknown = {}
+  let payload: unknown
   try {
-    payload = rawText ? JSON.parse(rawText) : {}
+    payload = rawText ? JSON.parse(rawText) : undefined
   } catch {
-    payload = {}
+    if (response.ok) {
+      throw new ApiError(response.status, 'The NOVAKOKO API returned an invalid response.')
+    }
   }
 
   if (!response.ok) {

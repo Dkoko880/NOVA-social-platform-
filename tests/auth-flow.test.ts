@@ -45,6 +45,7 @@ describe('browser authentication session', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
   })
 
   it('persists login for a fresh /me request after module reload, then clears it on logout and revocation', async () => {
@@ -147,12 +148,14 @@ describe('browser authentication session', () => {
   })
 
   it.each([401, 403])('clears the session after /me confirms HTTP %i', async (status) => {
+    storeAccessToken(createToken())
     fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'Authentication required.' }, status))
     const { getCurrentUser } = await import('../src/lib/auth')
     const user = { id: 'user_1', email: 'user@example.com', name: 'Nova User' }
     const invalidSessionUser = await getCurrentUser()
 
     expect(invalidSessionUser).toBeNull()
+    expect(storedValues.size).toBe(0)
     expect(authSessionReducer({
       user,
       isLoading: true,
@@ -198,6 +201,117 @@ describe('browser authentication session', () => {
       code: 'API_ERROR',
       status: 422,
     })
+  })
+
+  it('returns parsed JSON from the shared API client', async () => {
+    const posts = { posts: [{ id: 'post_1' }] }
+    fetchMock.mockResolvedValueOnce(jsonResponse(posts))
+
+    await expect(apiRequest('/api/posts', {
+      headers: { Authorization: 'Bearer untrusted-test-header' },
+    })).resolves.toEqual(posts)
+    expect(fetchMock.mock.calls[0][0]).toBe('https://nova-social-platform-api.onrender.com/api/posts')
+    expect(fetchMock.mock.calls[0][1]?.credentials).toBe('include')
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has('Authorization')).toBe(false)
+  })
+
+  it.each([
+    [401, 'AUTH_ERROR'],
+    [403, 'AUTH_ERROR'],
+    [429, 'API_ERROR'],
+  ] as const)('keeps HTTP %i distinct from transport failures and does not retry it', async (status, code) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'Request rejected.' }, status))
+
+    await expect(apiRequest('/api/posts')).rejects.toMatchObject({
+      code,
+      status,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries safe reads after a transient gateway response', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ message: 'Temporarily unavailable.' }, 503))
+      .mockResolvedValueOnce(jsonResponse({ posts: [] }))
+
+    await expect(apiRequest('/api/posts')).resolves.toEqual({ posts: [] })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry a failed authentication mutation', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    await expect(loginUser({ identifier: 'user@example.com', password: 'never-log-this-password' }))
+      .rejects.toMatchObject({ code: 'NETWORK_ERROR', status: null })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('classifies browser fetch failures such as blocked CORS as transport errors', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    await expect(apiRequest('/api/posts')).rejects.toMatchObject({
+      code: 'NETWORK_ERROR',
+      status: null,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('times out a request without retrying its mutation', async () => {
+    vi.useFakeTimers()
+    fetchMock.mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+    }))
+
+    const request = apiRequest('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'user@example.com', password: 'never-log-this-password' }),
+    })
+    const timeoutAssertion = expect(request).rejects.toMatchObject({ code: 'TIMEOUT', status: null })
+    await vi.advanceTimersByTimeAsync(15000)
+    await timeoutAssertion
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
+  })
+
+  it('preserves caller cancellation instead of reporting it as a timeout', async () => {
+    const controller = new AbortController()
+    fetchMock.mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+    }))
+
+    const request = apiRequest('/api/posts', { signal: controller.signal })
+    controller.abort(new DOMException('Cancelled by caller.', 'AbortError'))
+
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects malformed successful response bodies as API errors', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('<html>not JSON</html>', {
+      status: 200,
+      headers: { 'Content-Type': 'text/html' },
+    }))
+
+    await expect(apiRequest('/api/posts')).rejects.toMatchObject({
+      code: 'API_ERROR',
+      status: 200,
+    })
+  })
+
+  it('uses the same-origin API path in production for the Vercel Render proxy', async () => {
+    vi.stubEnv('PROD', true)
+    vi.resetModules()
+    const {
+      API_BASE_URL: productionApiBaseUrl,
+      apiRequest: productionApiRequest,
+      resolveMediaUrl: productionMediaUrl,
+    } = await import('../src/lib/api')
+    fetchMock.mockResolvedValueOnce(jsonResponse({ posts: [] }))
+
+    expect(productionApiBaseUrl).toBe('')
+    expect(productionMediaUrl('/api/media/avatar.webp')).toBe('/api/media/avatar.webp')
+    await productionApiRequest('/api/posts')
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/posts')
   })
 
   it('sends the persisted bearer session on authenticated real-time streams', async () => {
