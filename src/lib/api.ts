@@ -31,11 +31,19 @@ export class ApiError extends Error {
     this.name = 'ApiError'
     this.status = status
     this.details = details
-    this.code = code ?? (status === 401 || status === 403 ? 'AUTH_ERROR' : 'API_ERROR')
+    this.code = code ?? (
+      status === 401 || status === 403
+        ? 'AUTH_ERROR'
+        : status === 429
+          ? 'RATE_LIMITED'
+          : status !== null && status >= 500
+            ? 'SERVER_ERROR'
+            : 'API_ERROR'
+    )
   }
 }
 
-export type ApiErrorCode = 'NETWORK_ERROR' | 'TIMEOUT' | 'AUTH_ERROR' | 'API_ERROR'
+export type ApiErrorCode = 'NETWORK_ERROR' | 'TIMEOUT' | 'AUTH_ERROR' | 'RATE_LIMITED' | 'SERVER_ERROR' | 'API_ERROR'
 
 function isAbortError(error: unknown) {
   return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
@@ -53,10 +61,12 @@ function extractErrorMessage(payload: unknown, fallback: string) {
     return fallback
   }
 
-  const data = payload as { message?: unknown; errors?: unknown }
+  const data = payload as { message?: unknown; error?: unknown; detail?: unknown; errors?: unknown }
 
-  if (typeof data.message === 'string' && data.message.trim()) {
-    return data.message
+  for (const message of [data.message, data.error, data.detail]) {
+    if (typeof message === 'string' && message.trim()) {
+      return message
+    }
   }
 
   if (data.errors && typeof data.errors === 'object') {
@@ -165,6 +175,8 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   }
 
   const rawText = await response.text()
+  const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? ''
+  const hasJsonContentType = contentType === 'application/json' || contentType.endsWith('+json')
   let payload: unknown
   try {
     payload = rawText ? JSON.parse(rawText) : undefined
@@ -172,13 +184,21 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
     if (response.ok) {
       throw new ApiError(response.status, 'The NOVAKOKO API returned an invalid response.')
     }
+    payload = { contentType: contentType || null, body: rawText }
   }
 
   if (!response.ok) {
     if (response.status === 401) {
       clearStoredAccessToken()
     }
-    throw new ApiError(response.status, extractErrorMessage(payload, 'Something went wrong. Please try again.'), payload)
+    const fallback = !hasJsonContentType
+      ? `The NOVAKOKO API returned HTTP ${response.status} with ${contentType || 'an unlabelled'} content instead of JSON.`
+      : response.status === 429
+        ? 'The NOVAKOKO API is rate limiting requests (HTTP 429). Please wait and try again.'
+        : response.status >= 500
+          ? `The NOVAKOKO API is temporarily unavailable (HTTP ${response.status}). Please try again shortly.`
+          : `The NOVAKOKO API request failed with HTTP ${response.status}.`
+    throw new ApiError(response.status, extractErrorMessage(payload, fallback), payload)
   }
 
   return payload as T

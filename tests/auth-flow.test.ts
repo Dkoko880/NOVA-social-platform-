@@ -218,7 +218,7 @@ describe('browser authentication session', () => {
   it.each([
     [401, 'AUTH_ERROR'],
     [403, 'AUTH_ERROR'],
-    [429, 'API_ERROR'],
+    [429, 'RATE_LIMITED'],
   ] as const)('keeps HTTP %i distinct from transport failures and does not retry it', async (status, code) => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'Request rejected.' }, status))
 
@@ -295,6 +295,36 @@ describe('browser authentication session', () => {
     await expect(apiRequest('/api/posts')).rejects.toMatchObject({
       code: 'API_ERROR',
       status: 200,
+    })
+  })
+
+  it('preserves status and content type for non-JSON API failures', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('<html>upstream unavailable</html>', {
+      status: 502,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    }))
+
+    await expect(apiRequest('/api/posts', { method: 'POST', body: '{}' })).rejects.toMatchObject({
+      code: 'SERVER_ERROR',
+      status: 502,
+      message: 'The NOVAKOKO API returned HTTP 502 with text/html content instead of JSON.',
+      details: { contentType: 'text/html', body: '<html>upstream unavailable</html>' },
+    })
+  })
+
+  it('extracts common structured error fields and classifies server and rate-limit statuses', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'Upstream rejected the request.' }, 503))
+    await expect(apiRequest('/api/posts', { method: 'POST', body: '{}' })).rejects.toMatchObject({
+      code: 'SERVER_ERROR',
+      status: 503,
+      message: 'Upstream rejected the request.',
+    })
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, 429))
+    await expect(apiRequest('/api/posts', { method: 'POST', body: '{}' })).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      status: 429,
+      message: 'The NOVAKOKO API is rate limiting requests (HTTP 429). Please wait and try again.',
     })
   })
 
