@@ -19,6 +19,7 @@ export function openAuthenticatedEventStream(path: string) {
     let retryDelay = 1000
 
     while (!closed) {
+      let connectionStartedAt: number | undefined
       try {
         const headers = new Headers()
         const token = getStoredAccessToken()
@@ -37,7 +38,7 @@ export function openAuthenticatedEventStream(path: string) {
           throw new Error(`The real-time API returned status ${response.status}.`)
         }
 
-        retryDelay = 1000
+        connectionStartedAt = Date.now()
         activeReader = response.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
@@ -71,6 +72,10 @@ export function openAuthenticatedEventStream(path: string) {
       }
 
       if (closed) return
+      if (connectionStartedAt !== undefined && Date.now() - connectionStartedAt >= 30_000) {
+        retryDelay = 1000
+      }
+      const jitteredRetryDelay = retryDelay * (0.5 + Math.random() * 0.5)
       await new Promise<void>((resolve) => {
         let timeout: ReturnType<typeof setTimeout>
         const onAbort = () => {
@@ -80,7 +85,7 @@ export function openAuthenticatedEventStream(path: string) {
         timeout = setTimeout(() => {
           controller.signal.removeEventListener('abort', onAbort)
           resolve()
-        }, retryDelay)
+        }, jitteredRetryDelay)
         controller.signal.addEventListener('abort', onAbort, { once: true })
       })
       retryDelay = Math.min(retryDelay * 2, 30_000)

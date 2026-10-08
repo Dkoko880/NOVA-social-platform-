@@ -28,6 +28,14 @@ Configure the Render service environment with the required variable names listed
 
 The Vercel frontend and Render API are cross-site, so production auth cookies use `SameSite=None; Secure; HttpOnly; Path=/` with the API host as a host-only cookie (no `Domain` attribute). Browsers that block cross-site cookies can still authenticate: login and registration return the session JWT over HTTPS, the frontend stores it only until its JWT expiry and sends it as a bearer token, and the API validates it against the same hashed, expiring, revocable database session. The API never logs credentials or tokens. Local development continues to default to `SameSite=Lax`.
 
+## Production reliability limits
+
+The API trusts exactly one reverse-proxy hop when determining the client IP so the Express rate limiter does not group unrelated visitors by the Render-facing proxy address. Keep the API behind Render's supported proxy; do not raise the trusted hop count without verifying the full proxy chain.
+
+Render free web services spin down after a period without inbound traffic and can take time to wake. This can cause long first-request delays or provider-generated 503 responses; application retries cannot make a sleeping service continuously available. The Render service's current plan cannot be inspected from this repository. If it is on the free plan, reliable always-on production service requires changing it in the Render dashboard to an always-on paid instance. Do not use periodic source-code pings as a substitute for that availability setting.
+
+The browser API client retries safe reads at most twice after transport failures or temporary gateway responses, with exponential backoff and jitter. Non-JSON gateway responses and Cloudflare challenge pages are surfaced separately from JSON application errors and JSON rate limits; a Cloudflare challenge is generated before Express handles the request.
+
 ## PostgreSQL and Prisma
 
 Create an empty PostgreSQL database and grant the application user only the permissions required by the application. From `server/`, run:

@@ -8,6 +8,10 @@ describe('auth routes', () => {
     fallbackStore.clear();
   });
 
+  it('trusts only the Render reverse-proxy hop for client IP-based rate limiting', () => {
+    expect(app.get('trust proxy')).toBe(1);
+  });
+
   it('registers a password account with a hashed password and an http-only session cookie', async () => {
     const response = await request(app)
       .post('/api/auth/register')

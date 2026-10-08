@@ -43,6 +43,7 @@ describe('browser authentication session', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     vi.unstubAllEnvs()
@@ -238,6 +239,31 @@ describe('browser authentication session', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('backs off exponentially and caps retries for repeated gateway failures', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ message: 'Temporarily unavailable.' }, 503))
+      .mockResolvedValueOnce(jsonResponse({ message: 'Temporarily unavailable.' }, 503))
+      .mockResolvedValueOnce(jsonResponse({ message: 'Temporarily unavailable.' }, 503))
+
+    const request = apiRequest('/api/posts')
+    const assertion = expect(request).rejects.toMatchObject({
+      code: 'SERVER_ERROR',
+      status: 503,
+    })
+    await vi.advanceTimersByTimeAsync(249)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(499)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    await assertion
+    vi.useRealTimers()
+  })
+
   it('does not retry a failed authentication mutation', async () => {
     fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'))
 
@@ -305,11 +331,45 @@ describe('browser authentication session', () => {
     }))
 
     await expect(apiRequest('/api/posts', { method: 'POST', body: '{}' })).rejects.toMatchObject({
-      code: 'SERVER_ERROR',
+      code: 'GATEWAY_ERROR',
       status: 502,
-      message: 'The NOVAKOKO API returned HTTP 502 with text/html content instead of JSON.',
-      details: { contentType: 'text/html', body: '<html>upstream unavailable</html>' },
+      message: 'The NOVAKOKO API gateway returned HTTP 502 with text/html content instead of JSON.',
+      details: {
+        contentType: 'text/html',
+        body: '<html>upstream unavailable</html>',
+        server: null,
+        cfRay: null,
+        cfMitigated: null,
+      },
     })
+  })
+
+  it('distinguishes a Cloudflare HTML challenge from the application JSON rate limit', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(
+      '<!doctype html><html><title>Just a moment...</title>Cloudflare</html>',
+      {
+        status: 429,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'CF-Mitigated': 'challenge',
+          'CF-Ray': 'test-ray-id',
+          Server: 'cloudflare',
+        },
+      },
+    ))
+
+    await expect(apiRequest('/api/posts')).rejects.toMatchObject({
+      code: 'CLOUDFLARE_CHALLENGE',
+      status: 429,
+      message: 'A Cloudflare Managed Challenge (HTTP 429) blocked the API request.',
+      details: {
+        contentType: 'text/html',
+        server: 'cloudflare',
+        cfRay: 'test-ray-id',
+        cfMitigated: 'challenge',
+      },
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('extracts common structured error fields and classifies server and rate-limit statuses', async () => {
@@ -360,6 +420,31 @@ describe('browser authentication session', () => {
     await vi.waitFor(() => expect(readyEventData).toBe('{"connected":true}'))
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization')).toBe(`Bearer ${token}`)
     expect(fetchMock.mock.calls[0][1]?.credentials).toBe('include')
+    stream.close()
+  })
+
+  it('backs off real-time reconnects after immediately closed streams', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    fetchMock.mockImplementation(async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.close()
+      },
+    })))
+
+    const stream = openAuthenticatedEventStream('/api/realtime')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(499)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(999)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
     stream.close()
   })
 })

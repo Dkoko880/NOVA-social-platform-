@@ -20,6 +20,7 @@ import { socialRouter } from './routes/social.js';
 import { subscriptionRouter } from './routes/subscriptions.js';
 
 const app = express();
+app.set('trust proxy', 1);
 const testRuntime = env.NODE_ENV === 'test' || process.env.VITEST === 'true';
 const allowedOrigins = Array.from(
   new Set([
