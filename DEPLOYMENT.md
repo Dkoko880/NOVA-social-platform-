@@ -14,11 +14,11 @@ Copy `server/.env.example` to `server/.env` and set:
 - `CORS_ORIGIN` to one or more exact HTTPS web origins separated by commas; wildcards are rejected in production
 - `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX_REQUESTS`, and `AUTH_RATE_LIMIT_MAX`
 
-The frontend API URL is `https://nova-social-platform-api.onrender.com` by default. Set `VITE_API_BASE_URL` to that exact origin in Vercel's project environment settings for production builds; the variable is optional for the current frontend source, which falls back to the same production API URL and does not fall back to localhost. The root `.env.example` contains only the safe, blank variable name.
+Production browser API requests use the same-origin `/api` path and are forwarded to Render by Vercel's rewrite. `VITE_API_BASE_URL` is only used by non-production builds; without it, local development falls back to the production API URL rather than localhost. The root `.env.example` contains only the safe, blank variable name.
 
 ## Vercel
 
-Use the existing Vercel project and configure it to deploy the repository's `main` branch with the repository root as the project root. Vite's defaults use `npm ci`, `npm run build`, and `dist`; `vercel.json` rewrites browser routes to `index.html` so refreshes on client-side routes work. Set `VITE_API_BASE_URL=https://nova-social-platform-api.onrender.com` in the Vercel environment settings for every deployment target that should use the production API. This is a public API URL, not a secret.
+Use the existing Vercel project and configure it to deploy the repository's `main` branch with the repository root as the project root. Vite's defaults use `npm ci`, `npm run build`, and `dist`; `vercel.json` rewrites `/api/*` requests to Render and browser routes to `index.html` so API calls and client-side route refreshes use the existing same-origin paths. Do not set `VITE_API_BASE_URL` for production; the production client intentionally uses these Vercel rewrites.
 
 ## Render
 
