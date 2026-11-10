@@ -6,6 +6,7 @@ import { FeedAdSlot } from '../components/FeedAdSlot'
 import { Avatar } from '../components/ui/Avatar'
 import { useAuth } from '../context/AuthContext'
 import { apiRequest, resolveMediaUrl, uploadMedia } from '../lib/api'
+import { openAuthenticatedEventStream } from '../lib/eventStream'
 import { isVideoStoryMedia, sendStoryReply } from '../lib/storyReplies'
 import type { Post } from '../types'
 
@@ -36,6 +37,7 @@ function toPost(record: any): Post {
     visibility: record.visibility ?? 'PUBLIC',
     currentUserReaction: record.currentUserReaction ?? null,
     authorFollowing: record.authorFollowing ?? false,
+    live: record.live,
   }
 }
 
@@ -76,6 +78,12 @@ export function HomePage() {
   }
 
   useEffect(() => { void loadFeed() }, [])
+
+  useEffect(() => {
+    const source = openAuthenticatedEventStream('/api/realtime')
+    source.addEventListener('live:feed:update', () => { void loadFeed() })
+    return () => source.close()
+  }, [])
 
   useEffect(() => {
     if (loading || !window.location.hash.startsWith('#post-')) return

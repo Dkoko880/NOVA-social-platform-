@@ -188,6 +188,7 @@ model User {
   liveReplays              LiveReplay[]
   liveBroadcastComments    LiveBroadcastComment[]
   liveBroadcastReactions   LiveBroadcastReaction[]
+  liveBroadcastViews       LiveBroadcastViewer[]
 
   @@index([email])
   @@index([phoneE164])
@@ -282,6 +283,7 @@ model Post {
   moderationHiddenById String?
   moderationReason String?
   sourceLiveReplayId String? @unique
+  sourceLiveBroadcastId String? @unique
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
@@ -294,6 +296,7 @@ model Post {
   saves     PostSave[]
   shares    PostShare[]
   liveReplay       LiveReplay? @relation("ReplaySource", fields: [sourceLiveReplayId], references: [id], onDelete: SetNull)
+  liveBroadcast    LiveBroadcast? @relation("LiveBroadcastPost", fields: [sourceLiveBroadcastId], references: [id], onDelete: SetNull)
   publishedReplay  LiveReplay? @relation("ReplayPost")
 
   @@index([authorId])
@@ -627,11 +630,17 @@ model LiveBroadcast {
   status          String   @default("paused")
   recordingStatus String   @default("UNAVAILABLE")
   replayUrl       String?
+  moderators      String[] @default([])
+  blockedUserIds  String[] @default([])
+  mutedUserIds    String[] @default([])
+  guests          Json     @default("[]")
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   endedAt         DateTime?
 
   host User @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  feedPost Post? @relation("LiveBroadcastPost")
+  viewers  LiveBroadcastViewer[]
 
   @@index([hostId, status, createdAt])
   @@index([visibility, status, createdAt])
@@ -660,6 +669,21 @@ model LiveBroadcastReaction {
 
   @@unique([liveId, userId, type])
   @@index([liveId, createdAt])
+}
+
+model LiveBroadcastViewer {
+  liveId     String
+  userId     String
+  joinedAt   DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  connectedAt DateTime?
+
+  live LiveBroadcast @relation(fields: [liveId], references: [id], onDelete: Cascade)
+  user User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([liveId, userId])
+  @@index([liveId, lastSeenAt])
+  @@index([userId, lastSeenAt])
 }
 
 model SubscriptionPlan {

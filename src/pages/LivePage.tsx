@@ -19,6 +19,11 @@ type LiveSession = {
   visibility: string
   status: string
   viewerCount: number
+  moderators: string[]
+  blockedUserIds: string[]
+  mutedUserIds: string[]
+  viewers: Array<{ userId: string; isMuted: boolean; isBlocked: boolean; joinedAt: string }>
+  guests: Array<{ userId: string; role: 'GUEST' | 'COHOST'; status: 'REQUESTED' | 'LIVE' | 'REMOVED'; requestedAt: string }>
   provider?: string
   providerConfigured: boolean
   comments: LiveComment[]
@@ -49,11 +54,15 @@ export function LivePage() {
   const [searchParams] = useSearchParams()
   const [lives, setLives] = useState<LiveSession[]>([])
   const [joinedLive, setJoinedLive] = useState<LiveSession | null>(null)
+  const [previewLive, setPreviewLive] = useState<LiveSession | null>(null)
+  const [previewStream, setPreviewStream] = useState<MediaStream | null>(null)
   const [comment, setComment] = useState('')
   const [newTitle, setNewTitle] = useState('')
   const [newDescription, setNewDescription] = useState('')
-  const [newVisibility, setNewVisibility] = useState<'public' | 'private'>('public')
+  const [newVisibility, setNewVisibility] = useState<'public' | 'followers' | 'private'>('public')
+  const [guestRole, setGuestRole] = useState<'GUEST' | 'COHOST'>('GUEST')
   const [hostRoom, setHostRoom] = useState<Room | null>(null)
+  const [guestRoom, setGuestRoom] = useState<Room | null>(null)
   const [remoteTracks, setRemoteTracks] = useState<Array<{ key: string; track: RemoteTrack }>>([])
   const [hostMuted, setHostMuted] = useState(false)
   const [hostCameraOn, setHostCameraOn] = useState(true)
@@ -76,6 +85,7 @@ export function LivePage() {
   const [replayActionError, setReplayActionError] = useState('')
   const roomRef = useRef<Room | null>(null)
   const hostRoomRef = useRef<Room | null>(null)
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   const joinedLiveRef = useRef<LiveSession | null>(null)
   const livesRef = useRef<LiveSession[]>([])
   const intentionalDisconnectRef = useRef(new WeakSet<Room>())
@@ -85,6 +95,20 @@ export function LivePage() {
   const pendingRecordingRef = useRef<PendingLiveRecording | null>(null)
   const attemptedNotificationLiveRef = useRef('')
   const replayActionInFlightRef = useRef(false)
+
+  useEffect(() => {
+    const video = previewVideoRef.current
+    if (!video) return
+    video.srcObject = previewStream
+    if (previewStream) {
+      void video.play().catch((playError: unknown) => setError(playError instanceof Error ? playError.message : 'Camera preview playback could not start.'))
+    }
+    return () => { video.srcObject = null }
+  }, [previewStream])
+
+  useEffect(() => () => {
+    previewStream?.getTracks().forEach((track) => track.stop())
+  }, [previewStream])
 
   const setLiveState = useCallback((live: LiveSession) => {
     const current = livesRef.current.find((entry) => entry.id === live.id)
@@ -114,6 +138,7 @@ export function LivePage() {
     }
     if (roomRef.current === room) roomRef.current = null
     if (hostRoomRef.current === room) hostRoomRef.current = null
+    setGuestRoom((current) => current === room ? null : current)
     setHostRoom((current) => current === room ? null : current)
     setRemoteTracks([])
     setNeedsAudioPlayback(false)
@@ -236,6 +261,7 @@ export function LivePage() {
         : null
       roomRef.current = null
       hostRoomRef.current = null
+      setGuestRoom(null)
       if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
       recorderRef.current = null
       recordingChunksRef.current = []
@@ -272,9 +298,36 @@ export function LivePage() {
     }
   }
 
+  const previewBroadcast = async (live: LiveSession) => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('This browser does not support camera and microphone preview.')
+      return
+    }
+    setError('')
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+      })
+      setPreviewLive(live)
+      setPreviewStream(stream)
+    } catch (previewError) {
+      setError(previewError instanceof Error && ['NotAllowedError', 'SecurityError'].includes(previewError.name)
+        ? 'Camera or microphone permission was denied. Allow both permissions, then try previewing again.'
+        : previewError instanceof Error ? previewError.message : 'Unable to start camera preview.')
+    }
+  }
+
+  const cancelPreview = () => {
+    previewStream?.getTracks().forEach((track) => track.stop())
+    setPreviewStream(null)
+    setPreviewLive(null)
+  }
+
   const startBroadcast = async (live: LiveSession) => {
     setBusy(true)
     setError('')
+    cancelPreview()
     let room: Room | null = null
     try {
       const { token, url } = await apiRequest<{ token: string; url: string }>(`/api/live/${encodeURIComponent(live.id)}/token`, { method: 'POST' })
@@ -425,7 +478,7 @@ export function LivePage() {
   }
 
   const toggleHostMute = async () => {
-    const room = hostRoomRef.current
+    const room = hostRoomRef.current ?? guestRoom
     if (!room) return
     const nextMuted = !hostMuted
     try {
@@ -437,7 +490,7 @@ export function LivePage() {
   }
 
   const toggleHostCamera = async () => {
-    const room = hostRoomRef.current
+    const room = hostRoomRef.current ?? guestRoom
     if (!room) return
     const nextCameraOn = !hostCameraOn
     try {
@@ -468,7 +521,7 @@ export function LivePage() {
     }
   }
 
-  const joinLive = async (live: LiveSession) => {
+  const joinLive = async (live: LiveSession, publishAsGuest = false) => {
     setBusy(true)
     setError('')
     let room: Room | null = null
@@ -499,6 +552,7 @@ export function LivePage() {
       room.on(RoomEvent.Disconnected, () => {
         if (roomRef.current !== room) return
         roomRef.current = null
+        setGuestRoom(null)
         setRemoteTracks([])
         if (!intentionalDisconnectRef.current.has(room!)) {
           setNeedsAudioPlayback(false)
@@ -511,6 +565,17 @@ export function LivePage() {
         }
       })
       await room.connect(url, token)
+      const approvedGuest = response.live.guests?.some((guest) => guest.userId === user?.id && guest.status === 'LIVE')
+      if (publishAsGuest && !approvedGuest) {
+        throw new Error('Guest stage access is no longer available. Ask the host to approve your request again.')
+      }
+      if (approvedGuest && publishAsGuest) {
+        await room.localParticipant.setMicrophoneEnabled(true)
+        await room.localParticipant.setCameraEnabled(true)
+        setGuestRoom(room)
+        setHostMuted(false)
+        setHostCameraOn(true)
+      }
     } catch (joinError) {
       let cleanupError = ''
       if (room) {
@@ -573,13 +638,70 @@ export function LivePage() {
     setError('')
     try {
       const response = await apiRequest<{ comment: LiveComment }>(`/api/live/${encodeURIComponent(joinedLive.id)}/comment`, { method: 'POST', body: JSON.stringify({ text: comment.trim() }) })
-      setJoinedLive((current) => current ? { ...current, comments: [...current.comments, response.comment] } : current)
+      setJoinedLive((current) => current
+        ? { ...current, comments: current.comments.some((entry) => entry.id === response.comment.id) ? current.comments : [...current.comments, response.comment] }
+        : current)
       setComment('')
     } catch (commentError) {
       setError(commentError instanceof Error ? commentError.message : 'Unable to post your comment.')
     } finally {
       setBusy(false)
     }
+  }
+
+  const requestGuestSpot = async (live: LiveSession, role: 'GUEST' | 'COHOST') => {
+    setError('')
+    try {
+      const response = await apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/guests/request`, {
+        method: 'POST',
+        body: JSON.stringify({ role }),
+      })
+      setLiveState(response.live)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to request a guest spot.')
+    }
+  }
+
+  const updateGuest = async (live: LiveSession, userId: string, action: 'approve' | 'remove') => {
+    setError('')
+    try {
+      const response = await apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/guests/${encodeURIComponent(userId)}/${action}`, { method: 'POST' })
+      setLiveState(response.live)
+    } catch (guestError) {
+      setError(guestError instanceof Error ? guestError.message : 'Unable to update guest access.')
+    }
+  }
+
+  const updateViewerControl = async (live: LiveSession, userId: string, action: 'mute' | 'remove' | 'block', isMuted?: boolean) => {
+    setError('')
+    try {
+      const path = action === 'block'
+        ? `/api/live/${encodeURIComponent(live.id)}/block/${encodeURIComponent(userId)}`
+        : `/api/live/${encodeURIComponent(live.id)}/viewer/${encodeURIComponent(userId)}/${action}`
+      const response = await apiRequest<{ live: LiveSession }>(path, {
+        method: 'POST',
+        ...(action === 'mute' ? { body: JSON.stringify({ isMuted: Boolean(isMuted) }) } : {}),
+      })
+      setLiveState(response.live)
+    } catch (controlError) {
+      setError(controlError instanceof Error ? controlError.message : 'Unable to update viewer access.')
+    }
+  }
+
+  const removeLiveComment = async (live: LiveSession, commentId: string) => {
+    setError('')
+    try {
+      const response = await apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/comments/${encodeURIComponent(commentId)}/remove`, { method: 'POST' })
+      if (response.live) setLiveState(response.live)
+    } catch (moderationError) {
+      setError(moderationError instanceof Error ? moderationError.message : 'Unable to remove the live comment.')
+    }
+  }
+
+  const joinGuestStage = async (live: LiveSession) => {
+    if (!activeLive || !approvedGuest) return
+    await leaveLive()
+    await joinLive(live, true)
   }
 
   const react = async (live: LiveSession) => {
@@ -662,14 +784,24 @@ export function LivePage() {
     }
     attemptedNotificationLiveRef.current = targetId
     void joinLive(live)
-  }, [busy, joinedLive?.id, lives, loading, searchParams])
+  }, [busy, joinLive, joinedLive?.id, lives, loading, searchParams])
 
   const hostLive = lives.find((live) => live.hostId === user?.id && live.status === 'live')
   const localVideoTrack = hostRoom?.localParticipant.getTrackPublication(cameraTrackSource)?.track
+    ?? guestRoom?.localParticipant.getTrackPublication(cameraTrackSource)?.track
   const remoteVideoTracks = remoteTracks.filter(({ track }) => track.kind === 'video')
   const remoteAudioTracks = remoteTracks.filter(({ track }) => track.kind === 'audio')
-  const activeLive = joinedLive ?? (hostLive && hostRoom ? hostLive : null)
+  const activeLive = joinedLive ?? (hostLive && hostRoom ? hostLive : previewLive)
   const isHost = Boolean(activeLive && activeLive.hostId === user?.id)
+  const canModerate = Boolean(activeLive && (isHost || activeLive.moderators.includes(user?.id ?? '')))
+  const currentViewer = activeLive?.viewers.find((viewer) => viewer.userId === user?.id)
+  const interactionRestricted = Boolean(activeLive && user && (
+    activeLive.blockedUserIds.includes(user.id)
+    || activeLive.mutedUserIds.includes(user.id)
+    || currentViewer?.isBlocked
+    || currentViewer?.isMuted
+  ))
+  const approvedGuest = Boolean(activeLive?.guests.some((guest) => guest.userId === user?.id && guest.status === 'LIVE'))
 
   useEffect(() => {
     if (!joinedLive?.id) return
@@ -695,8 +827,8 @@ export function LivePage() {
     <>
     {activeLive ? <section className="fixed inset-0 z-[60] h-[100dvh] w-screen overflow-hidden bg-slate-950 text-white" aria-label="Live video session">
       <div className="absolute inset-0 bg-slate-950">
-        {isHost && localVideoTrack ? <AttachedTrack track={localVideoTrack} muted className="h-full w-full object-cover" /> : remoteVideoTracks.map(({ key, track }) => <AttachedTrack key={key} track={track} className="h-full w-full object-cover" />)}
-        {!isHost && remoteVideoTracks.length === 0 ? <div className="absolute inset-0 flex items-center justify-center px-8 text-center text-sm text-white/80" role="status">Connecting to the live video…</div> : null}
+        {previewLive?.id === activeLive.id && previewStream ? <video ref={previewVideoRef} muted autoPlay playsInline className="h-full w-full object-cover" /> : (isHost || approvedGuest) && localVideoTrack ? <AttachedTrack track={localVideoTrack} muted className="h-full w-full object-cover" /> : remoteVideoTracks.map(({ key, track }) => <AttachedTrack key={key} track={track} className="h-full w-full object-cover" />)}
+        {!isHost && !approvedGuest && remoteVideoTracks.length === 0 ? <div className="absolute inset-0 flex items-center justify-center px-8 text-center text-sm text-white/80" role="status">Connecting to the live video…</div> : null}
         {isHost && !hostCameraOn ? <div className="absolute inset-0 flex items-center justify-center text-white/70"><VideoOff className="h-12 w-12" aria-hidden="true" /><span className="sr-only">Camera is off</span></div> : null}
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/70 via-transparent to-black/80" />
       </div>
@@ -704,38 +836,65 @@ export function LivePage() {
       <header className="absolute inset-x-0 top-0 flex flex-wrap items-center justify-between gap-3 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <div className="min-w-0">
-            <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide"><span className="rounded-full bg-rose-600 px-2 py-1">LIVE</span><span className="inline-flex items-center gap-1"><Users className="h-4 w-4" aria-hidden="true" />{activeLive.viewerCount}</span></p>
+            <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide"><span className={`rounded-full px-2 py-1 ${activeLive.status === 'live' ? 'bg-rose-600' : 'bg-amber-500'}`}>{activeLive.status === 'live' ? 'LIVE' : 'PREVIEW'}</span><span className="inline-flex items-center gap-1"><Users className="h-4 w-4" aria-hidden="true" />{activeLive.viewerCount}</span></p>
             <h1 className="mt-1 max-w-[55vw] truncate text-base font-semibold sm:max-w-md">{activeLive.title}</h1>
             <p className="truncate text-xs text-white/75">{isHost ? user?.name : activeLive.host?.name ?? 'novachat host'}</p>
           </div>
         </div>
         <div className="flex max-w-full flex-wrap justify-end gap-2">
-          {isHost ? <>
+          {isHost && activeLive.status === 'live' ? <>
             <button type="button" aria-label={hostMuted ? 'Unmute microphone' : 'Mute microphone'} title={hostMuted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => void toggleHostMute()} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75">{hostMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}<span className="hidden sm:inline">{hostMuted ? 'Unmute' : 'Mute'}</span></button>
             <button type="button" aria-label={hostCameraOn ? 'Turn camera off' : 'Turn camera on'} title={hostCameraOn ? 'Turn camera off' : 'Turn camera on'} onClick={() => void toggleHostCamera()} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75">{hostCameraOn ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}<span className="hidden sm:inline">{hostCameraOn ? 'Camera on' : 'Camera off'}</span></button>
             {hostCameraOn ? <button type="button" aria-label="Switch camera" title="Switch camera" onClick={() => void switchHostCamera()} disabled={cameraSwitchBusy} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75 disabled:opacity-60"><RefreshCw className={`h-5 w-5 ${cameraSwitchBusy ? 'animate-spin' : ''}`} /><span className="hidden sm:inline">Flip</span></button> : null}
             <button type="button" aria-label="End broadcast" title="End broadcast" onClick={() => { if (window.confirm('End your live broadcast?')) void endBroadcast(activeLive) }} disabled={busy} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-rose-600 px-3 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-60"><PhoneOff className="h-5 w-5" /><span className="hidden sm:inline">End</span></button>
+          </> : isHost ? <>
+            <button type="button" onClick={() => void startBroadcast(activeLive)} disabled={busy} className="min-h-11 rounded-full bg-rose-600 px-4 text-sm font-semibold text-white disabled:opacity-60">Start broadcast</button>
+            <button type="button" onClick={cancelPreview} className="min-h-11 rounded-full bg-black/55 px-4 text-sm font-semibold text-white ring-1 ring-white/20">Cancel preview</button>
           </> : <>
             <button type="button" aria-label="Share live broadcast" title="Share live broadcast" onClick={() => void shareLive(activeLive)} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20 hover:bg-black/75"><Share2 className="h-5 w-5" /></button>
+            {approvedGuest ? <>
+              <button type="button" aria-label={hostMuted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => void toggleHostMute()} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20">{hostMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}</button>
+              <button type="button" aria-label={hostCameraOn ? 'Turn camera off' : 'Turn camera on'} onClick={() => void toggleHostCamera()} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20">{hostCameraOn ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}</button>
+            </> : null}
             <button type="button" aria-label="Leave live broadcast" title="Leave live broadcast" onClick={() => void leaveLive()} disabled={busy} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75"><PhoneOff className="h-5 w-5" /><span className="hidden sm:inline">Leave</span></button>
           </>}
         </div>
       </header>
 
       {error ? <p className="absolute left-3 right-3 top-28 mx-auto max-w-xl rounded-xl bg-black/75 p-3 text-center text-sm text-white" role="alert">{error}</p> : null}
+      {!isHost && approvedGuest ? <button type="button" onClick={() => void joinGuestStage(activeLive)} disabled={busy} className="absolute left-3 top-28 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">Join the stage</button> : null}
+      {canModerate ? <section aria-label="Live moderation controls" className="absolute right-3 top-28 max-h-[45dvh] w-72 max-w-[calc(100vw-1.5rem)] space-y-3 overflow-y-auto rounded-xl bg-black/75 p-3 text-xs text-white ring-1 ring-white/20">
+        <div><h2 className="font-semibold">Guest requests</h2>
+          {activeLive.guests.filter((guest) => guest.status !== 'REMOVED').map((guest) => <div key={guest.userId} className="mt-2 flex items-center justify-between gap-2">
+            <span className="truncate">{guest.userId} · {guest.role.toLowerCase()} · {guest.status.toLowerCase()}</span>
+            {guest.status === 'REQUESTED' ? <button type="button" onClick={() => void updateGuest(activeLive, guest.userId, 'approve')} className="rounded bg-emerald-700 px-2 py-1 font-semibold">Approve</button> : null}
+            <button type="button" onClick={() => void updateGuest(activeLive, guest.userId, 'remove')} className="rounded bg-rose-700 px-2 py-1 font-semibold">Remove</button>
+          </div>)}
+          {!activeLive.guests.some((guest) => guest.status === 'REQUESTED') ? <p className="mt-1 text-white/65">No pending requests.</p> : null}
+        </div>
+        <div><h2 className="font-semibold">Viewers</h2>
+          {activeLive.viewers.map((viewer) => <div key={viewer.userId} className="mt-2 flex flex-wrap items-center justify-between gap-1">
+            <span className="max-w-32 truncate">{viewer.userId}</span>
+            <button type="button" onClick={() => void updateViewerControl(activeLive, viewer.userId, 'mute', !viewer.isMuted)} className="rounded bg-slate-700 px-2 py-1">{viewer.isMuted ? 'Unmute' : 'Mute'}</button>
+            <button type="button" onClick={() => void updateViewerControl(activeLive, viewer.userId, 'remove')} className="rounded bg-rose-700 px-2 py-1">Remove</button>
+            <button type="button" onClick={() => void updateViewerControl(activeLive, viewer.userId, 'block')} className="rounded bg-rose-900 px-2 py-1">Block</button>
+          </div>)}
+        </div>
+      </section> : null}
       {!isHost && (needsAudioPlayback || needsVideoPlayback) ? <button type="button" onClick={() => void enablePlayback()} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white px-5 py-3 font-semibold text-slate-900 shadow-lg"><Volume2 className="mr-2 inline h-5 w-5" aria-hidden="true" />Tap to enable sound</button> : null}
       {recordingError && isHost ? <p className="absolute bottom-36 left-3 right-3 mx-auto max-w-lg rounded-xl bg-amber-950/90 p-3 text-center text-xs text-amber-50" role="status">{recordingError}</p> : null}
       {shareNotice ? <p className="absolute bottom-36 left-3 right-3 text-center text-sm text-white" role="status">{shareNotice}</p> : null}
 
       {!isHost ? <div className="absolute inset-x-0 bottom-0 flex max-h-[40dvh] flex-col bg-gradient-to-t from-black/85 to-transparent px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-12 sm:px-6">
-        <ul className="mb-3 max-h-32 space-y-1 overflow-y-auto text-sm" aria-label="Live comments">{joinedLive?.comments.slice(-30).map((entry) => <li key={entry.id} className="w-fit max-w-full rounded-xl bg-black/45 px-3 py-2 text-white">{entry.text}</li>)}</ul>
+        <ul className="mb-3 max-h-32 space-y-1 overflow-y-auto text-sm" aria-label="Live comments">{joinedLive?.comments.slice(-30).map((entry) => <li key={entry.id} className="flex w-fit max-w-full items-center gap-2 rounded-xl bg-black/45 px-3 py-2 text-white">{entry.text}{canModerate ? <button type="button" aria-label={`Remove comment ${entry.id}`} onClick={() => void removeLiveComment(activeLive, entry.id)} className="rounded bg-rose-700 px-2 py-1 text-xs">Remove</button> : null}</li>)}</ul>
         <div className="flex items-center gap-2">
           <form onSubmit={(event) => void postComment(event)} className="flex min-w-0 flex-1 gap-2">
-            <input value={comment} onChange={(event) => setComment(event.target.value)} maxLength={500} aria-label="Live comment" placeholder="Add a comment…" className="min-h-11 min-w-0 flex-1 rounded-full border border-white/25 bg-black/50 px-4 text-sm text-white placeholder:text-white/65 outline-none focus:border-white" />
-            <button type="submit" aria-label="Send comment" disabled={busy || !comment.trim()} className="min-h-11 min-w-11 rounded-full bg-white text-slate-900 disabled:opacity-50"><Send className="mx-auto h-4 w-4" aria-hidden="true" /></button>
+            <input value={comment} onChange={(event) => setComment(event.target.value)} maxLength={500} aria-label="Live comment" placeholder={interactionRestricted ? 'Commenting is restricted' : 'Add a comment…'} disabled={interactionRestricted} className="min-h-11 min-w-0 flex-1 rounded-full border border-white/25 bg-black/50 px-4 text-sm text-white placeholder:text-white/65 outline-none focus:border-white disabled:opacity-60" />
+            <button type="submit" aria-label="Send comment" disabled={busy || interactionRestricted || !comment.trim()} className="min-h-11 min-w-11 rounded-full bg-white text-slate-900 disabled:opacity-50"><Send className="mx-auto h-4 w-4" aria-hidden="true" /></button>
           </form>
-          <button type="button" aria-label="Like live broadcast" onClick={() => void react(activeLive)} className="min-h-11 min-w-11 rounded-full bg-rose-600 text-white"><Heart className="mx-auto h-5 w-5" aria-hidden="true" /></button>
+          <button type="button" aria-label="Like live broadcast" onClick={() => void react(activeLive)} disabled={interactionRestricted} className="min-h-11 min-w-11 rounded-full bg-rose-600 text-white disabled:opacity-50"><Heart className="mx-auto h-5 w-5" aria-hidden="true" /></button>
         </div>
+        {interactionRestricted ? <p className="mt-2 text-xs text-white/75" role="status">You cannot comment or react in this broadcast.</p> : null}
       </div> : null}
       {remoteAudioTracks.map(({ key, track }) => <AttachedTrack key={key} track={track} className="sr-only" />)}
     </section> : <div className="space-y-5 p-4 sm:p-6">
@@ -754,7 +913,7 @@ export function LivePage() {
         <textarea aria-label="Live session description" maxLength={1000} value={newDescription} onChange={(event) => setNewDescription(event.target.value)} placeholder="Add a description (optional)" className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
         <label className="flex items-center justify-between gap-3 text-sm text-slate-700">Live audience
           <select aria-label="Live audience" value={newVisibility} onChange={(event) => setNewVisibility(event.target.value as typeof newVisibility)} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-            <option value="public">Public</option><option value="private">Private</option>
+            <option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option>
           </select>
         </label>
         <div className="flex justify-end"><Button type="submit" variant="primary" size="sm" disabled={busy || !newTitle.trim()}>Create session</Button></div>
@@ -767,9 +926,17 @@ export function LivePage() {
           <li key={live.id} className="flex flex-wrap items-center gap-3 p-4">
             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-700"><Headphones className="h-5 w-5" aria-hidden="true" /></span>
             <div className="min-w-0 flex-1"><h3 className="truncate font-semibold text-slate-900">{live.title}</h3><p className="mt-1 text-sm text-slate-500">{live.description || `Hosted by ${live.host?.name ?? (live.hostId === user?.id ? 'you' : 'a novachat member')}`} · {live.viewerCount} viewers · {live.status}</p></div>
+            {live.hostId === user?.id && live.status === 'paused' && previewLive?.id !== live.id ? <Button variant="secondary" size="sm" onClick={() => void previewBroadcast(live)} disabled={busy}>Preview camera</Button> : null}
             {live.hostId === user?.id && live.status === 'paused' ? <Button variant="primary" size="sm" onClick={() => void startBroadcast(live)} disabled={busy}>Start broadcasting</Button> : null}
             {live.hostId === user?.id && live.status === 'live' && !hostRoom ? <Button variant="secondary" size="sm" onClick={() => void endBroadcast(live)} disabled={busy}>Finish ending</Button> : null}
             {live.hostId !== user?.id && live.status === 'live' && joinedLive?.id !== live.id ? <Button variant="primary" size="sm" onClick={() => void joinLive(live)} disabled={busy}>Join live</Button> : null}
+            {live.hostId !== user?.id && live.status === 'live' && joinedLive?.id !== live.id && !live.guests.some((guest) => guest.userId === user?.id && guest.status !== 'REMOVED') ? <>
+              <select aria-label={`Stage role for ${live.title}`} value={guestRole} onChange={(event) => setGuestRole(event.target.value as typeof guestRole)} className="min-h-10 rounded-lg border border-slate-200 bg-white px-2 text-xs">
+                <option value="GUEST">Guest</option>
+                <option value="COHOST">Co-host</option>
+              </select>
+              <Button variant="secondary" size="sm" onClick={() => void requestGuestSpot(live, guestRole)} disabled={busy}>Request guest spot</Button>
+            </> : null}
           </li>
         ))}
       </ul>

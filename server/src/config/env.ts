@@ -31,9 +31,9 @@ export const envSchema = z.object({
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(900000),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().default(100),
   AUTH_RATE_LIMIT_MAX: z.coerce.number().default(20),
-  LIVEKIT_URL: z.string().optional(),
-  LIVEKIT_API_KEY: z.string().optional(),
-  LIVEKIT_API_SECRET: z.string().optional(),
+  LIVEKIT_URL: z.string().min(1).optional(),
+  LIVEKIT_API_KEY: z.string().min(1).optional(),
+  LIVEKIT_API_SECRET: z.string().min(1).optional(),
 }).superRefine((data, ctx) => {
   const hasProductionSecret = Boolean(process.env.JWT_SECRET && process.env.JWT_SECRET.length >= 32);
   const hasProductionDatabaseUrl = Boolean(process.env.DATABASE_URL);

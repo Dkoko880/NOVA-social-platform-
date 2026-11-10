@@ -261,7 +261,7 @@ export function PostMedia({ url, alt = 'Post attachment', className = '', active
     if (!autoPlay || !active || retryAttemptsRef.current >= 2) return
     retryAttemptsRef.current += 1
     const delay = 750 * 2 ** (retryAttemptsRef.current - 1)
-    setPlaybackError('Connection interrupted. Retrying…')
+    setPlaybackError('Connection interrupted. Retrying… Check your connection and retry if playback does not resume.')
     retryTimerRef.current = window.setTimeout(() => {
       retryTimerRef.current = null
       setPlaybackError('')
@@ -292,7 +292,7 @@ export function PostMedia({ url, alt = 'Post attachment', className = '', active
           autoPlay={autoPlay && active}
           loop={autoPlay}
           playsInline
-          preload={active ? 'metadata' : 'none'}
+          preload={active ? autoPlay ? 'auto' : 'metadata' : 'none'}
           className={className}
           aria-label={alt}
           onClick={(event) => {

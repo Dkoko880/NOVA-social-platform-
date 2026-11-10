@@ -2,15 +2,16 @@ import { Router, type Request, type Response } from 'express';
 import { TrackSource } from 'livekit-server-sdk';
 import { z } from 'zod';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
-import { createCallSession, createLiveSession, createNotification, getCallSession, getLiveSession, getNotificationPreferences, listCallHistory, listLiveSessions, markAllNotificationsRead, markNotificationRead, setNotificationPreferences, setPresence, setTypingState, updateCallSession, updateLiveSession } from '../lib/platform.js';
+import { createCallSession, createLiveSession, createNotification, getCallSession, getLiveSession, getNotificationPreferences, listCallHistory, listLiveSessions, markAllNotificationsRead, markNotificationRead, restoreLiveSession, setNotificationPreferences, setPresence, setTypingState, updateCallSession, updateLiveSession, type LiveComment, type LiveReaction, type LiveViewer } from '../lib/platform.js';
 import { socialStore } from '../lib/socialStore.js';
-import { findUserById } from '../lib/fallbackStore.js';
+import { fallbackStore, findUserById } from '../lib/fallbackStore.js';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 import { reviewContentForSafety } from '../lib/moderation.js';
-import { callRoomName, createLiveKitToken, endLiveKitRoom, getLiveKitParticipants, isLiveKitConfigured, liveKitUrl, liveRoomName } from '../lib/livekit.js';
+import { callRoomName, createLiveKitToken, endLiveKitRoom, getLiveKitParticipants, isLiveKitConfigured, liveKitUrl, liveRoomName, removeLiveKitParticipant } from '../lib/livekit.js';
 import { getMediaStorage, uploadedVideoBelongsTo, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
 import { reviewContentForSafety as reviewPostContentForSafety } from '../lib/moderation.js';
-import { isLiveReplayOwner } from '../lib/liveReplayPolicy.js';
+import { canDeleteLiveReplayMedia, isLiveReplayOwner } from '../lib/liveReplayPolicy.js';
+import { realtimeHub } from '../lib/realtime.js';
 
 const command2aRouter = Router();
 command2aRouter.use(requireActiveAccountIfAuthenticated);
@@ -44,7 +45,7 @@ const callControlSchema = z.object({ muted: z.boolean().optional(), cameraOn: z.
 const liveCreateSchema = z.object({
   title: z.string().trim().min(1).max(120),
   description: z.string().trim().max(1000).optional(),
-  visibility: z.enum(['public', 'private']).default('public'),
+  visibility: z.enum(['public', 'followers', 'private']).default('public'),
 });
 
 const liveCommentSchema = z.object({
@@ -59,6 +60,12 @@ const liveReportSchema = z.object({
   reason: z.string().trim().min(4).max(500),
 });
 const liveGuestSchema = z.object({ role: z.enum(['GUEST', 'COHOST']).default('GUEST') });
+const liveGuestRecordSchema = z.array(z.object({
+  userId: z.string().min(1),
+  role: z.enum(['GUEST', 'COHOST']),
+  status: z.enum(['REQUESTED', 'LIVE', 'REMOVED']),
+  requestedAt: z.string().datetime(),
+}));
 const liveViewerControlSchema = z.object({ isMuted: z.boolean() });
 
 async function canViewConversation(conversationId: string, userId: string) {
@@ -90,6 +97,90 @@ function canManageLive(live: NonNullable<ReturnType<typeof getLiveSession>>, use
   return live.hostId === userId || live.moderators.includes(userId);
 }
 
+async function canViewLive(live: NonNullable<ReturnType<typeof getLiveSession>>, userId: string) {
+  if (live.blockedUserIds.includes(userId)) return false;
+  if (await isBlocked(userId, live.hostId)) return false;
+  if (canManageLive(live, userId)) return true;
+  if (live.visibility === 'private') return false;
+  if (live.visibility === 'public') return true;
+  if (await isDatabaseAvailable()) {
+    return Boolean(await prisma.follow.findFirst({ where: { followerId: userId, followingId: live.hostId }, select: { id: true } }));
+  }
+  return socialStore.state.follows.some((follow) => follow.followerId === userId && follow.followingId === live.hostId);
+}
+
+async function publishLiveFeedPost(live: NonNullable<ReturnType<typeof getLiveSession>>) {
+  const content = [live.title, live.description].filter(Boolean).join('\n\n');
+  const visibility = live.visibility === 'public' ? 'PUBLIC' as const : live.visibility === 'followers' ? 'FOLLOWERS' as const : 'PRIVATE' as const;
+  const replayUrl = live.recordingStatus === 'READY' ? live.replayUrl ?? null : null;
+  if (await isDatabaseAvailable()) {
+    await prisma.$transaction(async (transaction) => {
+      await transaction.liveBroadcast.upsert({
+        where: { id: live.id },
+        create: {
+          id: live.id,
+          hostId: live.hostId,
+          title: live.title,
+          description: live.description,
+          visibility: live.visibility,
+          status: live.status,
+          recordingStatus: live.recordingStatus,
+          replayUrl: live.replayUrl,
+          moderators: live.moderators,
+          blockedUserIds: live.blockedUserIds,
+          mutedUserIds: live.mutedUserIds,
+          guests: live.guests,
+        },
+        update: {
+          status: live.status,
+          recordingStatus: live.recordingStatus,
+          replayUrl: live.replayUrl,
+          moderators: live.moderators,
+          blockedUserIds: live.blockedUserIds,
+          mutedUserIds: live.mutedUserIds,
+          guests: live.guests,
+        },
+      });
+      await transaction.post.upsert({
+        where: { sourceLiveBroadcastId: live.id },
+        create: {
+          authorId: live.hostId,
+          content,
+          visibility,
+          sourceLiveBroadcastId: live.id,
+          imageUrl: replayUrl,
+        },
+        update: {
+          content,
+          visibility,
+          imageUrl: replayUrl,
+        },
+      });
+    });
+    return;
+  }
+
+  const existing = socialStore.state.posts.find((post) => post.sourceLiveBroadcastId === live.id);
+  if (existing) {
+    existing.content = content;
+    existing.visibility = visibility;
+    existing.imageUrl = replayUrl;
+    existing.updatedAt = new Date().toISOString();
+    return;
+  }
+  const now = new Date().toISOString();
+  socialStore.state.posts.push({
+    id: `live_post_${live.id}`,
+    authorId: live.hostId,
+    content,
+    imageUrl: null,
+    visibility,
+    sourceLiveBroadcastId: live.id,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
 async function persistLiveSession(live: NonNullable<ReturnType<typeof getLiveSession>>, endedAt?: Date) {
   if (!(await isDatabaseAvailable())) return false;
   await prisma.liveBroadcast.upsert({
@@ -103,6 +194,10 @@ async function persistLiveSession(live: NonNullable<ReturnType<typeof getLiveSes
       status: live.status,
       recordingStatus: live.recordingStatus,
       replayUrl: live.replayUrl,
+      moderators: live.moderators,
+      blockedUserIds: live.blockedUserIds,
+      mutedUserIds: live.mutedUserIds,
+      guests: live.guests,
       ...(endedAt ? { endedAt } : {}),
     },
     update: {
@@ -112,6 +207,10 @@ async function persistLiveSession(live: NonNullable<ReturnType<typeof getLiveSes
       status: live.status,
       recordingStatus: live.recordingStatus,
       replayUrl: live.replayUrl,
+      moderators: live.moderators,
+      blockedUserIds: live.blockedUserIds,
+      mutedUserIds: live.mutedUserIds,
+      guests: live.guests,
       ...(endedAt ? { endedAt } : {}),
     },
   });
@@ -127,22 +226,55 @@ function liveSessionFromRecord(record: {
   status: string;
   recordingStatus: string;
   replayUrl: string | null;
+  moderators: string[];
+  blockedUserIds: string[];
+  mutedUserIds: string[];
+  guests: unknown;
   createdAt: Date;
   updatedAt: Date;
+  viewers?: Array<{ userId: string; joinedAt: Date; lastSeenAt: Date; connectedAt: Date | null }>;
+  comments?: Array<{ id: string; userId: string; text: string; createdAt: Date }>;
+  reactions?: Array<{ id: string; userId: string; type: string; createdAt: Date }>;
 }) {
+  const guests = liveGuestRecordSchema.parse(record.guests);
+  const stageUserIds = new Set([
+    record.hostId,
+    ...guests.filter((guest) => guest.status === 'LIVE').map((guest) => guest.userId),
+  ]);
+  const viewers = (record.viewers ?? [])
+    .filter((viewer) => viewer.connectedAt !== null)
+    .filter((viewer) => !stageUserIds.has(viewer.userId))
+    .map((viewer) => ({
+      userId: viewer.userId,
+      isMuted: record.mutedUserIds.includes(viewer.userId),
+      isBlocked: record.blockedUserIds.includes(viewer.userId),
+      joinedAt: viewer.lastSeenAt.toISOString(),
+    }));
   return {
     id: record.id,
     hostId: record.hostId,
     title: record.title,
     description: record.description,
-    visibility: record.visibility as 'public' | 'private',
+    visibility: record.visibility as 'public' | 'followers' | 'private',
     status: record.status as 'live' | 'paused' | 'ended',
-    viewerCount: 0,
-    moderators: [],
-    viewers: [],
-    guests: [],
-    comments: [],
-    reactions: [],
+    viewerCount: viewers.length,
+    moderators: record.moderators,
+    blockedUserIds: record.blockedUserIds,
+    mutedUserIds: record.mutedUserIds,
+    viewers,
+    guests,
+    comments: (record.comments ?? []).slice().reverse().map((comment): LiveComment => ({
+      id: comment.id,
+      userId: comment.userId,
+      text: comment.text,
+      createdAt: comment.createdAt.toISOString(),
+    })),
+    reactions: (record.reactions ?? []).slice().reverse().map((reaction): LiveReaction => ({
+      id: reaction.id,
+      userId: reaction.userId,
+      type: liveReactionSchema.shape.type.parse(reaction.type),
+      createdAt: reaction.createdAt.toISOString(),
+    })),
     replayUrl: record.replayUrl,
     recordingUrl: record.replayUrl,
     recordingStatus: record.recordingStatus as 'UNAVAILABLE' | 'RECORDING' | 'READY',
@@ -154,12 +286,51 @@ function liveSessionFromRecord(record: {
   };
 }
 
+function liveViewerSnapshot(live: NonNullable<ReturnType<typeof getLiveSession>>, records: Array<{ userId: string; lastSeenAt: Date }>) {
+  const stageUserIds = new Set([
+    live.hostId,
+    ...live.guests.filter((guest) => guest.status === 'LIVE').map((guest) => guest.userId),
+  ]);
+  const viewers = records
+    .filter((viewer) => !stageUserIds.has(viewer.userId))
+    .map((viewer) => ({
+      userId: viewer.userId,
+      isMuted: live.mutedUserIds.includes(viewer.userId),
+      isBlocked: live.blockedUserIds.includes(viewer.userId),
+      joinedAt: viewer.lastSeenAt.toISOString(),
+    }));
+  return { viewers, viewerCount: viewers.length };
+}
+
+async function getActiveLiveViewerRecords(liveId: string) {
+  return prisma.liveBroadcastViewer.findMany({
+    where: { liveId, connectedAt: { not: null }, lastSeenAt: { gte: new Date(Date.now() - 60_000) } },
+    select: { userId: true, lastSeenAt: true },
+  });
+}
+
 async function loadLiveSession(liveId: string) {
-  const inMemory = getLiveSession(liveId);
-  if (inMemory) return inMemory;
-  if (!(await isDatabaseAvailable())) return null;
-  const record = await prisma.liveBroadcast.findUnique({ where: { id: liveId } });
-  return record ? liveSessionFromRecord(record) : null;
+  if (await isDatabaseAvailable()) {
+    const record = await prisma.liveBroadcast.findUnique({
+      where: { id: liveId },
+      include: { viewers: { where: { connectedAt: { not: null }, lastSeenAt: { gte: new Date(Date.now() - 60_000) } } } },
+    });
+    if (!record) return null;
+    const [comments, reactions] = await Promise.all([
+      prisma.liveBroadcastComment.findMany({
+        where: { liveId },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      }),
+      prisma.liveBroadcastReaction.findMany({
+        where: { liveId },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+    ]);
+    return restoreLiveSession(liveSessionFromRecord({ ...record, comments, reactions }));
+  }
+  return getLiveSession(liveId);
 }
 
 async function clearLiveReplayFromSession(liveId: string) {
@@ -172,16 +343,45 @@ async function clearLiveReplayFromSession(liveId: string) {
     recordingUrl: null,
   };
   const next = updateLiveSession(liveId, (session) => ({ ...session, ...updated }));
-  await persistLiveSession(next ?? updated);
+  const current = next ?? updated;
+  await persistLiveSession(current);
+  await publishLiveFeedPost(current);
+  await emitLiveFeedUpdate(current);
 }
 
 async function canInteractWithLive(live: NonNullable<ReturnType<typeof getLiveSession>>, userId: string) {
-  if (canManageLive(live, userId)) return !(await isBlocked(userId, live.hostId));
-  if (live.visibility === 'private' || !live.viewers.some((viewer) => viewer.userId === userId && !viewer.isBlocked)) return false;
-  return !(await isBlocked(userId, live.hostId));
+  if (!(await canViewLive(live, userId))) return false;
+  if (canManageLive(live, userId)) return true;
+  return !live.mutedUserIds.includes(userId)
+    && live.viewers.some((viewer) => viewer.userId === userId && !viewer.isBlocked && !viewer.isMuted);
 }
 
-async function presentLive(live: NonNullable<ReturnType<typeof getLiveSession>>) {
+async function recordLiveModeration(liveId: string, actorId: string, actionType: string, targetUserId?: string, details?: string) {
+  const auditDetails = JSON.stringify({ liveId, ...(details ? { details } : {}) });
+  if (await isDatabaseAvailable()) {
+    await prisma.adminAction.create({
+      data: { actorId, actionType, details: auditDetails, ...(targetUserId ? { targetUserId } : {}) },
+    });
+    return;
+  }
+  fallbackStore.createAdminAction({ actorId, actionType, details: auditDetails, ...(targetUserId ? { targetUserId } : {}) });
+}
+
+function liveForAudience(live: NonNullable<ReturnType<typeof getLiveSession>>, userId: string) {
+  const isManager = canManageLive(live, userId);
+  return {
+    ...live,
+    moderators: isManager ? live.moderators : [],
+    blockedUserIds: isManager ? live.blockedUserIds : [],
+    mutedUserIds: isManager ? live.mutedUserIds : [],
+    viewers: isManager ? live.viewers : [],
+    guests: isManager
+      ? live.guests
+      : live.guests.filter((guest) => guest.status === 'LIVE' || guest.userId === userId),
+  };
+}
+
+async function presentLive(live: NonNullable<ReturnType<typeof getLiveSession>>, userId: string) {
   const databaseAvailable = await isDatabaseAvailable();
   const host = await (databaseAvailable
     ? prisma.user.findUnique({ where: { id: live.hostId }, select: { name: true, profile: { select: { avatarUrl: true } } } })
@@ -194,7 +394,7 @@ async function presentLive(live: NonNullable<ReturnType<typeof getLiveSession>>)
     })).reverse().map((comment) => ({ id: comment.id, userId: comment.userId, text: comment.text, createdAt: comment.createdAt.toISOString() }))
     : live.comments;
   return {
-    ...live,
+    ...liveForAudience(live, userId),
     comments,
     host: host ? { name: host.name, avatar: 'profile' in host ? host.profile?.avatarUrl ?? null : null } : null,
   };
@@ -253,6 +453,54 @@ async function notifyLiveAudience(liveId: string, hostId: string, hostName: stri
     `${hostName} is live now: ${title}`,
     { link: `/live?live=${encodeURIComponent(liveId)}`, dedupeKey: `live_started:${liveId}:${recipientId}` },
   )));
+}
+
+async function liveFeedAudienceUserIds(live: NonNullable<ReturnType<typeof getLiveSession>>) {
+  if (live.visibility === 'private') return [live.hostId];
+  if (await isDatabaseAvailable()) {
+    const candidateIds = live.visibility === 'public'
+      ? (await prisma.user.findMany({ where: { status: 'ACTIVE' }, select: { id: true } })).map((user) => user.id)
+      : (await prisma.follow.findMany({ where: { followingId: live.hostId }, select: { followerId: true } }))
+        .map((follow) => follow.followerId);
+    const recipientIds = candidateIds.filter((userId) =>
+      userId !== live.hostId && !live.blockedUserIds.includes(userId),
+    );
+    if (!recipientIds.length) return [live.hostId];
+    const [activeUsers, blocks] = await Promise.all([
+      prisma.user.findMany({ where: { id: { in: recipientIds }, status: 'ACTIVE' }, select: { id: true } }),
+      prisma.block.findMany({
+        where: {
+          OR: [
+            { blockerId: live.hostId, blockedId: { in: recipientIds } },
+            { blockerId: { in: recipientIds }, blockedId: live.hostId },
+          ],
+        },
+        select: { blockerId: true, blockedId: true },
+      }),
+    ]);
+    const blockedIds = new Set(blocks.map((block) => block.blockerId === live.hostId ? block.blockedId : block.blockerId));
+    return [live.hostId, ...activeUsers.map((user) => user.id).filter((userId) => !blockedIds.has(userId))];
+  }
+  const candidateIds = live.visibility === 'public'
+    ? fallbackStore.list().map((user) => user.id)
+    : socialStore.state.follows
+      .filter((follow) => follow.followingId === live.hostId)
+      .map((follow) => follow.followerId);
+  const followers = candidateIds
+    .filter((userId) => userId !== live.hostId && !live.blockedUserIds.includes(userId))
+    .filter((userId) => findUserById(userId)?.status === 'ACTIVE')
+    .filter((userId) => !socialStore.state.blocks.some((block) =>
+      (block.blockerId === live.hostId && block.blockedId === userId)
+      || (block.blockerId === userId && block.blockedId === live.hostId),
+    ));
+  return [live.hostId, ...followers];
+}
+
+async function emitLiveFeedUpdate(live: NonNullable<ReturnType<typeof getLiveSession>>) {
+  realtimeHub.emit('live:feed:update', {
+    live: { id: live.id },
+    allowedUserIds: await liveFeedAudienceUserIds(live),
+  });
 }
 
 command2aRouter.get('/notifications', requireAuth, async (req, res) => {
@@ -544,6 +792,13 @@ command2aRouter.post('/calls/:id/speaker', requireAuth, async (req, res) => {
 
 command2aRouter.post('/live/create', requireAuth, async (req, res) => {
   const payload = liveCreateSchema.parse(req.body ?? {});
+  const moderation = reviewContentForSafety({
+    type: 'post',
+    text: [payload.title, payload.description].filter(Boolean).join('\n\n'),
+    userId: req.user!.id,
+  });
+  if (moderation === 'REMOVE') return res.status(400).json({ message: 'This live title or description violates NOVA Community & Safety Rules.' });
+  if (moderation === 'REVIEW') return res.status(422).json({ message: 'This live title or description requires moderator review.' });
   const live = createLiveSession(req.user!.id, payload);
   await persistLiveSession(live);
   return res.status(201).json({ live, message: 'Live session created. Start broadcasting to publish through LiveKit.' });
@@ -551,26 +806,35 @@ command2aRouter.post('/live/create', requireAuth, async (req, res) => {
 
 command2aRouter.get('/live', requireAuth, async (req, res) => {
   const cutoff = Date.now() - 60_000;
-  const liveById = new Map(listLiveSessions().map((live) => {
-    if (live.status !== 'live') return live;
-    const viewers = live.viewers.filter((viewer) => new Date(viewer.joinedAt).getTime() >= cutoff);
-    if (viewers.length === live.viewers.length) return live;
-    return updateLiveSession(live.id, (session) => ({ ...session, viewers, viewerCount: viewers.length })) ?? live;
-  }).filter((live) => live.visibility === 'public' || canManageLive(live, req.user!.id) || live.viewers.some((viewer) => viewer.userId === req.user!.id)).map((live) => [live.id, live] as const));
+  const liveById = new Map<string, NonNullable<ReturnType<typeof getLiveSession>>>();
   if (await isDatabaseAvailable()) {
     const persisted = await prisma.liveBroadcast.findMany({
-      where: { OR: [{ visibility: 'public' }, { hostId: req.user!.id }] },
+      where: { OR: [{ visibility: 'public' }, { visibility: 'followers' }, { hostId: req.user!.id }, { moderators: { has: req.user!.id } }] },
+      include: { viewers: { where: { connectedAt: { not: null }, lastSeenAt: { gte: new Date(cutoff) } } } },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
     for (const record of persisted) {
-      if (!liveById.has(record.id)) liveById.set(record.id, liveSessionFromRecord(record));
+      const live = restoreLiveSession(liveSessionFromRecord(record));
+      liveById.set(record.id, live);
+    }
+  } else {
+    for (const live of listLiveSessions()) {
+      if (live.status !== 'live') {
+        liveById.set(live.id, live);
+        continue;
+      }
+      const viewers = live.viewers.filter((viewer) => new Date(viewer.joinedAt).getTime() >= cutoff);
+      liveById.set(live.id, updateLiveSession(live.id, (session) => ({ ...session, viewers, viewerCount: viewers.length })) ?? live);
     }
   }
-  const lives = [...liveById.values()]
+  const visibleLives = await Promise.all([...liveById.values()].map(async (live) =>
+    await canViewLive(live, req.user!.id) ? live : null,
+  ));
+  const lives = visibleLives.filter((live): live is NonNullable<typeof live> => live !== null)
     .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
     .slice(0, 100);
-  return res.json({ lives: await Promise.all(lives.map(presentLive)) });
+  return res.json({ lives: await Promise.all(lives.map((live) => presentLive(live, req.user!.id))) });
 });
 
 command2aRouter.get('/live/replays', requireAuth, async (req, res) => {
@@ -584,31 +848,25 @@ command2aRouter.get('/live/replays', requireAuth, async (req, res) => {
 });
 
 command2aRouter.get('/live/:id', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) {
     return res.status(404).json({ message: 'Live session not found.' });
   }
-  if (live.visibility === 'private' && !canManageLive(live, req.user!.id) && !live.viewers.some((viewer) => viewer.userId === req.user!.id)) {
+  if (!(await canViewLive(live, req.user!.id))) {
     return res.status(404).json({ message: 'Live session not found.' });
   }
-  return res.json({ live: await presentLive(live) });
+  return res.json({ live: await presentLive(live, req.user!.id) });
 });
 
 command2aRouter.post('/live/:id/start', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the host can start this live session.' });
   if (!isLiveKitConfigured()) return res.status(503).json({ message: 'Live broadcasts are unavailable because LiveKit is not configured.' });
   if (live.status === 'live') {
-    let notificationWarning = false;
-    if (live.visibility === 'public') {
-      try {
-        await notifyLiveAudience(live.id, live.hostId, req.user!.name, live.title);
-      } catch {
-        notificationWarning = true;
-      }
-    }
-    return res.json({ live, message: 'Live session is already running.', notificationWarning });
+    await publishLiveFeedPost(live);
+    await emitLiveFeedUpdate(live);
+    return res.json({ live, message: 'Live session is already running.' });
   }
   if (live.status !== 'paused' || startingLiveIds.has(live.id)) return res.status(409).json({ message: 'This live session cannot be started in its current state.' });
   startingLiveIds.add(live.id);
@@ -624,19 +882,32 @@ command2aRouter.post('/live/:id/start', requireAuth, async (req, res) => {
     if (!publishedSources.has(TrackSource.CAMERA) || !publishedSources.has(TrackSource.MICROPHONE)) {
       return res.status(409).json({ message: 'The host camera and microphone must be published before starting the live session.' });
     }
+    if (await isDatabaseAvailable()) {
+      const claimed = await prisma.liveBroadcast.updateMany({
+        where: { id: live.id, hostId: live.hostId, status: 'paused' },
+        data: { status: 'live' },
+      });
+      if (claimed.count === 0) {
+        const latest = await loadLiveSession(live.id);
+        if (latest?.status !== 'live') return res.status(409).json({ message: 'This live session cannot be started in its current state.' });
+        await publishLiveFeedPost(latest);
+        return res.json({ live: latest, message: 'Live session is already running.' });
+      }
+    }
     const latest = getLiveSession(live.id);
     if (!latest || latest.status !== 'paused') return res.status(409).json({ message: 'This live session cannot be started in its current state.' });
     const startedLive = { ...latest, status: 'live' as const, viewerCount: Math.max(0, latest.viewerCount) };
-    await persistLiveSession(startedLive);
+    await publishLiveFeedPost(startedLive);
     const next = updateLiveSession(live.id, (session) => ({ ...session, status: 'live', viewerCount: Math.max(0, session.viewerCount) }));
     let notificationWarning = false;
-    if (next?.visibility === 'public') {
+    if (next?.visibility === 'public' || next?.visibility === 'followers') {
       try {
         await notifyLiveAudience(next.id, next.hostId, req.user!.name, next.title);
       } catch {
         notificationWarning = true;
       }
     }
+    if (next) await emitLiveFeedUpdate(next);
     return res.json({ live: next, message: 'Live session started.', notificationWarning });
   } finally {
     startingLiveIds.delete(live.id);
@@ -644,30 +915,38 @@ command2aRouter.post('/live/:id/start', requireAuth, async (req, res) => {
 });
 
 command2aRouter.post('/live/:id/token', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!isLiveKitConfigured()) return res.status(503).json({ message: 'Live broadcasts are unavailable because LiveKit is not configured.' });
   const userId = req.user!.id;
   const isHost = live.hostId === userId;
+  const guest = live.guests.find((entry) => entry.userId === userId && entry.status === 'LIVE');
+  const canPublish = isHost || Boolean(guest);
   if (isHost) {
     if (live.status !== 'paused' && live.status !== 'live') return res.status(409).json({ message: 'This live session is no longer active.' });
   } else {
     const viewer = live.viewers.find((entry) => entry.userId === userId && !entry.isBlocked);
-    if (live.status !== 'live' || !viewer) return res.status(403).json({ message: 'Join this live session before requesting media access.' });
-    if (live.visibility === 'private' && !canManageLive(live, userId)) {
-      return res.status(403).json({ message: 'This live session is private.' });
+    const pendingJoin = !guest && !viewer && await isDatabaseAvailable()
+      ? await prisma.liveBroadcastViewer.findFirst({
+        where: { liveId: live.id, userId, lastSeenAt: { gte: new Date(Date.now() - 60_000) } },
+        select: { userId: true },
+      })
+      : null;
+    if (live.status !== 'live' || (!guest && !viewer && !pendingJoin)) return res.status(403).json({ message: 'Join this live session before requesting media access.' });
+    if (!(await canViewLive(live, userId))) return res.status(403).json({ message: 'You do not have permission to watch this live session.' });
+    if (canPublish && (viewer?.isMuted || live.mutedUserIds.includes(userId))) {
+      return res.status(403).json({ message: 'Muted participants cannot publish to this live session.' });
     }
-    if (await isBlocked(userId, live.hostId)) return res.status(403).json({ message: 'You cannot join this live session.' });
   }
   const room = liveRoomName(live.id);
   const token = await createLiveKitToken({
     identity: userId,
     name: req.user!.name,
     room,
-    canPublish: isHost,
-    ...(isHost ? { canPublishSources: [TrackSource.MICROPHONE, TrackSource.CAMERA] } : {}),
+    canPublish,
+    ...(canPublish ? { canPublishSources: [TrackSource.MICROPHONE, TrackSource.CAMERA] } : {}),
   });
-  return res.set('Cache-Control', 'no-store').json({ token, url: liveKitUrl(), room, role: isHost ? 'host' : 'viewer' });
+  return res.set('Cache-Control', 'no-store').json({ token, url: liveKitUrl(), room, role: isHost ? 'host' : guest ? 'guest' : 'viewer' });
 });
 
 command2aRouter.post('/live/:id/end', requireAuth, async (req, res) => {
@@ -682,9 +961,14 @@ command2aRouter.post('/live/:id/end', requireAuth, async (req, res) => {
       return res.status(503).json({ message: 'LiveKit could not stop this broadcast. The session remains active; retry ending it.' });
     }
   }
+  if (await isDatabaseAvailable()) {
+    await prisma.liveBroadcastViewer.deleteMany({ where: { liveId: live.id } });
+  }
   const endedLive = { ...live, status: 'ended' as const, viewers: [], viewerCount: 0 };
   const persisted = await persistLiveSession(endedLive, new Date());
   const next = updateLiveSession(live.id, (session) => ({ ...session, status: 'ended', viewers: [], viewerCount: 0 })) ?? endedLive;
+  await publishLiveFeedPost(next);
+  await emitLiveFeedUpdate(next);
   return res.json({ live: next, message: 'Live session ended.', persistenceWarning: !persisted });
 });
 
@@ -710,6 +994,8 @@ command2aRouter.post('/live/:id/replay', requireAuth, async (req, res) => {
       const replayReadyLive = { ...live, recordingStatus: 'READY' as const, replayUrl: existing.mediaUrl, recordingUrl: existing.mediaUrl };
       const next = updateLiveSession(live.id, (session) => ({ ...session, ...replayReadyLive }));
       await persistLiveSession(next ?? replayReadyLive);
+      await publishLiveFeedPost(next ?? replayReadyLive);
+      await emitLiveFeedUpdate(next ?? replayReadyLive);
       return res.json({ replay: existing, live: next ?? replayReadyLive, duplicate: true });
     }
     return res.status(409).json({ message: 'A replay has already been saved for this broadcast.' });
@@ -738,6 +1024,8 @@ command2aRouter.post('/live/:id/replay', requireAuth, async (req, res) => {
   const next = updateLiveSession(live.id, (session) => ({ ...session, recordingStatus: 'READY', replayUrl: replay.mediaUrl, recordingUrl: replay.mediaUrl }));
   const replayReadyLive = next ?? { ...live, recordingStatus: 'READY' as const, replayUrl: replay.mediaUrl, recordingUrl: replay.mediaUrl };
   await persistLiveSession(replayReadyLive);
+  await publishLiveFeedPost(replayReadyLive);
+  await emitLiveFeedUpdate(replayReadyLive);
   return res.status(201).json({ replay, live: replayReadyLive });
 });
 
@@ -771,15 +1059,24 @@ command2aRouter.post('/live/:id/replay/publish', requireAuth, async (req, res) =
       if (!current || current.status !== 'READY' || !isLiveReplayOwner(current, req.user!.id)) {
         throw new Error('Replay is no longer available for publishing.');
       }
-      const post = await transaction.post.create({
-        data: {
-          authorId: req.user!.id,
-          content,
-          imageUrl: current.mediaUrl,
-          visibility: parsed.data.visibility,
-          sourceLiveReplayId: current.id,
-        },
-      });
+      const livePost = await transaction.post.findUnique({ where: { sourceLiveBroadcastId: current.id } });
+      if (livePost && livePost.authorId !== req.user!.id) {
+        throw new Error('The linked live post is not owned by the replay creator.');
+      }
+      const post = livePost
+        ? await transaction.post.update({
+          where: { id: livePost.id },
+          data: { imageUrl: current.mediaUrl },
+        })
+        : await transaction.post.create({
+          data: {
+            authorId: req.user!.id,
+            content,
+            imageUrl: current.mediaUrl,
+            visibility: parsed.data.visibility,
+            sourceLiveReplayId: current.id,
+          },
+        });
       const published = await transaction.liveReplay.update({
         where: { id: current.id },
         data: { status: 'PUBLISHED', publishedPostId: post.id },
@@ -810,18 +1107,23 @@ command2aRouter.delete('/live/:id/replay', requireAuth, async (req, res) => {
   }
   if (!['READY', 'DELETING'].includes(replay.status)) return res.status(409).json({ message: 'Only an unpublished replay can be deleted.' });
   const key = videoMediaKeyFromUrl(replay.mediaUrl);
-  if (!key || !(await uploadedVideoBelongsTo(replay.mediaUrl, req.user!.id, process.env.NODE_ENV ?? 'development'))) {
+  if (!key) {
+    return res.status(409).json({ message: 'The replay media could not be verified for safe deletion.' });
+  }
+  const storage = getMediaStorage(process.env.NODE_ENV ?? 'development');
+  const metadata = await storage.getMetadata(key);
+  if (!canDeleteLiveReplayMedia(replay.status, metadata, req.user!.id)) {
     return res.status(409).json({ message: 'The replay media could not be verified for safe deletion.' });
   }
   await prisma.liveReplay.update({ where: { id: replay.id }, data: { status: 'DELETING' } });
-  await getMediaStorage(process.env.NODE_ENV ?? 'development').delete(key);
+  if (metadata) await storage.delete(key);
   const deleted = await prisma.liveReplay.update({ where: { id: replay.id }, data: { status: 'DELETED' } });
   await clearLiveReplayFromSession(replay.id);
   return res.json({ deleted: true, replay: deleted });
 });
 
 command2aRouter.post('/live/:id/comment', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'Comments are available while the live session is running.' });
   if (!(await canInteractWithLive(live, req.user!.id))) return res.status(403).json({ message: 'Join this live session and meet its audience permissions to comment.' });
@@ -837,11 +1139,11 @@ command2aRouter.post('/live/:id/comment', requireAuth, async (req, res) => {
     ...session,
     comments: [...session.comments, liveComment],
   }));
-  return res.status(201).json({ comment: liveComment, live: next && await presentLive(next) });
+  return res.status(201).json({ comment: liveComment, live: next && await presentLive(next, req.user!.id) });
 });
 
 command2aRouter.post('/live/:id/react', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'Reactions are available while the live session is running.' });
   if (!(await canInteractWithLive(live, req.user!.id))) return res.status(403).json({ message: 'Join this live session and meet its audience permissions to react.' });
@@ -877,12 +1179,24 @@ command2aRouter.post('/live/:id/react', requireAuth, async (req, res) => {
 });
 
 command2aRouter.post('/live/:id/viewer/:userId/remove', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) {
     return res.status(403).json({ message: 'Only the host or moderator can remove viewers.' });
   }
   const viewerId = String(req.params.userId);
+  if (!live.viewers.some((viewer) => viewer.userId === viewerId)) return res.status(404).json({ message: 'Viewer not found.' });
+  if (isLiveKitConfigured()) {
+    try {
+      await removeLiveKitParticipant(liveRoomName(live.id), viewerId);
+    } catch {
+      return res.status(503).json({ message: 'LiveKit could not remove this viewer from the broadcast. The viewer was not removed; retry the action.' });
+    }
+  }
+  if (await isDatabaseAvailable()) {
+    await prisma.liveBroadcastViewer.deleteMany({ where: { liveId: live.id, userId: viewerId } });
+  }
+  await recordLiveModeration(live.id, req.user!.id, 'LIVE_VIEWER_REMOVED', viewerId);
   const next = updateLiveSession(live.id, (session) => ({
     ...session,
     viewers: session.viewers.filter((viewer) => viewer.userId !== viewerId),
@@ -892,134 +1206,246 @@ command2aRouter.post('/live/:id/viewer/:userId/remove', requireAuth, async (req,
 });
 
 command2aRouter.post('/live/:id/viewer/:userId/mute', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can mute viewers.' });
   const userId = String(req.params.userId);
   const payload = liveViewerControlSchema.parse(req.body ?? {});
   if (!live.viewers.some((viewer) => viewer.userId === userId)) return res.status(404).json({ message: 'Viewer not found.' });
-  const next = updateLiveSession(live.id, (session) => ({ ...session, viewers: session.viewers.map((viewer) => viewer.userId === userId ? { ...viewer, isMuted: payload.isMuted } : viewer) }));
+  await recordLiveModeration(live.id, req.user!.id, payload.isMuted ? 'LIVE_VIEWER_MUTED' : 'LIVE_VIEWER_UNMUTED', userId);
+  const next = updateLiveSession(live.id, (session) => ({
+    ...session,
+    mutedUserIds: payload.isMuted
+      ? Array.from(new Set([...session.mutedUserIds, userId]))
+      : session.mutedUserIds.filter((mutedUserId) => mutedUserId !== userId),
+    viewers: session.viewers.map((viewer) => viewer.userId === userId ? { ...viewer, isMuted: payload.isMuted } : viewer),
+  }));
+  if (next) await persistLiveSession(next);
   return res.json({ live: next, viewer: next?.viewers.find((viewer) => viewer.userId === userId) });
 });
 
 command2aRouter.post('/live/:id/comments/:commentId/remove', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can remove comments.' });
   const commentId = String(req.params.commentId);
-  if (!live.comments.some((comment) => comment.id === commentId)) return res.status(404).json({ message: 'Comment not found.' });
+  const existingComment = live.comments.find((comment) => comment.id === commentId);
+  const databaseAvailable = await isDatabaseAvailable();
+  if (!existingComment && !databaseAvailable) return res.status(404).json({ message: 'Comment not found.' });
+  if (databaseAvailable) {
+    const removed = await prisma.liveBroadcastComment.deleteMany({ where: { id: commentId, liveId: live.id } });
+    if (!existingComment && removed.count === 0) return res.status(404).json({ message: 'Comment not found.' });
+  }
+  await recordLiveModeration(live.id, req.user!.id, 'LIVE_COMMENT_REMOVED', existingComment?.userId, commentId);
   const next = updateLiveSession(live.id, (session) => ({ ...session, comments: session.comments.filter((comment) => comment.id !== commentId) }));
+  if (next) next.comments = next.comments.filter((comment) => comment.id !== commentId);
   return res.json({ live: next, removed: commentId });
 });
 
 command2aRouter.post('/live/:id/moderators/:userId/add', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the host can assign moderators.' });
+  const userId = String(req.params.userId);
+  if (userId === live.hostId) return res.status(400).json({ message: 'The host is already a session moderator.' });
+  await recordLiveModeration(live.id, req.user!.id, 'LIVE_MODERATOR_ADDED', userId);
   const next = updateLiveSession(live.id, (session) => ({
     ...session,
-    moderators: Array.from(new Set([...session.moderators, String(req.params.userId)])),
+    moderators: Array.from(new Set([...session.moderators, userId])),
   }));
+  if (next) await persistLiveSession(next);
   return res.json({ live: next, message: 'Moderator added.' });
 });
 
 command2aRouter.post('/live/:id/moderators/:userId/remove', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the host can remove moderators.' });
   const userId = String(req.params.userId);
+  await recordLiveModeration(live.id, req.user!.id, 'LIVE_MODERATOR_REMOVED', userId);
   const next = updateLiveSession(live.id, (session) => ({ ...session, moderators: session.moderators.filter((moderatorId) => moderatorId !== userId) }));
+  if (next) await persistLiveSession(next);
   return res.json({ live: next, message: 'Moderator removed.' });
 });
 
 command2aRouter.post('/live/:id/viewers/join', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'This live session is not running.' });
-  if (live.visibility === 'private' && !canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'This live session is private.' });
-  if (await isBlocked(req.user!.id, live.hostId)) return res.status(403).json({ message: 'You cannot join this live session.' });
+  if (!isLiveKitConfigured()) return res.status(503).json({ message: 'LiveKit is unavailable for this broadcast.' });
+  if (!(await canViewLive(live, req.user!.id))) return res.status(403).json({ message: 'You do not have permission to watch this live session.' });
+  const cutoff = Date.now() - 60_000;
   const existing = live.viewers.find((viewer) => viewer.userId === req.user!.id);
-  const viewer = { ...(existing ?? { userId: req.user!.id, isMuted: false, isBlocked: false }), joinedAt: new Date().toISOString() };
-  const next = updateLiveSession(live.id, (session) => ({
-    ...session,
-    viewers: [...session.viewers.filter((entry) => entry.userId !== viewer.userId), viewer],
-    viewerCount: new Set([...session.viewers.map((entry) => entry.userId), viewer.userId]).size,
-  }));
-  if (existing) return res.json({ viewer, live: next });
+  const joinedAt = new Date();
+  let next;
+  let viewer: LiveViewer;
+  if (await isDatabaseAvailable()) {
+    const key = { liveId_userId: { liveId: live.id, userId: req.user!.id } };
+    const record = await prisma.liveBroadcastViewer.upsert({
+      where: key,
+      create: {
+        liveId: live.id,
+        userId: req.user!.id,
+        joinedAt,
+        lastSeenAt: joinedAt,
+        connectedAt: null,
+      },
+      update: { lastSeenAt: joinedAt, connectedAt: null },
+    });
+    const snapshot = liveViewerSnapshot(live, await getActiveLiveViewerRecords(live.id));
+    viewer = snapshot.viewers.find((entry) => entry.userId === req.user!.id) ?? {
+      userId: req.user!.id,
+      isMuted: live.mutedUserIds.includes(req.user!.id),
+      isBlocked: false,
+      joinedAt: record.lastSeenAt.toISOString(),
+    };
+    next = updateLiveSession(live.id, (session) => ({ ...session, ...snapshot }));
+  } else {
+    const activeViewers = live.viewers.filter((entry) => new Date(entry.joinedAt).getTime() >= cutoff);
+    viewer = {
+      ...(existing ?? { userId: req.user!.id, isMuted: live.mutedUserIds.includes(req.user!.id), isBlocked: false }),
+      joinedAt: joinedAt.toISOString(),
+    };
+    next = updateLiveSession(live.id, (session) => ({
+      ...session,
+      viewers: [...activeViewers.filter((entry) => entry.userId !== viewer.userId), viewer],
+      viewerCount: new Set([...activeViewers.map((entry) => entry.userId), viewer.userId]).size,
+    }));
+  }
+  if (existing) return res.json({ viewer, live: next && liveForAudience(next, req.user!.id) });
   await createNotification(live.hostId, req.user!.id, 'live_viewer', `${req.user!.name} joined your live session.`);
-  return res.status(201).json({ viewer, live: next });
+  return res.status(201).json({ viewer, live: next && liveForAudience(next, req.user!.id) });
 });
 
 command2aRouter.post('/live/:id/viewers/heartbeat', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'This live session is not running.' });
   const viewer = live.viewers.find((entry) => entry.userId === req.user!.id && !entry.isBlocked);
-  if (!viewer) return res.status(409).json({ message: 'Join this live session again to continue watching.' });
-  if (await isBlocked(req.user!.id, live.hostId)) return res.status(403).json({ message: 'You cannot watch this live session.' });
-  const updatedViewer = { ...viewer, joinedAt: new Date().toISOString() };
-  const next = updateLiveSession(live.id, (session) => ({
-    ...session,
-    viewers: session.viewers.map((entry) => entry.userId === req.user!.id ? updatedViewer : entry),
-    viewerCount: session.viewers.length,
-  }));
-  return res.json({ live: next });
+  const pendingJoin = !viewer && await isDatabaseAvailable()
+    ? await prisma.liveBroadcastViewer.findFirst({
+      where: { liveId: live.id, userId: req.user!.id, lastSeenAt: { gte: new Date(Date.now() - 60_000) } },
+      select: { userId: true },
+    })
+    : null;
+  if (!viewer && !pendingJoin) return res.status(409).json({ message: 'Join this live session again to continue watching.' });
+  if (!(await canViewLive(live, req.user!.id))) return res.status(403).json({ message: 'You cannot watch this live session.' });
+  if (!isLiveKitConfigured()) return res.status(503).json({ message: 'LiveKit is unavailable for this broadcast.' });
+  let liveKitParticipants: Awaited<ReturnType<typeof getLiveKitParticipants>>;
+  try {
+    liveKitParticipants = await getLiveKitParticipants(liveRoomName(live.id));
+  } catch {
+    return res.status(503).json({ message: 'LiveKit could not verify the viewer media connection.' });
+  }
+  if (!liveKitParticipants.some((participant) => participant.identity === req.user!.id)) {
+    return res.status(409).json({ message: 'Connect to the live broadcast before updating viewer presence.' });
+  }
+  const lastSeenAt = new Date();
+  let next;
+  if (await isDatabaseAvailable()) {
+    await prisma.liveBroadcastViewer.updateMany({
+      where: { liveId: live.id, userId: req.user!.id, connectedAt: null },
+      data: { connectedAt: lastSeenAt },
+    });
+    const result = await prisma.liveBroadcastViewer.updateMany({
+      where: { liveId: live.id, userId: req.user!.id },
+      data: { lastSeenAt },
+    });
+    if (result.count === 0) return res.status(409).json({ message: 'Join this live session again to continue watching.' });
+    const snapshot = liveViewerSnapshot(live, await getActiveLiveViewerRecords(live.id));
+    next = updateLiveSession(live.id, (session) => ({ ...session, ...snapshot }));
+  } else {
+    if (!viewer) return res.status(409).json({ message: 'Join this live session again to continue watching.' });
+    const cutoff = Date.now() - 60_000;
+    const updatedViewer = { ...viewer, joinedAt: lastSeenAt.toISOString() };
+    next = updateLiveSession(live.id, (session) => ({
+      ...session,
+      viewers: session.viewers.filter((entry) => entry.userId === req.user!.id || new Date(entry.joinedAt).getTime() >= cutoff)
+        .map((entry) => entry.userId === req.user!.id ? updatedViewer : entry),
+      viewerCount: session.viewers.filter((entry) => entry.userId === req.user!.id || new Date(entry.joinedAt).getTime() >= cutoff).length,
+    }));
+  }
+  return res.json({ live: next && liveForAudience(next, req.user!.id) });
 });
 
 command2aRouter.post('/live/:id/viewers/leave', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
-  const wasViewer = live.viewers.some((viewer) => viewer.userId === req.user!.id);
-  const next = updateLiveSession(live.id, (session) => ({
-    ...session,
-    viewers: session.viewers.filter((viewer) => viewer.userId !== req.user!.id),
-    viewerCount: wasViewer ? Math.max(0, session.viewerCount - 1) : session.viewerCount,
-  }));
-  return res.json({ left: wasViewer, live: next });
+  let wasViewer = live.viewers.some((viewer) => viewer.userId === req.user!.id);
+  let next;
+  if (await isDatabaseAvailable()) {
+    const deleted = await prisma.liveBroadcastViewer.deleteMany({ where: { liveId: live.id, userId: req.user!.id } });
+    wasViewer = deleted.count > 0;
+    const snapshot = liveViewerSnapshot(live, await getActiveLiveViewerRecords(live.id));
+    next = updateLiveSession(live.id, (session) => ({ ...session, ...snapshot }));
+  } else {
+    next = updateLiveSession(live.id, (session) => ({
+      ...session,
+      viewers: session.viewers.filter((viewer) => viewer.userId !== req.user!.id),
+      viewerCount: wasViewer ? Math.max(0, session.viewerCount - 1) : session.viewerCount,
+    }));
+  }
+  return res.json({ left: wasViewer, live: next && liveForAudience(next, req.user!.id) });
 });
 
 command2aRouter.post('/live/:id/guests/request', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'Guest requests are available while the live session is running.' });
   if (live.hostId === req.user!.id) return res.status(400).json({ message: 'The host is already on stage.' });
-  if (await isBlocked(req.user!.id, live.hostId)) return res.status(403).json({ message: 'You cannot request to join this live session.' });
+  if (!(await canViewLive(live, req.user!.id))) return res.status(403).json({ message: 'You do not have permission to request a guest spot.' });
   const payload = liveGuestSchema.parse(req.body ?? {});
   if (live.guests.some((guest) => guest.userId === req.user!.id && guest.status !== 'REMOVED')) return res.status(409).json({ message: 'A guest request already exists.' });
   const guest = { userId: req.user!.id, role: payload.role, status: 'REQUESTED' as const, requestedAt: new Date().toISOString() };
   const next = updateLiveSession(live.id, (session) => ({ ...session, guests: [...session.guests.filter((entry) => entry.userId !== req.user!.id), guest] }));
+  if (next) await persistLiveSession(next);
   await createNotification(live.hostId, req.user!.id, 'live_guest_request', `${req.user!.name} requested to join your live session.`);
-  return res.status(201).json({ guest, live: next });
+  return res.status(201).json({ guest, live: next && liveForAudience(next, req.user!.id) });
 });
 
 command2aRouter.post('/live/:id/guests/:userId/approve', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can approve guests.' });
   const userId = String(req.params.userId);
   const requested = live.guests.find((guest) => guest.userId === userId && guest.status === 'REQUESTED');
   if (!requested) return res.status(404).json({ message: 'Guest request not found.' });
+  if (!(await canViewLive(live, userId))) return res.status(403).json({ message: 'This user is no longer eligible to join the broadcast.' });
+  await recordLiveModeration(live.id, req.user!.id, 'LIVE_GUEST_APPROVED', userId);
   const next = updateLiveSession(live.id, (session) => ({
     ...session,
     guests: session.guests.map((guest) => guest.userId === userId ? { ...guest, status: 'LIVE' } : guest),
   }));
+  if (next) await persistLiveSession(next);
   return res.json({ guest: next!.guests.find((guest) => guest.userId === userId), live: next });
 });
 
 command2aRouter.post('/live/:id/guests/:userId/remove', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can remove guests.' });
   const userId = String(req.params.userId);
+  if (isLiveKitConfigured()) {
+    try {
+      await removeLiveKitParticipant(liveRoomName(live.id), userId);
+    } catch {
+      return res.status(503).json({ message: 'LiveKit could not remove this guest from the broadcast. The guest was not removed; retry the action.' });
+    }
+  }
+  if (await isDatabaseAvailable()) {
+    await prisma.liveBroadcastViewer.deleteMany({ where: { liveId: live.id, userId } });
+  }
+  await recordLiveModeration(live.id, req.user!.id, 'LIVE_GUEST_REMOVED', userId);
   const next = updateLiveSession(live.id, (session) => ({
     ...session,
     guests: session.guests.map((guest) => guest.userId === userId ? { ...guest, status: 'REMOVED' } : guest),
   }));
+  if (next) await persistLiveSession(next);
   return res.json({ live: next });
 });
 
 command2aRouter.post('/live/:id/follow', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.hostId === req.user!.id) return res.status(400).json({ message: 'You already own this live session.' });
   if (await isBlocked(req.user!.id, live.hostId)) return res.status(403).json({ message: 'You cannot follow this host.' });
@@ -1034,7 +1460,7 @@ command2aRouter.post('/live/:id/follow', requireAuth, async (req, res) => {
 });
 
 command2aRouter.post('/live/:id/report', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   const payload = liveReportSchema.parse(req.body ?? {});
   const details = `Live report: ${live.title} (${live.id})\n\n${payload.reason}`;
@@ -1048,28 +1474,35 @@ command2aRouter.post('/live/:id/report', requireAuth, async (req, res) => {
 });
 
 command2aRouter.post('/live/:id/block/:userId', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can block viewers.' });
   const userId = String(req.params.userId);
   if (userId === live.hostId) return res.status(400).json({ message: 'The host cannot be blocked from their own session.' });
-  if (await isDatabaseAvailable()) {
-    const existing = await prisma.block.findUnique({ where: { blockerId_blockedId: { blockerId: req.user!.id, blockedId: userId } }, select: { id: true } });
-    if (!existing) await prisma.block.create({ data: { blockerId: req.user!.id, blockedId: userId } });
-  } else if (!socialStore.state.blocks.some((block) => block.blockerId === req.user!.id && block.blockedId === userId)) {
-    socialStore.state.blocks.push({ id: `block_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, blockerId: req.user!.id, blockedId: userId, createdAt: new Date().toISOString() });
+  if (isLiveKitConfigured()) {
+    try {
+      await removeLiveKitParticipant(liveRoomName(live.id), userId);
+    } catch {
+      return res.status(503).json({ message: 'The viewer is blocked, but LiveKit could not end their active broadcast connection. Retry the action.' });
+    }
   }
+  if (await isDatabaseAvailable()) {
+    await prisma.liveBroadcastViewer.deleteMany({ where: { liveId: live.id, userId } });
+  }
+  await recordLiveModeration(live.id, req.user!.id, 'LIVE_VIEWER_BLOCKED', userId);
   const next = updateLiveSession(live.id, (session) => ({
     ...session,
+    blockedUserIds: Array.from(new Set([...session.blockedUserIds, userId])),
     viewers: session.viewers.filter((viewer) => viewer.userId !== userId),
     viewerCount: session.viewers.some((viewer) => viewer.userId === userId) ? Math.max(0, session.viewerCount - 1) : session.viewerCount,
     guests: session.guests.map((guest) => guest.userId === userId ? { ...guest, status: 'REMOVED' } : guest),
   }));
+  if (next) await persistLiveSession(next);
   return res.json({ blocked: true, live: next });
 });
 
 command2aRouter.post('/live/:id/recording/start', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can control recording.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'Recording requires a running live session.' });
@@ -1080,7 +1513,7 @@ command2aRouter.post('/live/:id/recording/start', requireAuth, async (req, res) 
 });
 
 command2aRouter.post('/live/:id/recording/stop', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can control recording.' });
   if (live.recordingStatus !== 'RECORDING') return res.status(409).json({ message: 'No recording is active.' });
@@ -1091,10 +1524,10 @@ command2aRouter.post('/live/:id/recording/stop', requireAuth, async (req, res) =
 });
 
 command2aRouter.post('/live/:id/share', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   await createNotification(live.hostId, req.user!.id, 'live', `${req.user!.name} shared your live session.`);
-  return res.json({ shared: true, live });
+  return res.json({ shared: true, live: liveForAudience(live, req.user!.id) });
 });
 
 function aiUnavailable(_req: Request, res: Response) {

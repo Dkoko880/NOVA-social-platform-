@@ -1,15 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import { TrackSource } from 'livekit-server-sdk';
+import { TokenVerifier, TrackSource } from 'livekit-server-sdk';
 import { app } from '../app.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
-import { getLiveKitParticipants } from '../lib/livekit.js';
-import { clearCommand2AStores } from '../lib/platform.js';
+import { getLiveKitParticipants, removeLiveKitParticipant } from '../lib/livekit.js';
+import { clearCommand2AStores, updateLiveSession } from '../lib/platform.js';
+import { subscribeToUserEvents } from '../lib/realtime.js';
 import { socialStore } from '../lib/socialStore.js';
 
 vi.mock('../lib/livekit.js', async (importOriginal) => {
   const livekit = await importOriginal<typeof import('../lib/livekit.js')>();
-  return { ...livekit, getLiveKitParticipants: vi.fn() };
+  return { ...livekit, getLiveKitParticipants: vi.fn(), removeLiveKitParticipant: vi.fn() };
 });
 
 function getCookieHeader(response: { headers: Record<string, string | string[] | undefined> }) {
@@ -90,12 +91,16 @@ describe('command 2a foundation', () => {
   it('notifies only followers when a public live broadcast starts', async () => {
     const host = await register('LiveHost');
     const follower = await register('LiveFollower');
+    const publicViewer = await register('LivePublicViewer');
     const followedByHostId = 'user-only-followed-by-host';
     const now = new Date().toISOString();
     socialStore.state.follows.push(
       { id: 'follower-to-host', followerId: follower.user.id, followingId: host.user.id, createdAt: now },
       { id: 'host-to-followed', followerId: host.user.id, followingId: followedByHostId, createdAt: now },
     );
+    const feedEvents: Array<{ event?: string; live?: { id: string; viewers?: unknown }; allowedUserIds?: string[] }> = [];
+    const unsubscribe = subscribeToUserEvents(follower.user.id, (event) => { feedEvents.push(event as typeof feedEvents[number]); });
+    const unsubscribePublicViewer = subscribeToUserEvents(publicViewer.user.id, (event) => { feedEvents.push(event as typeof feedEvents[number]); });
     vi.mocked(getLiveKitParticipants).mockResolvedValue([{
       identity: host.user.id,
       tracks: [
@@ -108,10 +113,27 @@ describe('command 2a foundation', () => {
     const started = await request(app).post(`/api/live/${created.body.live.id}/start`).set('Cookie', host.auth);
 
     expect(started.status).toBe(200);
+    expect(feedEvents.some((event) =>
+      event.event === 'live:feed:update'
+      && event.live?.id === created.body.live.id
+      && event.allowedUserIds?.includes(publicViewer.user.id)
+      && event.live !== undefined
+      && !('viewers' in event.live),
+    )).toBe(true);
     const followerNotifications = await request(app).get('/api/notifications').set('Cookie', follower.auth);
     expect(followerNotifications.body.notifications.some((notification: { type: string }) => notification.type === 'live_started')).toBe(true);
     expect(socialStore.state.notifications.filter((notification) => notification.type === 'live_started').map((notification) => notification.recipientId))
       .toEqual([follower.user.id]);
+
+    const followersOnly = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Followers-only notification test', visibility: 'followers' });
+    const followersOnlyStarted = await request(app).post(`/api/live/${followersOnly.body.live.id}/start`).set('Cookie', host.auth);
+
+    expect(followersOnlyStarted.status).toBe(200);
+    expect(socialStore.state.notifications.filter((notification) => notification.type === 'live_started').map((notification) => notification.recipientId))
+      .toEqual([follower.user.id, follower.user.id]);
+    expect(feedEvents.some((event) => event.event === 'live:feed:update' && event.live?.id === followersOnly.body.live.id)).toBe(true);
+    unsubscribe();
+    unsubscribePublicViewer();
   }, 15_000);
 
   it('persists notification category preferences through the API', async () => {
@@ -262,6 +284,117 @@ describe('command 2a foundation', () => {
     expect(live.body.live.provider).toBe('livekit');
     expect(live.body.live.status).toBe('paused');
     expect((await request(app).get('/api/live').set('Cookie', getCookieHeader(aliceLogin))).body.lives).toHaveLength(1);
+  });
+
+  it('enforces follower and private live audience permissions before media access', async () => {
+    const host = await register('AudienceHost');
+    const follower = await register('AudienceFollower');
+    const outsider = await register('AudienceOutsider');
+    socialStore.state.follows.push({
+      id: 'audience-follow',
+      followerId: follower.user.id,
+      followingId: host.user.id,
+      createdAt: new Date().toISOString(),
+    });
+
+    const followerLive = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Followers only', visibility: 'followers' });
+    updateLiveSession(followerLive.body.live.id, (live) => ({ ...live, status: 'live' }));
+    const followerLives = await request(app).get('/api/live').set('Cookie', follower.auth);
+    const outsiderLives = await request(app).get('/api/live').set('Cookie', outsider.auth);
+
+    expect(followerLives.body.lives.map((live: { id: string }) => live.id)).toContain(followerLive.body.live.id);
+    expect(outsiderLives.body.lives.map((live: { id: string }) => live.id)).not.toContain(followerLive.body.live.id);
+    expect((await request(app).get(`/api/live/${followerLive.body.live.id}`).set('Cookie', outsider.auth)).status).toBe(404);
+    expect((await request(app).post(`/api/live/${followerLive.body.live.id}/viewers/join`).set('Cookie', outsider.auth)).status).toBe(403);
+    expect((await request(app).post(`/api/live/${followerLive.body.live.id}/viewers/join`).set('Cookie', follower.auth)).status).toBe(201);
+    expect((await request(app).post(`/api/live/${followerLive.body.live.id}/token`).set('Cookie', follower.auth)).status).toBe(200);
+    expect((await request(app).post(`/api/live/${followerLive.body.live.id}/token`).set('Cookie', outsider.auth)).status).toBe(403);
+
+    const privateLive = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Private session', visibility: 'private' });
+    updateLiveSession(privateLive.body.live.id, (live) => ({ ...live, status: 'live' }));
+    expect((await request(app).get(`/api/live/${privateLive.body.live.id}`).set('Cookie', outsider.auth)).status).toBe(404);
+    expect((await request(app).post(`/api/live/${privateLive.body.live.id}/viewers/join`).set('Cookie', outsider.auth)).status).toBe(403);
+    expect((await request(app).post(`/api/live/${privateLive.body.live.id}/token`).set('Cookie', outsider.auth)).status).toBe(403);
+    expect((await request(app).post(`/api/live/${privateLive.body.live.id}/token`).set('Cookie', host.auth)).status).toBe(200);
+  });
+
+  it('prevents muted viewers from interacting and removes moderated viewers from LiveKit', async () => {
+    const host = await register('ModerationHost');
+    const viewer = await register('ModerationViewer');
+    const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Moderated audience' });
+    const liveId = created.body.live.id;
+    updateLiveSession(liveId, (live) => ({
+      ...live,
+      status: 'live',
+      viewers: [{ userId: viewer.user.id, isMuted: false, isBlocked: false, joinedAt: new Date().toISOString() }],
+      viewerCount: 1,
+    }));
+
+    const muted = await request(app).post(`/api/live/${liveId}/viewer/${viewer.user.id}/mute`).set('Cookie', host.auth).send({ isMuted: true });
+    expect(muted.status).toBe(200);
+    expect((await request(app).post(`/api/live/${liveId}/comment`).set('Cookie', viewer.auth).send({ text: 'Muted comment' })).status).toBe(403);
+    expect((await request(app).post(`/api/live/${liveId}/react`).set('Cookie', viewer.auth).send({ type: 'LIKE' })).status).toBe(403);
+    expect(fallbackStore.listAdminActions().some((action) => action.actionType === 'LIVE_VIEWER_MUTED' && action.targetUserId === viewer.user.id)).toBe(true);
+
+    const removed = await request(app).post(`/api/live/${liveId}/viewer/${viewer.user.id}/remove`).set('Cookie', host.auth);
+    expect(removed.status).toBe(200);
+    expect(vi.mocked(removeLiveKitParticipant)).toHaveBeenCalledWith(`nova-live-${liveId}`, viewer.user.id);
+    expect(removed.body.live.viewers).toHaveLength(0);
+  });
+
+  it('lets an approved guest publish to the live room and denies publish after mute', async () => {
+    const host = await register('GuestStageHost');
+    const guest = await register('GuestStageMember');
+    const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Guest stage' });
+    const liveId = created.body.live.id;
+    updateLiveSession(liveId, (live) => ({ ...live, status: 'live' }));
+
+    expect((await request(app).post(`/api/live/${liveId}/guests/request`).set('Cookie', guest.auth).send({ role: 'COHOST' })).status).toBe(201);
+    const approved = await request(app).post(`/api/live/${liveId}/guests/${guest.user.id}/approve`).set('Cookie', host.auth);
+    expect(approved.status).toBe(200);
+    expect((await request(app).post(`/api/live/${liveId}/viewers/join`).set('Cookie', guest.auth)).status).toBe(201);
+
+    const token = await request(app).post(`/api/live/${liveId}/token`).set('Cookie', guest.auth);
+    expect(token.status).toBe(200);
+    expect(token.body.role).toBe('guest');
+    const claims = await new TokenVerifier('test-livekit-key', 'test-livekit-secret-that-is-only-used-in-tests').verify(token.body.token);
+    expect(claims.video).toMatchObject({
+      roomJoin: true,
+      room: `nova-live-${liveId}`,
+      canPublish: true,
+      canSubscribe: true,
+    });
+
+    await request(app).post(`/api/live/${liveId}/viewer/${guest.user.id}/mute`).set('Cookie', host.auth).send({ isMuted: true });
+    expect((await request(app).post(`/api/live/${liveId}/token`).set('Cookie', guest.auth)).status).toBe(403);
+  });
+
+  it('keeps session blocks out of the public Feed and prevents a blocked viewer rejoining', async () => {
+    const host = await register('LiveBlockHost');
+    const viewer = await register('LiveBlockViewer');
+    const live = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Restricted broadcast' });
+    const liveId = live.body.live.id;
+    updateLiveSession(liveId, (session) => ({
+      ...session,
+      status: 'live',
+      viewers: [{ userId: viewer.user.id, isMuted: false, isBlocked: false, joinedAt: new Date().toISOString() }],
+      viewerCount: 1,
+    }));
+    socialStore.state.posts.push({
+      id: 'blocked-live-post',
+      authorId: host.user.id,
+      content: 'Restricted broadcast',
+      imageUrl: null,
+      visibility: 'PUBLIC',
+      sourceLiveBroadcastId: liveId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    expect((await request(app).post(`/api/live/${liveId}/block/${viewer.user.id}`).set('Cookie', host.auth)).status).toBe(200);
+    expect((await request(app).post(`/api/live/${liveId}/viewers/join`).set('Cookie', viewer.auth)).status).toBe(403);
+    expect((await request(app).get('/api/posts').set('Cookie', viewer.auth)).body.posts).toHaveLength(0);
+    expect(fallbackStore.listAdminActions().some((action) => action.actionType === 'LIVE_VIEWER_BLOCKED')).toBe(true);
   });
 
   it('reports AI assistance unavailable instead of returning fabricated generated content', async () => {

@@ -6,6 +6,7 @@ import env from '../config/env.js';
 import { getMediaStorage, imageFileMediaKeyFromUrl, MediaStorageUnavailableError, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
 import { isDatabaseAvailable, prisma } from '../lib/prisma.js';
 import { socialStore } from '../lib/socialStore.js';
+import { getLiveSession } from '../lib/platform.js';
 import { requireActiveAccountIfAuthenticated, requireAuth } from '../middleware/auth.js';
 
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
@@ -165,12 +166,17 @@ async function canReadAttachment(key: string, ownerUserId: string, viewerId: str
     );
     if (isBlocked) return false;
     const followsOwner = socialStore.state.follows.some((follow) => follow.followerId === viewerId && follow.followingId === ownerUserId);
-    return socialStore.state.posts.some((post) =>
+    const post = socialStore.state.posts.find((post) =>
       post.authorId === ownerUserId
       && post.imageUrl === mediaUrl
       && !post.moderationHiddenAt
       && (post.visibility === 'PUBLIC' || (post.visibility === 'FOLLOWERS' && followsOwner)),
     );
+    if (!post) return false;
+    if (!post.sourceLiveBroadcastId) return true;
+    const live = getLiveSession(post.sourceLiveBroadcastId);
+    if (!live || live.blockedUserIds.includes(viewerId) || live.visibility === 'private') return false;
+    return live.visibility !== 'followers' || followsOwner;
   }
   const message = await prisma.message.findFirst({
     where: {
@@ -195,10 +201,17 @@ async function canReadAttachment(key: string, ownerUserId: string, viewerId: str
     }),
     prisma.post.findFirst({
       where: { authorId: ownerUserId, imageUrl: mediaUrl, moderationHiddenAt: null, visibility: { in: ['PUBLIC', 'FOLLOWERS'] } },
-      select: { visibility: true },
+      select: { visibility: true, sourceLiveBroadcastId: true },
     }),
   ]);
-  return Boolean(!blocked && post && (post.visibility === 'PUBLIC' || follow));
+  if (blocked || !post || !(post.visibility === 'PUBLIC' || follow)) return false;
+  if (!post.sourceLiveBroadcastId) return true;
+  const live = await prisma.liveBroadcast.findUnique({
+    where: { id: post.sourceLiveBroadcastId },
+    select: { hostId: true, visibility: true, blockedUserIds: true },
+  });
+  if (!live || live.blockedUserIds.includes(viewerId) || live.visibility === 'private') return false;
+  return live.visibility !== 'followers' || Boolean(follow);
 }
 
 async function canReadUploadedMedia(key: string, ownerUserId: string, viewerId: string) {

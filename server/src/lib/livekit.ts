@@ -9,6 +9,15 @@ export function liveKitUrl() {
   return env.LIVEKIT_URL;
 }
 
+function roomServiceClient() {
+  if (!isLiveKitConfigured() || !env.LIVEKIT_URL || !env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET) {
+    throw new Error('LiveKit is not configured.');
+  }
+  const serviceUrl = new URL(env.LIVEKIT_URL);
+  serviceUrl.protocol = serviceUrl.protocol === 'wss:' ? 'https:' : 'http:';
+  return new RoomServiceClient(serviceUrl.toString(), env.LIVEKIT_API_KEY, env.LIVEKIT_API_SECRET);
+}
+
 export async function createLiveKitToken(input: {
   identity: string;
   name: string;
@@ -37,22 +46,18 @@ export async function createLiveKitToken(input: {
 }
 
 export async function getLiveKitParticipants(room: string) {
-  if (!isLiveKitConfigured() || !env.LIVEKIT_URL || !env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET) {
-    throw new Error('LiveKit is not configured.');
+  return roomServiceClient().listParticipants(room);
+}
+
+export async function removeLiveKitParticipant(room: string, identity: string) {
+  const service = roomServiceClient();
+  if ((await service.listParticipants(room)).some((participant) => participant.identity === identity)) {
+    await service.removeParticipant(room, identity);
   }
-  const serviceUrl = new URL(env.LIVEKIT_URL);
-  serviceUrl.protocol = serviceUrl.protocol === 'wss:' ? 'https:' : 'http:';
-  const service = new RoomServiceClient(serviceUrl.toString(), env.LIVEKIT_API_KEY, env.LIVEKIT_API_SECRET);
-  return service.listParticipants(room);
 }
 
 export async function endLiveKitRoom(room: string) {
-  if (!isLiveKitConfigured() || !env.LIVEKIT_URL || !env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET) {
-    throw new Error('LiveKit is not configured.');
-  }
-  const serviceUrl = new URL(env.LIVEKIT_URL);
-  serviceUrl.protocol = serviceUrl.protocol === 'wss:' ? 'https:' : 'http:';
-  const service = new RoomServiceClient(serviceUrl.toString(), env.LIVEKIT_API_KEY, env.LIVEKIT_API_SECRET);
+  const service = roomServiceClient();
   if ((await service.listRooms([room])).some((activeRoom) => activeRoom.name === room)) {
     await service.deleteRoom(room);
   }

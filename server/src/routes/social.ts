@@ -5,7 +5,7 @@ import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { socialStore } from '../lib/socialStore.js';
 import { reviewContentForSafety } from '../lib/moderation.js';
-import { isNotificationEnabled } from '../lib/platform.js';
+import { getLiveSession, isNotificationEnabled } from '../lib/platform.js';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
 import { imageFileMediaKeyFromUrl, mediaKeyFromUrl, uploadedMediaBelongsTo, uploadedVideoBelongsTo, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
 import { decryptPrivateAddress, encryptPrivateAddress } from '../lib/privateProfile.js';
@@ -250,7 +250,12 @@ async function isFollowing(currentUserId: string, targetUserId: string) {
   );
 }
 
-async function canViewPost(post: { authorId: string; visibility?: string | null; moderationHiddenAt?: Date | string | null }, currentUserId?: string) {
+async function canViewPost(post: {
+  authorId: string;
+  visibility?: string | null;
+  moderationHiddenAt?: Date | string | null;
+  sourceLiveBroadcastId?: string | null;
+}, currentUserId?: string) {
   if (post.moderationHiddenAt) {
     return false;
   }
@@ -261,10 +266,28 @@ async function canViewPost(post: { authorId: string; visibility?: string | null;
   if (post.authorId === currentUserId) {
     return true;
   }
+  if (post.sourceLiveBroadcastId) {
+    const live = await loadLiveSessionForPost(post.sourceLiveBroadcastId);
+    if (!live || (currentUserId && live.blockedUserIds.includes(currentUserId))) return false;
+    if (live.visibility === 'private') return false;
+    if (live.visibility === 'followers') return Boolean(currentUserId && await isFollowing(currentUserId, live.hostId));
+    if (live.visibility !== 'public') return false;
+    return true;
+  }
   if (post.visibility !== 'FOLLOWERS' && post.visibility !== 'PRIVATE') {
     return true;
   }
   return post.visibility === 'FOLLOWERS' && Boolean(currentUserId) && await isFollowing(currentUserId!, post.authorId);
+}
+
+async function loadLiveSessionForPost(liveId: string) {
+  if (await isDatabaseAvailable()) {
+    return prisma.liveBroadcast.findUnique({
+      where: { id: liveId },
+      select: { id: true, hostId: true, visibility: true, blockedUserIds: true },
+    });
+  }
+  return getLiveSession(liveId);
 }
 
 async function getBlockStatus(currentUserId: string, targetUserId: string) {
@@ -340,6 +363,28 @@ async function serializePost(post: any, currentUserId?: string) {
     return socialStore.state.comments.filter((comment) => comment.postId === post.id && !comment.moderationHiddenAt).length;
   })();
   const dbAvailable = await isDatabaseAvailable();
+  const liveRecord = post.sourceLiveBroadcastId && dbAvailable
+    ? await prisma.liveBroadcast.findUnique({ where: { id: post.sourceLiveBroadcastId } })
+    : null;
+  const liveSession = post.sourceLiveBroadcastId ? getLiveSession(post.sourceLiveBroadcastId) : null;
+  const live = liveRecord ?? liveSession;
+  let liveViewerCount = liveSession?.viewerCount ?? 0;
+  if (liveRecord && dbAvailable) {
+    const activeViewers = await prisma.liveBroadcastViewer.findMany({
+      where: { liveId: liveRecord.id, connectedAt: { not: null }, lastSeenAt: { gte: new Date(Date.now() - 60_000) } },
+      select: { userId: true },
+    });
+    const activeGuestIds = new Set([
+      liveRecord.hostId,
+      ...(Array.isArray(liveRecord.guests)
+        ? liveRecord.guests.filter((guest): guest is { userId: string; status: string } =>
+          typeof guest === 'object' && guest !== null && 'userId' in guest && typeof guest.userId === 'string'
+          && 'status' in guest && guest.status === 'LIVE')
+          .map((guest) => guest.userId)
+        : []),
+    ]);
+    liveViewerCount = activeViewers.filter((viewer) => !activeGuestIds.has(viewer.userId)).length;
+  }
   let shareCount = 0;
   let saveCount = 0;
   let savedByCurrentUser = false;
@@ -387,6 +432,15 @@ async function serializePost(post: any, currentUserId?: string) {
     currentUserReaction,
     userReaction: currentUserReaction,
     authorFollowing: currentUserId ? await isFollowing(currentUserId, post.authorId ?? post.author?.id) : false,
+    ...(live ? {
+      live: {
+        id: live.id,
+        title: live.title,
+        description: live.description,
+        status: live.status,
+        viewerCount: liveViewerCount,
+      },
+    } : {}),
   };
 }
 
@@ -924,7 +978,12 @@ socialRouter.get('/posts', async (req, res) => {
       include: { comments: true },
     });
 
-    const result = await Promise.all(posts.map((post) => serializePost(post, req.user?.id)));
+    const visiblePosts = await Promise.all(posts.map(async (post) =>
+      await canViewPost(post, req.user?.id) ? post : null,
+    ));
+    const result = await Promise.all(visiblePosts
+      .filter((post): post is NonNullable<typeof post> => post !== null)
+      .map((post) => serializePost(post, req.user?.id)));
     return res.json({ posts: result });
   }
 
@@ -990,6 +1049,9 @@ socialRouter.patch('/posts/:id', requireAuth, requireAccountAccess, async (req, 
   }
   if (post.authorId !== userId && !['MODERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
     return res.status(403).json({ message: 'You may only edit your own posts.' });
+  }
+  if (post.sourceLiveBroadcastId) {
+    return res.status(409).json({ message: 'Live broadcast posts stay linked to their session and audience settings.' });
   }
   if (payload.content !== undefined) {
     const moderation = reviewContentForSafety({ type: 'post', text: payload.content, userId });
@@ -1107,7 +1169,7 @@ socialRouter.delete('/posts/:id', requireAuth, async (req, res) => {
   const dbAvailable = await isDatabaseAvailable();
 
   if (dbAvailable) {
-    const post = await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, id: true } });
+    const post = await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, id: true, sourceLiveBroadcastId: true } });
 
     if (!post) {
       return res.status(404).json({ message: 'Post not found.' });
@@ -1115,6 +1177,9 @@ socialRouter.delete('/posts/:id', requireAuth, async (req, res) => {
 
     if (post.authorId !== userId && !['MODERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
       return res.status(403).json({ message: 'You may only delete your own posts.' });
+    }
+    if (post.sourceLiveBroadcastId && !['MODERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+      return res.status(409).json({ message: 'Live broadcast posts stay in the Feed so the session and replay remain linked.' });
     }
 
     await prisma.post.delete({ where: { id: postId } });
@@ -1129,6 +1194,9 @@ socialRouter.delete('/posts/:id', requireAuth, async (req, res) => {
   const post = socialStore.state.posts[index];
   if (post.authorId !== userId && !['MODERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
     return res.status(403).json({ message: 'You may only delete your own posts.' });
+  }
+  if (post.sourceLiveBroadcastId && !['MODERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+    return res.status(409).json({ message: 'Live broadcast posts stay in the Feed so the session and replay remain linked.' });
   }
 
   socialStore.state.posts.splice(index, 1);

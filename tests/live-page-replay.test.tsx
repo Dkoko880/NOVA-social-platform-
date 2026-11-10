@@ -34,6 +34,8 @@ const replay = {
 
 let root: Root
 let host: HTMLDivElement
+let srcObjectDescriptor: PropertyDescriptor | undefined
+const mediaSrcObjects = new WeakMap<HTMLMediaElement, MediaProvider | null>()
 
 beforeEach(() => {
   mocks.apiRequest.mockReset()
@@ -55,6 +57,9 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
+  if (srcObjectDescriptor) Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', srcObjectDescriptor)
+  else delete (HTMLMediaElement.prototype as Partial<HTMLMediaElement>).srcObject
+  srcObjectDescriptor = undefined
   vi.unstubAllGlobals()
 })
 
@@ -154,5 +159,50 @@ describe('live replay actions', () => {
     await act(async () => { clickButton('DELETE'); await Promise.resolve() })
     expect(deleteAttempts).toBe(2)
     expect(host.textContent).not.toContain('Community update')
+  })
+
+  it('previews real camera and microphone media before starting a paused broadcast', async () => {
+    srcObjectDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject')
+    Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
+      configurable: true,
+      get() { return mediaSrcObjects.get(this) ?? null },
+      set(value: MediaProvider | null) { mediaSrcObjects.set(this, value) },
+    })
+    const stopTrack = vi.fn()
+    const stream = { getTracks: () => [{ stop: stopTrack }] } as unknown as MediaStream
+    const getUserMedia = vi.fn().mockResolvedValue(stream)
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } })
+    mocks.apiRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/live') return { lives: [{
+        id: 'preview-live',
+        hostId: 'creator-1',
+        title: 'Preview session',
+        description: '',
+        visibility: 'public',
+        status: 'paused',
+        viewerCount: 0,
+        moderators: [],
+        blockedUserIds: [],
+        mutedUserIds: [],
+        viewers: [],
+        guests: [],
+        comments: [],
+        provider: 'livekit',
+        providerConfigured: true,
+        recordingStatus: 'UNAVAILABLE',
+      }] }
+      if (path === '/api/live/replays') return { replays: [] }
+      throw new Error(`Unexpected API request: ${path}`)
+    })
+
+    await renderLivePage()
+    await act(async () => { clickButton('Preview camera'); await Promise.resolve() })
+    expect(getUserMedia).toHaveBeenCalledWith(expect.objectContaining({ audio: true, video: expect.any(Object) }))
+    expect(host.querySelector('video')).not.toBeNull()
+    expect(host.textContent).toContain('PREVIEW')
+
+    await act(async () => { clickButton('Cancel preview'); await Promise.resolve() })
+    expect(stopTrack).toHaveBeenCalled()
+    expect(host.textContent).not.toContain('PREVIEW')
   })
 })

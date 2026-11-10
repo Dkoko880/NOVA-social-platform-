@@ -4,6 +4,7 @@ import { Bookmark, MessageCircle, PencilLine, Share2, ShieldAlert, ThumbsUp, Tra
 import { Avatar } from './ui/Avatar'
 import { Button } from './ui/Button'
 import { PostMedia } from './PostMedia'
+import { LiveFeedPlayer } from './LiveFeedPlayer'
 import { useAuth } from '../context/AuthContext'
 import { apiRequest } from '../lib/api'
 import { canonicalPostUrl, sendPostToConversation, sharePostLink } from '../lib/postSharing'
@@ -35,6 +36,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
   const [authorFollowing, setAuthorFollowing] = useState(post.authorFollowing ?? false)
   const [comments, setComments] = useState<CommentRecord[]>([])
   const [commentCount, setCommentCount] = useState(post.comments)
+  const [liveViewerCount, setLiveViewerCount] = useState(post.live?.viewerCount ?? 0)
   const [commentDraft, setCommentDraft] = useState('')
   const [replyDraft, setReplyDraft] = useState('')
   const [replyToId, setReplyToId] = useState<string | null>(null)
@@ -61,6 +63,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     setLikes(post.likes)
     setLiked(post.currentUserReaction === 'LIKE')
     setCommentCount(post.comments)
+    setLiveViewerCount(post.live?.viewerCount ?? 0)
     setAuthorFollowing(post.authorFollowing ?? false)
     setContent(post.content)
     setImageUrl(post.image ?? '')
@@ -68,7 +71,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     setSaved(post.savedByCurrentUser ?? false)
     setSaveCount(post.saved)
     setShareCount(post.shares)
-  }, [post.authorFollowing, post.comments, post.content, post.currentUserReaction, post.image, post.likes, post.saved, post.savedByCurrentUser, post.shares, post.visibility])
+  }, [post.authorFollowing, post.comments, post.content, post.currentUserReaction, post.image, post.likes, post.live?.viewerCount, post.saved, post.savedByCurrentUser, post.shares, post.visibility])
 
   const toggleLike = async () => {
     if (busy) return
@@ -330,6 +333,15 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
       ) : (
         <>
           {content ? <p className="mt-4 whitespace-pre-wrap text-[15px] leading-7 text-slate-700">{content}</p> : null}
+          {post.live ? <section className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3" aria-label="Live broadcast">
+            <p className="flex items-center gap-2 text-sm font-semibold text-rose-800">
+              <span className="rounded-full bg-rose-600 px-2 py-1 text-[10px] tracking-normal text-white">{post.live.status === 'live' ? 'LIVE' : 'ENDED'}</span>
+              <span>{post.live.title}</span>
+              {post.live.status === 'live' ? <span className="ml-auto text-xs font-medium">{liveViewerCount} watching</span> : null}
+            </p>
+            {post.live.description ? <p className="mt-2 text-sm text-slate-700">{post.live.description}</p> : null}
+            {post.live.status === 'live' ? <LiveFeedPlayer liveId={post.live.id} title={post.live.title} viewerCount={liveViewerCount} onViewerCountChange={setLiveViewerCount} /> : <p className="mt-2 text-xs text-slate-600">{imageUrl ? 'Watch the saved replay below.' : 'This broadcast has ended.'}</p>}
+          </section> : null}
           {imageUrl ? <PostMedia url={imageUrl} postId={post.id} measurementSource="feed" alt="Post attachment" className="mt-4 max-h-[32rem] w-full rounded-[24px] object-cover" /> : null}
           <p className="mt-2 text-xs text-slate-500">{visibility === 'PUBLIC' ? 'Everyone' : visibility === 'FOLLOWERS' ? 'Followers' : 'Only me'}</p>
         </>

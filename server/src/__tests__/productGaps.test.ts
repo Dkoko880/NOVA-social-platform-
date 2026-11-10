@@ -5,6 +5,7 @@ import { app } from '../app.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { socialStore } from '../lib/socialStore.js';
 import { clearCommand2AStores, updateLiveSession } from '../lib/platform.js';
+import { subscribeToUserEvents } from '../lib/realtime.js';
 
 function cookie(response: { headers: Record<string, string | string[] | undefined> }) {
   const value = response.headers['set-cookie'];
@@ -245,6 +246,10 @@ describe('product area gaps', () => {
     const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Audience test' });
     const liveId = created.body.live.id;
     updateLiveSession(liveId, (live) => ({ ...live, status: 'live' }));
+    const viewerEvents: Array<{ event?: string; live?: { viewerCount: number; comments: Array<{ text: string }>; reactions: Array<{ type: string }> } }> = [];
+    const outsiderEvents: unknown[] = [];
+    const unsubscribeViewer = subscribeToUserEvents(viewer.user.id, (event) => { viewerEvents.push(event as typeof viewerEvents[number]); });
+    const unsubscribeOutsider = subscribeToUserEvents(outsider.user.id, (event) => { outsiderEvents.push(event); });
 
     const blockedComment = await request(app).post(`/api/live/${liveId}/comment`).set('Cookie', outsider.auth).send({ text: 'I am not in the room.' });
     expect(blockedComment.status).toBe(403);
@@ -257,6 +262,12 @@ describe('product area gaps', () => {
     expect(firstLike.status).toBe(201);
     expect(duplicateLike.status).toBe(200);
     expect(duplicateLike.body.duplicate).toBe(true);
+    expect(viewerEvents.some((event) => event.event === 'live:update' && event.live?.viewerCount === 1)).toBe(true);
+    expect(viewerEvents.some((event) => event.event === 'live:update' && event.live?.comments.some((entry) => entry.text === 'Hello everyone.'))).toBe(true);
+    expect(viewerEvents.some((event) => event.event === 'live:update' && event.live?.reactions.some((entry) => entry.type === 'LIKE'))).toBe(true);
+    expect(outsiderEvents).toHaveLength(0);
+    unsubscribeViewer();
+    unsubscribeOutsider();
     expect((await request(app).get(`/api/live/${liveId}`).set('Cookie', viewer.auth)).body.live.comments).toHaveLength(1);
     expect((await request(app).post(`/api/live/${liveId}/viewers/leave`).set('Cookie', viewer.auth)).body.left).toBe(true);
   });

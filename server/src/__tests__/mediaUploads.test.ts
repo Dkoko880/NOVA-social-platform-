@@ -5,6 +5,7 @@ import { app } from '../app.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { getMediaStorage, uploadedMediaBelongsTo } from '../lib/mediaStorage.js';
 import { socialStore } from '../lib/socialStore.js';
+import { clearCommand2AStores, updateLiveSession } from '../lib/platform.js';
 
 function cookie(response: { headers: Record<string, string | string[] | undefined> }) {
   const value = response.headers['set-cookie'];
@@ -23,6 +24,7 @@ describe('authenticated media uploads', () => {
   beforeEach(() => {
     fallbackStore.clear();
     socialStore.clear();
+    clearCommand2AStores();
   });
 
   it('accepts media ownership when the owner is inferred from a profile reference even before metadata is assigned', async () => {
@@ -104,6 +106,7 @@ describe('authenticated media uploads', () => {
       password: 'Password123',
       communityRulesAccepted: true,
     });
+
     expect(registration.status).toBe(201);
     const viewerAuthorization = `Bearer ${registration.body.token}`;
     const imageBytes = await sharp({
@@ -155,6 +158,39 @@ describe('authenticated media uploads', () => {
     })).status).toBe(201);
     expect((await request(app).get(privateImage.body.mediaUrl).set('Authorization', viewerAuthorization)).status).toBe(404);
     expect((await request(app).get(privateVideo.body.mediaUrl).set('Authorization', viewerAuthorization)).status).toBe(404);
+  });
+
+  it('applies live audience restrictions to replay Feed posts and their media URLs', async () => {
+    const host = await register('RestrictedReplayHost');
+    const blockedViewer = await register('RestrictedReplayViewer');
+    const liveResponse = await request(app).post('/api/live/create').set('Cookie', host.auth).send({
+      title: 'Restricted replay',
+      visibility: 'public',
+    });
+    const liveId = liveResponse.body.live.id as string;
+    const replay = await getMediaStorage('test').putAttachment(Buffer.from('webm replay'), 'video/webm', 'webm', host.user.id);
+    updateLiveSession(liveId, (live) => ({
+      ...live,
+      status: 'ended',
+      recordingStatus: 'READY',
+      replayUrl: replay.publicUrl,
+      blockedUserIds: [blockedViewer.user.id],
+    }));
+    socialStore.state.posts.push({
+      id: 'restricted-replay-post',
+      authorId: host.user.id,
+      content: 'Restricted replay',
+      imageUrl: replay.publicUrl,
+      visibility: 'PUBLIC',
+      sourceLiveBroadcastId: liveId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    expect((await request(app).get('/api/posts').set('Cookie', host.auth)).body.posts).toHaveLength(1);
+    expect((await request(app).get('/api/posts').set('Cookie', blockedViewer.auth)).body.posts).toHaveLength(0);
+    expect((await request(app).get(replay.publicUrl).set('Cookie', blockedViewer.auth)).status).toBe(404);
+    expect((await request(app).get(replay.publicUrl).set('Cookie', host.auth)).status).toBe(200);
   });
 
   it('serves legacy feed images from the files endpoint with cookie or bearer auth while protecting private posts', async () => {

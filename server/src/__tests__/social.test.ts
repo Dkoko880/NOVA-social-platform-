@@ -35,6 +35,40 @@ describe('social platform features', () => {
     vi.restoreAllMocks();
   });
 
+  it('does not expose a feed post when its linked live session is private', async () => {
+    vi.mocked(isDatabaseAvailable).mockResolvedValue(true);
+    vi.spyOn(prisma.post, 'findMany').mockResolvedValue([{
+      id: 'live-post',
+      authorId: 'live-host',
+      content: 'Private broadcast',
+      visibility: 'PUBLIC',
+      moderationHiddenAt: null,
+      sourceLiveBroadcastId: 'private-live',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      imageUrl: null,
+      communityId: null,
+      moderationHiddenById: null,
+      moderationReason: null,
+      sourceLiveReplayId: null,
+    }] as never);
+    vi.spyOn(prisma.liveBroadcast, 'findUnique').mockResolvedValue({
+      id: 'private-live',
+      hostId: 'live-host',
+      visibility: 'private',
+      blockedUserIds: [],
+    } as never);
+
+    const response = await request(app).get('/api/posts');
+
+    expect(response.status).toBe(200);
+    expect(response.body.posts).toEqual([]);
+    expect(prisma.liveBroadcast.findUnique).toHaveBeenCalledWith({
+      where: { id: 'private-live' },
+      select: { id: true, hostId: true, visibility: true, blockedUserIds: true },
+    });
+  });
+
   it('authenticated user can create a post', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',

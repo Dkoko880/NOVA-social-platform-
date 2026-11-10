@@ -50,7 +50,7 @@ export type CallSession = {
   updatedAt: string;
 };
 
-export type LiveVisibility = 'public' | 'private';
+export type LiveVisibility = 'public' | 'followers' | 'private';
 export type LiveStatus = 'live' | 'paused' | 'ended';
 
 export type LiveViewer = {
@@ -90,6 +90,8 @@ export type LiveSession = {
   status: LiveStatus;
   viewerCount: number;
   moderators: string[];
+  blockedUserIds: string[];
+  mutedUserIds: string[];
   viewers: LiveViewer[];
   guests: LiveGuest[];
   comments: LiveComment[];
@@ -435,6 +437,14 @@ export function getLiveSession(liveId: string) {
   return getStore().liveSessions.find((session) => session.id === liveId) ?? null;
 }
 
+export function restoreLiveSession(session: LiveSession) {
+  const liveSessions = getStore().liveSessions;
+  const index = liveSessions.findIndex((entry) => entry.id === session.id);
+  if (index === -1) liveSessions.unshift(session);
+  else liveSessions[index] = session;
+  return session;
+}
+
 export function listLiveSessions() {
   return [...getStore().liveSessions].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 }
@@ -450,6 +460,8 @@ export function createLiveSession(hostId: string, input: { title: string; descri
     status: 'paused',
     viewerCount: 0,
     moderators: [],
+    blockedUserIds: [],
+    mutedUserIds: [],
     viewers: [],
     guests: [],
     comments: [],

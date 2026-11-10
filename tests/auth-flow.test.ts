@@ -206,7 +206,10 @@ describe('browser authentication session', () => {
 
   it('returns parsed JSON from the shared API client', async () => {
     const posts = { posts: [{ id: 'post_1' }] }
-    fetchMock.mockResolvedValueOnce(jsonResponse(posts))
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(posts), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+    }))
 
     await expect(apiRequest('/api/posts', {
       headers: { Authorization: 'Bearer untrusted-test-header' },
@@ -233,7 +236,10 @@ describe('browser authentication session', () => {
   it('retries safe reads after a transient gateway response', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse({ message: 'Temporarily unavailable.' }, 503))
-      .mockResolvedValueOnce(jsonResponse({ posts: [] }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ posts: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      }))
 
     await expect(apiRequest('/api/posts')).resolves.toEqual({ posts: [] })
     expect(fetchMock).toHaveBeenCalledTimes(2)

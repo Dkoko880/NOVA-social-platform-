@@ -15,6 +15,9 @@ describe('LiveKit environment configuration', () => {
 
   it('rejects incomplete credentials, non-WebSocket URLs, embedded credentials, whitespace, and short secrets', () => {
     expect(envSchema.safeParse({ ...completeConfig, LIVEKIT_API_SECRET: undefined }).success).toBe(false);
+    expect(envSchema.safeParse({ ...completeConfig, LIVEKIT_URL: '' }).success).toBe(false);
+    expect(envSchema.safeParse({ ...completeConfig, LIVEKIT_API_KEY: '' }).success).toBe(false);
+    expect(envSchema.safeParse({ ...completeConfig, LIVEKIT_API_SECRET: '' }).success).toBe(false);
     expect(envSchema.safeParse({ ...completeConfig, LIVEKIT_URL: 'https://media.example.test' }).success).toBe(false);
     expect(envSchema.safeParse({ ...completeConfig, LIVEKIT_URL: '******media.example.test' }).success).toBe(false);
     expect(envSchema.safeParse({ ...completeConfig, LIVEKIT_URL: ' wss://media.example.test ' }).success).toBe(false);

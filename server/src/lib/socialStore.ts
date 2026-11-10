@@ -28,6 +28,7 @@ export type SocialPostRecord = {
   moderationHiddenById?: string | null;
   moderationReason?: string | null;
   communityId?: string | null;
+  sourceLiveBroadcastId?: string | null;
   createdAt: string;
   updatedAt: string;
 };
