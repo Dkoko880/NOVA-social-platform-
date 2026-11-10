@@ -23,7 +23,7 @@ type LiveSession = {
   blockedUserIds: string[]
   mutedUserIds: string[]
   viewers: Array<{ userId: string; isMuted: boolean; isBlocked: boolean; joinedAt: string }>
-  guests: Array<{ userId: string; role: 'GUEST' | 'COHOST'; status: 'REQUESTED' | 'LIVE' | 'REMOVED'; requestedAt: string }>
+  guests: Array<{ userId: string; role: 'GUEST' | 'COHOST'; status: 'REQUESTED' | 'LIVE' | 'REMOVED'; requestedAt: string; admittedAt?: string }>
   provider?: string
   providerConfigured: boolean
   comments: LiveComment[]
@@ -532,7 +532,8 @@ export function LivePage() {
       joinedLiveRef.current = response.live
       setJoinedLive(response.live)
       setLiveState(response.live)
-      const { token, url } = await apiRequest<{ token: string; url: string }>(`/api/live/${encodeURIComponent(live.id)}/token`, { method: 'POST' })
+      const tokenPath = publishAsGuest ? 'stage/token' : 'token'
+      const { token, url } = await apiRequest<{ token: string; url: string }>(`/api/live/${encodeURIComponent(live.id)}/${tokenPath}`, { method: 'POST' })
       const { Room, RoomEvent } = await import('livekit-client')
       room = new Room({ adaptiveStream: true, dynacast: true })
       roomRef.current = room
@@ -565,11 +566,13 @@ export function LivePage() {
         }
       })
       await room.connect(url, token)
-      const approvedGuest = response.live.guests?.some((guest) => guest.userId === user?.id && guest.status === 'LIVE')
-      if (publishAsGuest && !approvedGuest) {
+      const admittedGuest = response.live.guests?.some((guest) => guest.userId === user?.id && guest.status === 'LIVE' && Boolean(guest.admittedAt))
+      if (publishAsGuest && !admittedGuest) {
         throw new Error('Guest stage access is no longer available. Ask the host to approve your request again.')
       }
-      if (approvedGuest && publishAsGuest) {
+      const heartbeat = await apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/viewers/heartbeat`, { method: 'POST' })
+      setLiveState(heartbeat.live)
+      if (admittedGuest && publishAsGuest) {
         await room.localParticipant.setMicrophoneEnabled(true)
         await room.localParticipant.setCameraEnabled(true)
         setGuestRoom(room)
@@ -700,8 +703,14 @@ export function LivePage() {
 
   const joinGuestStage = async (live: LiveSession) => {
     if (!activeLive || !approvedGuest) return
-    await leaveLive()
-    await joinLive(live, true)
+    try {
+      const response = await apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/guests/stage/join`, { method: 'POST' })
+      setLiveState(response.live)
+      await leaveLive()
+      await joinLive(response.live, true)
+    } catch (stageError) {
+      setError(stageError instanceof Error ? stageError.message : 'Unable to join the guest stage.')
+    }
   }
 
   const react = async (live: LiveSession) => {
@@ -852,7 +861,7 @@ export function LivePage() {
             <button type="button" onClick={cancelPreview} className="min-h-11 rounded-full bg-black/55 px-4 text-sm font-semibold text-white ring-1 ring-white/20">Cancel preview</button>
           </> : <>
             <button type="button" aria-label="Share live broadcast" title="Share live broadcast" onClick={() => void shareLive(activeLive)} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20 hover:bg-black/75"><Share2 className="h-5 w-5" /></button>
-            {approvedGuest ? <>
+            {approvedGuest && guestRoom ? <>
               <button type="button" aria-label={hostMuted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => void toggleHostMute()} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20">{hostMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}</button>
               <button type="button" aria-label={hostCameraOn ? 'Turn camera off' : 'Turn camera on'} onClick={() => void toggleHostCamera()} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20">{hostCameraOn ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}</button>
             </> : null}
@@ -862,12 +871,13 @@ export function LivePage() {
       </header>
 
       {error ? <p className="absolute left-3 right-3 top-28 mx-auto max-w-xl rounded-xl bg-black/75 p-3 text-center text-sm text-white" role="alert">{error}</p> : null}
-      {!isHost && approvedGuest ? <button type="button" onClick={() => void joinGuestStage(activeLive)} disabled={busy} className="absolute left-3 top-28 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">Join the stage</button> : null}
+      {!isHost && approvedGuest && !guestRoom ? <button type="button" onClick={() => void joinGuestStage(activeLive)} disabled={busy} className="absolute left-3 top-28 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">Join the stage</button> : null}
       {canModerate ? <section aria-label="Live moderation controls" className="absolute right-3 top-28 max-h-[45dvh] w-72 max-w-[calc(100vw-1.5rem)] space-y-3 overflow-y-auto rounded-xl bg-black/75 p-3 text-xs text-white ring-1 ring-white/20">
         <div><h2 className="font-semibold">Guest requests</h2>
           {activeLive.guests.filter((guest) => guest.status !== 'REMOVED').map((guest) => <div key={guest.userId} className="mt-2 flex items-center justify-between gap-2">
             <span className="truncate">{guest.userId} · {guest.role.toLowerCase()} · {guest.status.toLowerCase()}</span>
             {guest.status === 'REQUESTED' ? <button type="button" onClick={() => void updateGuest(activeLive, guest.userId, 'approve')} className="rounded bg-emerald-700 px-2 py-1 font-semibold">Approve</button> : null}
+            {guest.admittedAt ? <button type="button" aria-label={`${activeLive.mutedUserIds.includes(guest.userId) ? 'Unmute' : 'Mute'} stage guest ${guest.userId}`} onClick={() => void updateViewerControl(activeLive, guest.userId, 'mute', !activeLive.mutedUserIds.includes(guest.userId))} className="rounded bg-slate-700 px-2 py-1">{activeLive.mutedUserIds.includes(guest.userId) ? 'Unmute' : 'Mute'}</button> : null}
             <button type="button" onClick={() => void updateGuest(activeLive, guest.userId, 'remove')} className="rounded bg-rose-700 px-2 py-1 font-semibold">Remove</button>
           </div>)}
           {!activeLive.guests.some((guest) => guest.status === 'REQUESTED') ? <p className="mt-1 text-white/65">No pending requests.</p> : null}

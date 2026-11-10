@@ -58,14 +58,26 @@ describe('social platform features', () => {
       visibility: 'private',
       blockedUserIds: [],
     } as never);
+    vi.spyOn(prisma.post, 'findUnique').mockResolvedValue({
+      authorId: 'live-host',
+      visibility: 'PUBLIC',
+      moderationHiddenAt: null,
+      sourceLiveBroadcastId: 'private-live',
+    } as never);
 
     const response = await request(app).get('/api/posts');
+    const comments = await request(app).get('/api/posts/live-post/comments');
 
     expect(response.status).toBe(200);
     expect(response.body.posts).toEqual([]);
+    expect(comments.status).toBe(404);
     expect(prisma.liveBroadcast.findUnique).toHaveBeenCalledWith({
       where: { id: 'private-live' },
       select: { id: true, hostId: true, visibility: true, blockedUserIds: true },
+    });
+    expect(prisma.post.findUnique).toHaveBeenCalledWith({
+      where: { id: 'live-post' },
+      select: { authorId: true, visibility: true, moderationHiddenAt: true, sourceLiveBroadcastId: true },
     });
   });
 

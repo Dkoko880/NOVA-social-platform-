@@ -234,12 +234,17 @@ describe('Create Post entry point', () => {
       comments: [],
       providerConfigured: true,
     }
+    let stageLive = live
     mocks.apiRequest.mockImplementation(async (path: string) => {
       if (path === '/api/live') return { lives: [live] }
       if (path === '/api/live/replays') return { replays: [] }
-      if (path === '/api/live/live-123/viewers/join') return { live }
-      if (path === '/api/live/live-123/token') return { token: 'test-token', url: 'wss://media.example.test' }
-      if (path === '/api/live/live-123/viewers/heartbeat') return { live }
+      if (path === '/api/live/live-123/viewers/join') return { live: stageLive }
+      if (path === '/api/live/live-123/token' || path === '/api/live/live-123/stage/token') return { token: 'test-token', url: 'wss://media.example.test' }
+      if (path === '/api/live/live-123/guests/stage/join') {
+        stageLive = { ...live, guests: [{ ...live.guests[0], admittedAt: new Date().toISOString() }] }
+        return { live: stageLive }
+      }
+      if (path === '/api/live/live-123/viewers/heartbeat') return { live: stageLive }
       if (path === '/api/live/live-123/viewers/leave') return { left: true }
       return {}
     })
@@ -268,6 +273,8 @@ describe('Create Post entry point', () => {
 
     expect(mocks.setMicrophoneEnabled).toHaveBeenCalledWith(true)
     expect(mocks.setCameraEnabled).toHaveBeenCalledWith(true)
+    expect(mocks.apiRequest).toHaveBeenCalledWith('/api/live/live-123/guests/stage/join', { method: 'POST' })
+    expect(mocks.apiRequest).toHaveBeenCalledWith('/api/live/live-123/stage/token', { method: 'POST' })
   })
 
   it('lets viewers request an approved co-host role', async () => {

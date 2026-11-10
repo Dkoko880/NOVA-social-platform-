@@ -65,6 +65,7 @@ const liveGuestRecordSchema = z.array(z.object({
   role: z.enum(['GUEST', 'COHOST']),
   status: z.enum(['REQUESTED', 'LIVE', 'REMOVED']),
   requestedAt: z.string().datetime(),
+  admittedAt: z.string().datetime().optional(),
 }));
 const liveViewerControlSchema = z.object({ isMuted: z.boolean() });
 
@@ -239,7 +240,7 @@ function liveSessionFromRecord(record: {
   const guests = liveGuestRecordSchema.parse(record.guests);
   const stageUserIds = new Set([
     record.hostId,
-    ...guests.filter((guest) => guest.status === 'LIVE').map((guest) => guest.userId),
+    ...guests.filter((guest) => guest.status === 'LIVE' && guest.admittedAt).map((guest) => guest.userId),
   ]);
   const viewers = (record.viewers ?? [])
     .filter((viewer) => viewer.connectedAt !== null)
@@ -289,7 +290,7 @@ function liveSessionFromRecord(record: {
 function liveViewerSnapshot(live: NonNullable<ReturnType<typeof getLiveSession>>, records: Array<{ userId: string; lastSeenAt: Date }>) {
   const stageUserIds = new Set([
     live.hostId,
-    ...live.guests.filter((guest) => guest.status === 'LIVE').map((guest) => guest.userId),
+    ...live.guests.filter((guest) => guest.status === 'LIVE' && guest.admittedAt).map((guest) => guest.userId),
   ]);
   const viewers = records
     .filter((viewer) => !stageUserIds.has(viewer.userId))
@@ -352,6 +353,8 @@ async function clearLiveReplayFromSession(liveId: string) {
 async function canInteractWithLive(live: NonNullable<ReturnType<typeof getLiveSession>>, userId: string) {
   if (!(await canViewLive(live, userId))) return false;
   if (canManageLive(live, userId)) return true;
+  const admittedGuest = live.guests.some((guest) => guest.userId === userId && guest.status === 'LIVE' && guest.admittedAt);
+  if (admittedGuest) return !live.mutedUserIds.includes(userId);
   return !live.mutedUserIds.includes(userId)
     && live.viewers.some((viewer) => viewer.userId === userId && !viewer.isBlocked && !viewer.isMuted);
 }
@@ -921,22 +924,19 @@ command2aRouter.post('/live/:id/token', requireAuth, async (req, res) => {
   const userId = req.user!.id;
   const isHost = live.hostId === userId;
   const guest = live.guests.find((entry) => entry.userId === userId && entry.status === 'LIVE');
-  const canPublish = isHost || Boolean(guest);
+  const canPublish = isHost;
   if (isHost) {
     if (live.status !== 'paused' && live.status !== 'live') return res.status(409).json({ message: 'This live session is no longer active.' });
   } else {
     const viewer = live.viewers.find((entry) => entry.userId === userId && !entry.isBlocked);
-    const pendingJoin = !guest && !viewer && await isDatabaseAvailable()
+    const pendingJoin = !viewer && await isDatabaseAvailable()
       ? await prisma.liveBroadcastViewer.findFirst({
         where: { liveId: live.id, userId, lastSeenAt: { gte: new Date(Date.now() - 60_000) } },
         select: { userId: true },
       })
       : null;
-    if (live.status !== 'live' || (!guest && !viewer && !pendingJoin)) return res.status(403).json({ message: 'Join this live session before requesting media access.' });
+    if (live.status !== 'live' || (!viewer && !pendingJoin)) return res.status(403).json({ message: 'Join this live session before requesting media access.' });
     if (!(await canViewLive(live, userId))) return res.status(403).json({ message: 'You do not have permission to watch this live session.' });
-    if (canPublish && (viewer?.isMuted || live.mutedUserIds.includes(userId))) {
-      return res.status(403).json({ message: 'Muted participants cannot publish to this live session.' });
-    }
   }
   const room = liveRoomName(live.id);
   const token = await createLiveKitToken({
@@ -947,6 +947,28 @@ command2aRouter.post('/live/:id/token', requireAuth, async (req, res) => {
     ...(canPublish ? { canPublishSources: [TrackSource.MICROPHONE, TrackSource.CAMERA] } : {}),
   });
   return res.set('Cache-Control', 'no-store').json({ token, url: liveKitUrl(), room, role: isHost ? 'host' : guest ? 'guest' : 'viewer' });
+});
+
+command2aRouter.post('/live/:id/stage/token', requireAuth, async (req, res) => {
+  const live = await loadLiveSession(String(req.params.id));
+  if (!live) return res.status(404).json({ message: 'Live session not found.' });
+  if (!isLiveKitConfigured()) return res.status(503).json({ message: 'Live broadcasts are unavailable because LiveKit is not configured.' });
+  if (live.status !== 'live') return res.status(409).json({ message: 'This live session is no longer running.' });
+  const userId = req.user!.id;
+  const guest = live.guests.find((entry) => entry.userId === userId && entry.status === 'LIVE' && entry.admittedAt);
+  if (!guest) return res.status(403).json({ message: 'The host must approve and admit you to the stage before you can publish.' });
+  if (!(await canViewLive(live, userId))) return res.status(403).json({ message: 'You do not have permission to join this live session.' });
+  if (live.mutedUserIds.includes(userId) || live.viewers.find((viewer) => viewer.userId === userId)?.isMuted) {
+    return res.status(403).json({ message: 'Muted participants cannot publish to this live session.' });
+  }
+  const token = await createLiveKitToken({
+    identity: userId,
+    name: req.user!.name,
+    room: liveRoomName(live.id),
+    canPublish: true,
+    canPublishSources: [TrackSource.MICROPHONE, TrackSource.CAMERA],
+  });
+  return res.set('Cache-Control', 'no-store').json({ token, url: liveKitUrl(), room: liveRoomName(live.id), role: guest.role.toLowerCase() });
 });
 
 command2aRouter.post('/live/:id/end', requireAuth, async (req, res) => {
@@ -1211,7 +1233,15 @@ command2aRouter.post('/live/:id/viewer/:userId/mute', requireAuth, async (req, r
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can mute viewers.' });
   const userId = String(req.params.userId);
   const payload = liveViewerControlSchema.parse(req.body ?? {});
-  if (!live.viewers.some((viewer) => viewer.userId === userId)) return res.status(404).json({ message: 'Viewer not found.' });
+  const stageGuest = live.guests.some((guest) => guest.userId === userId && guest.status === 'LIVE' && guest.admittedAt);
+  if (!live.viewers.some((viewer) => viewer.userId === userId) && !stageGuest) return res.status(404).json({ message: 'Viewer not found.' });
+  if (payload.isMuted && stageGuest && isLiveKitConfigured()) {
+    try {
+      await removeLiveKitParticipant(liveRoomName(live.id), userId);
+    } catch {
+      return res.status(503).json({ message: 'LiveKit could not mute this stage guest. Their access was not changed; retry the action.' });
+    }
+  }
   await recordLiveModeration(live.id, req.user!.id, payload.isMuted ? 'LIVE_VIEWER_MUTED' : 'LIVE_VIEWER_UNMUTED', userId);
   const next = updateLiveSession(live.id, (session) => ({
     ...session,
@@ -1301,15 +1331,24 @@ command2aRouter.post('/live/:id/viewers/join', requireAuth, async (req, res) => 
     };
     next = updateLiveSession(live.id, (session) => ({ ...session, ...snapshot }));
   } else {
-    const activeViewers = live.viewers.filter((entry) => new Date(entry.joinedAt).getTime() >= cutoff);
+    const stageUserIds = new Set([
+      live.hostId,
+      ...live.guests.filter((guest) => guest.status === 'LIVE' && guest.admittedAt).map((guest) => guest.userId),
+    ]);
+    const activeViewers = live.viewers.filter((entry) =>
+      !stageUserIds.has(entry.userId) && new Date(entry.joinedAt).getTime() >= cutoff,
+    );
     viewer = {
       ...(existing ?? { userId: req.user!.id, isMuted: live.mutedUserIds.includes(req.user!.id), isBlocked: false }),
       joinedAt: joinedAt.toISOString(),
     };
+    const nextViewers = stageUserIds.has(viewer.userId)
+      ? activeViewers
+      : [...activeViewers.filter((entry) => entry.userId !== viewer.userId), viewer];
     next = updateLiveSession(live.id, (session) => ({
       ...session,
-      viewers: [...activeViewers.filter((entry) => entry.userId !== viewer.userId), viewer],
-      viewerCount: new Set([...activeViewers.map((entry) => entry.userId), viewer.userId]).size,
+      viewers: nextViewers,
+      viewerCount: new Set(nextViewers.map((entry) => entry.userId)).size,
     }));
   }
   if (existing) return res.json({ viewer, live: next && liveForAudience(next, req.user!.id) });
@@ -1322,13 +1361,14 @@ command2aRouter.post('/live/:id/viewers/heartbeat', requireAuth, async (req, res
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'This live session is not running.' });
   const viewer = live.viewers.find((entry) => entry.userId === req.user!.id && !entry.isBlocked);
+  const admittedGuest = live.guests.some((entry) => entry.userId === req.user!.id && entry.status === 'LIVE' && entry.admittedAt);
   const pendingJoin = !viewer && await isDatabaseAvailable()
     ? await prisma.liveBroadcastViewer.findFirst({
       where: { liveId: live.id, userId: req.user!.id, lastSeenAt: { gte: new Date(Date.now() - 60_000) } },
       select: { userId: true },
     })
     : null;
-  if (!viewer && !pendingJoin) return res.status(409).json({ message: 'Join this live session again to continue watching.' });
+  if (!viewer && !pendingJoin && !admittedGuest) return res.status(409).json({ message: 'Join this live session again to continue watching.' });
   if (!(await canViewLive(live, req.user!.id))) return res.status(403).json({ message: 'You cannot watch this live session.' });
   if (!isLiveKitConfigured()) return res.status(503).json({ message: 'LiveKit is unavailable for this broadcast.' });
   let liveKitParticipants: Awaited<ReturnType<typeof getLiveKitParticipants>>;
@@ -1355,14 +1395,16 @@ command2aRouter.post('/live/:id/viewers/heartbeat', requireAuth, async (req, res
     const snapshot = liveViewerSnapshot(live, await getActiveLiveViewerRecords(live.id));
     next = updateLiveSession(live.id, (session) => ({ ...session, ...snapshot }));
   } else {
-    if (!viewer) return res.status(409).json({ message: 'Join this live session again to continue watching.' });
     const cutoff = Date.now() - 60_000;
-    const updatedViewer = { ...viewer, joinedAt: lastSeenAt.toISOString() };
+    const stageUserIds = new Set([
+      live.hostId,
+      ...live.guests.filter((guest) => guest.status === 'LIVE' && guest.admittedAt).map((guest) => guest.userId),
+    ]);
     next = updateLiveSession(live.id, (session) => ({
       ...session,
-      viewers: session.viewers.filter((entry) => entry.userId === req.user!.id || new Date(entry.joinedAt).getTime() >= cutoff)
-        .map((entry) => entry.userId === req.user!.id ? updatedViewer : entry),
-      viewerCount: session.viewers.filter((entry) => entry.userId === req.user!.id || new Date(entry.joinedAt).getTime() >= cutoff).length,
+      viewers: session.viewers.filter((entry) => !stageUserIds.has(entry.userId) && (entry.userId === req.user!.id || new Date(entry.joinedAt).getTime() >= cutoff))
+        .map((entry) => entry.userId === req.user!.id ? { ...entry, joinedAt: lastSeenAt.toISOString() } : entry),
+      viewerCount: session.viewers.filter((entry) => !stageUserIds.has(entry.userId) && (entry.userId === req.user!.id || new Date(entry.joinedAt).getTime() >= cutoff)).length,
     }));
   }
   return res.json({ live: next && liveForAudience(next, req.user!.id) });
@@ -1420,6 +1462,38 @@ command2aRouter.post('/live/:id/guests/:userId/approve', requireAuth, async (req
   return res.json({ guest: next!.guests.find((guest) => guest.userId === userId), live: next });
 });
 
+command2aRouter.post('/live/:id/guests/stage/join', requireAuth, async (req, res) => {
+  const live = await loadLiveSession(String(req.params.id));
+  if (!live) return res.status(404).json({ message: 'Live session not found.' });
+  if (live.status !== 'live') return res.status(409).json({ message: 'This live session is no longer running.' });
+  const guest = live.guests.find((entry) => entry.userId === req.user!.id && entry.status === 'LIVE');
+  if (!guest) return res.status(403).json({ message: 'The host must approve your guest request before you can join the stage.' });
+  if (!(await canViewLive(live, req.user!.id))) return res.status(403).json({ message: 'You do not have permission to join this live session.' });
+  const viewer = live.viewers.find((entry) => entry.userId === req.user!.id && !entry.isBlocked);
+  const pendingJoin = !viewer && await isDatabaseAvailable()
+    ? await prisma.liveBroadcastViewer.findFirst({
+      where: { liveId: live.id, userId: req.user!.id, lastSeenAt: { gte: new Date(Date.now() - 60_000) } },
+      select: { userId: true },
+    })
+    : null;
+  if (!viewer && !pendingJoin) return res.status(409).json({ message: 'Join this live session before joining the stage.' });
+  if (live.mutedUserIds.includes(req.user!.id) || live.viewers.find((viewer) => viewer.userId === req.user!.id)?.isMuted) {
+    return res.status(403).json({ message: 'Muted participants cannot join the stage.' });
+  }
+  const admittedAt = guest.admittedAt ?? new Date().toISOString();
+  const next = updateLiveSession(live.id, (session) => ({
+    ...session,
+    viewers: session.viewers.filter((viewer) => viewer.userId !== req.user!.id),
+    viewerCount: session.viewers.filter((viewer) => viewer.userId !== req.user!.id).length,
+    guests: session.guests.map((entry) => entry.userId === req.user!.id
+      ? { ...entry, admittedAt }
+      : entry),
+  }));
+  if (!next) return res.status(404).json({ message: 'Live session not found.' });
+  await persistLiveSession(next);
+  return res.json({ guest: next.guests.find((entry) => entry.userId === req.user!.id), live: await presentLive(next, req.user!.id) });
+});
+
 command2aRouter.post('/live/:id/guests/:userId/remove', requireAuth, async (req, res) => {
   const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
@@ -1438,7 +1512,7 @@ command2aRouter.post('/live/:id/guests/:userId/remove', requireAuth, async (req,
   await recordLiveModeration(live.id, req.user!.id, 'LIVE_GUEST_REMOVED', userId);
   const next = updateLiveSession(live.id, (session) => ({
     ...session,
-    guests: session.guests.map((guest) => guest.userId === userId ? { ...guest, status: 'REMOVED' } : guest),
+    guests: session.guests.map((guest) => guest.userId === userId ? { ...guest, status: 'REMOVED', admittedAt: undefined } : guest),
   }));
   if (next) await persistLiveSession(next);
   return res.json({ live: next });
@@ -1495,7 +1569,7 @@ command2aRouter.post('/live/:id/block/:userId', requireAuth, async (req, res) =>
     blockedUserIds: Array.from(new Set([...session.blockedUserIds, userId])),
     viewers: session.viewers.filter((viewer) => viewer.userId !== userId),
     viewerCount: session.viewers.some((viewer) => viewer.userId === userId) ? Math.max(0, session.viewerCount - 1) : session.viewerCount,
-    guests: session.guests.map((guest) => guest.userId === userId ? { ...guest, status: 'REMOVED' } : guest),
+    guests: session.guests.map((guest) => guest.userId === userId ? { ...guest, status: 'REMOVED', admittedAt: undefined } : guest),
   }));
   if (next) await persistLiveSession(next);
   return res.json({ blocked: true, live: next });

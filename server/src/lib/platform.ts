@@ -79,6 +79,7 @@ export type LiveGuest = {
   role: 'GUEST' | 'COHOST';
   status: 'REQUESTED' | 'LIVE' | 'REMOVED';
   requestedAt: string;
+  admittedAt?: string;
 };
 
 export type LiveSession = {

@@ -352,12 +352,23 @@ describe('command 2a foundation', () => {
     expect((await request(app).post(`/api/live/${liveId}/guests/request`).set('Cookie', guest.auth).send({ role: 'COHOST' })).status).toBe(201);
     const approved = await request(app).post(`/api/live/${liveId}/guests/${guest.user.id}/approve`).set('Cookie', host.auth);
     expect(approved.status).toBe(200);
+    expect(approved.body.guest).toMatchObject({ role: 'COHOST', status: 'LIVE' });
     expect((await request(app).post(`/api/live/${liveId}/viewers/join`).set('Cookie', guest.auth)).status).toBe(201);
 
-    const token = await request(app).post(`/api/live/${liveId}/token`).set('Cookie', guest.auth);
-    expect(token.status).toBe(200);
-    expect(token.body.role).toBe('guest');
-    const claims = await new TokenVerifier('test-livekit-key', 'test-livekit-secret-that-is-only-used-in-tests').verify(token.body.token);
+    const viewerToken = await request(app).post(`/api/live/${liveId}/token`).set('Cookie', guest.auth);
+    expect(viewerToken.status).toBe(200);
+    expect((await new TokenVerifier('test-livekit-key', 'test-livekit-secret-that-is-only-used-in-tests').verify(viewerToken.body.token)).video)
+      .toMatchObject({ canPublish: false, canSubscribe: true });
+    expect((await request(app).post(`/api/live/${liveId}/stage/token`).set('Cookie', guest.auth)).status).toBe(403);
+
+    const admitted = await request(app).post(`/api/live/${liveId}/guests/stage/join`).set('Cookie', guest.auth);
+    expect(admitted.status).toBe(200);
+    expect(admitted.body.guest).toMatchObject({ role: 'COHOST', status: 'LIVE' });
+    expect(admitted.body.guest.admittedAt).toEqual(expect.any(String));
+    const stageToken = await request(app).post(`/api/live/${liveId}/stage/token`).set('Cookie', guest.auth);
+    expect(stageToken.status).toBe(200);
+    expect(stageToken.body.role).toBe('cohost');
+    const claims = await new TokenVerifier('test-livekit-key', 'test-livekit-secret-that-is-only-used-in-tests').verify(stageToken.body.token);
     expect(claims.video).toMatchObject({
       roomJoin: true,
       room: `nova-live-${liveId}`,

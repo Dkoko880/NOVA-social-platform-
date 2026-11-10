@@ -377,9 +377,10 @@ async function serializePost(post: any, currentUserId?: string) {
     const activeGuestIds = new Set([
       liveRecord.hostId,
       ...(Array.isArray(liveRecord.guests)
-        ? liveRecord.guests.filter((guest): guest is { userId: string; status: string } =>
+        ? liveRecord.guests.filter((guest): guest is { userId: string; status: string; admittedAt: string } =>
           typeof guest === 'object' && guest !== null && 'userId' in guest && typeof guest.userId === 'string'
-          && 'status' in guest && guest.status === 'LIVE')
+          && 'status' in guest && guest.status === 'LIVE'
+          && 'admittedAt' in guest && typeof guest.admittedAt === 'string')
           .map((guest) => guest.userId)
         : []),
     ]);
@@ -1080,7 +1081,7 @@ socialRouter.post('/posts/:id/save', requireAuth, requireAccountAccess, async (r
   const userId = req.user!.id;
   const dbAvailable = await isDatabaseAvailable();
   const post = dbAvailable
-    ? await prisma.post.findUnique({ where: { id: postId }, select: { id: true, authorId: true, visibility: true, moderationHiddenAt: true } })
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { id: true, authorId: true, visibility: true, moderationHiddenAt: true, sourceLiveBroadcastId: true } })
     : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
 
   if (!post || !await canViewPost(post, userId)) {
@@ -1117,7 +1118,7 @@ socialRouter.delete('/posts/:id/save', requireAuth, requireAccountAccess, async 
   const userId = req.user!.id;
   const dbAvailable = await isDatabaseAvailable();
   const post = dbAvailable
-    ? await prisma.post.findUnique({ where: { id: postId }, select: { id: true, authorId: true, visibility: true, moderationHiddenAt: true } })
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { id: true, authorId: true, visibility: true, moderationHiddenAt: true, sourceLiveBroadcastId: true } })
     : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
 
   if (!post || !await canViewPost(post, userId)) {
@@ -1143,7 +1144,7 @@ socialRouter.post('/posts/:id/share', requireAuth, requireAccountAccess, async (
   const userId = req.user!.id;
   const dbAvailable = await isDatabaseAvailable();
   const post = dbAvailable
-    ? await prisma.post.findUnique({ where: { id: postId }, select: { id: true, authorId: true, visibility: true, moderationHiddenAt: true } })
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { id: true, authorId: true, visibility: true, moderationHiddenAt: true, sourceLiveBroadcastId: true } })
     : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
 
   if (!post || !await canViewPost(post, userId)) {
@@ -1209,7 +1210,7 @@ socialRouter.post('/posts/:id/react', requireAuth, requireAccountAccess, async (
   const userId = req.user!.id;
   const dbAvailable = await isDatabaseAvailable();
   const post = dbAvailable
-    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true, moderationHiddenAt: true } })
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true, moderationHiddenAt: true, sourceLiveBroadcastId: true } })
     : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
   if (!post || !await canViewPost(post, userId)) {
     return res.status(404).json({ message: 'Post not found.' });
@@ -1267,7 +1268,7 @@ socialRouter.delete('/posts/:id/react', requireAuth, requireAccountAccess, async
 
   const dbAvailable = await isDatabaseAvailable();
   const post = dbAvailable
-    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true, moderationHiddenAt: true } })
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true, moderationHiddenAt: true, sourceLiveBroadcastId: true } })
     : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
   if (!post || !await canViewPost(post, userId)) {
     return res.status(404).json({ message: 'Post not found.' });
@@ -1313,7 +1314,7 @@ socialRouter.post('/posts/:id/comments', requireAuth, requireAccountAccess, asyn
 
   const dbAvailable = await isDatabaseAvailable();
   const post = dbAvailable
-    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true, moderationHiddenAt: true } })
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true, moderationHiddenAt: true, sourceLiveBroadcastId: true } })
     : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
   if (!post || !await canViewPost(post, userId)) {
     return res.status(404).json({ message: 'Post not found.' });
@@ -1384,7 +1385,7 @@ socialRouter.get('/posts/:id/comments', async (req, res) => {
   const postId = String(req.params.id);
   const dbAvailable = await isDatabaseAvailable();
   const post = dbAvailable
-    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true, moderationHiddenAt: true } })
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, visibility: true, moderationHiddenAt: true, sourceLiveBroadcastId: true } })
     : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
   if (!post || !await canViewPost(post, req.user?.id)) {
     return res.status(404).json({ message: 'Post not found.' });
