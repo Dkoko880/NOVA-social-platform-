@@ -377,6 +377,9 @@ mediaRouter.post('/videos', requireAuth, uploadVideoFile, async (req, res, next)
       if (existing && existing.ownerUserId !== req.user!.id) {
         return res.status(409).json({ message: 'The replay media key is already owned by another account.' });
       }
+      if (existing) {
+        return res.status(201).json({ mediaUrl: `/api/media/files/${replayKey}`, contentType: existing.contentType });
+      }
     }
     const stored = await storage.putAttachment(req.file.buffer, contentType, extension, req.user!.id, replayKey);
     return res.status(201).json({ mediaUrl: stored.publicUrl, contentType });

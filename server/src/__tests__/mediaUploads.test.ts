@@ -216,7 +216,7 @@ describe('authenticated media uploads', () => {
     expect(firstUpload.status).toBe(201);
     expect(retryUpload.status).toBe(201);
     expect(retryUpload.body.mediaUrl).toBe(firstUpload.body.mediaUrl);
-    expect((await request(app).get(firstUpload.body.mediaUrl).set('Cookie', host.auth)).body).toEqual(Buffer.from('0000ftypmp42'));
+    expect((await request(app).get(firstUpload.body.mediaUrl).set('Cookie', host.auth)).body).toEqual(Buffer.from('0000ftypisom'));
     expect((await request(app)
       .post('/api/media/videos')
       .query({ liveId })

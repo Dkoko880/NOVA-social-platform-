@@ -84,6 +84,7 @@ export function LivePage() {
   const [recordingError, setRecordingError] = useState('')
   const [recordingRetryLiveId, setRecordingRetryLiveId] = useState('')
   const [recordingRetryBusy, setRecordingRetryBusy] = useState(false)
+  const [recordingUploadProgress, setRecordingUploadProgress] = useState<number | null>(null)
   const [recordingPhase, setRecordingPhase] = useState<RecordingPhase>('IDLE')
   const [fullscreenFallback, setFullscreenFallback] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -210,7 +211,13 @@ export function LivePage() {
       pending.status = 'UPLOADING'
       setRecordingPhase('UPLOADING')
       await savePendingLiveRecording(pending)
-      const uploaded = await uploadVideo(recordingFile, undefined, liveId)
+      setRecordingUploadProgress(0)
+      let uploaded: Awaited<ReturnType<typeof uploadVideo>>
+      try {
+        uploaded = await uploadVideo(recordingFile, setRecordingUploadProgress, liveId)
+      } finally {
+        setRecordingUploadProgress(null)
+      }
       pending.mediaUrl = uploaded.mediaUrl
       pending.contentType = uploaded.contentType
       pending.status = 'UPLOADED'
@@ -1074,7 +1081,7 @@ export function LivePage() {
 
       <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900" role="status">Live broadcasts use LiveKit for encrypted, low-latency audio and video. Your administrator must configure the LiveKit media server.</div>
       {error ? <p className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p> : null}
-      {recordingError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status"><p>{recordingError}</p>{recordingRetryLiveId ? <Button variant="secondary" size="sm" className="mt-2" onClick={() => void retrySaveRecording()} disabled={recordingRetryBusy}>{recordingRetryBusy ? 'Retrying upload…' : 'Retry upload and publish'}</Button> : null}</div> : null}
+      {recordingError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status"><p>{recordingError}</p>{recordingRetryLiveId ? <Button variant="secondary" size="sm" className="mt-2" onClick={() => void retrySaveRecording()} disabled={recordingRetryBusy}>{recordingRetryBusy ? recordingUploadProgress === null ? 'Saving replay…' : `Uploading replay ${recordingUploadProgress}%…` : 'Retry upload and publish'}</Button> : null}</div> : null}
 
       <form onSubmit={(event) => void createLive(event)} className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
         <h3 className="font-semibold text-slate-900">Create a live session</h3>

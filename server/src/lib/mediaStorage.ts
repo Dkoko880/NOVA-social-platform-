@@ -93,16 +93,17 @@ class DatabaseMediaStorage implements MediaStorage {
 
   async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string, key?: string) {
     const storedKey = key ?? `${randomUUID()}.${extension}`;
+    const storedBytes = new Uint8Array(bytes);
     await prisma.registrationMediaObject.upsert({
       where: { key: storedKey },
       create: {
         key: storedKey,
-        bytes: Buffer.from(bytes),
+        bytes: storedBytes,
         contentType,
         ownerUserId,
       },
       update: {
-        bytes: Buffer.from(bytes),
+        bytes: storedBytes,
         contentType,
         ownerUserId,
       },
