@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import multer from 'multer';
 import sharp from 'sharp';
 import env from '../config/env.js';
-import { getMediaStorage, imageFileMediaKeyFromUrl, MediaStorageUnavailableError, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
+import { getMediaStorage, imageFileMediaKeyFromUrl, liveReplayMediaKey, MediaStorageUnavailableError, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
 import { isDatabaseAvailable, prisma } from '../lib/prisma.js';
 import { socialStore } from '../lib/socialStore.js';
 import { getLiveSession } from '../lib/platform.js';
@@ -338,7 +338,29 @@ mediaRouter.post('/videos', requireAuth, uploadVideoFile, async (req, res, next)
     if (!extension) {
       return res.status(400).json({ message: 'Choose an MP4, WebM, or Ogg video.' });
     }
-    const stored = await getMediaStorage(env.NODE_ENV).putAttachment(req.file.buffer, req.file.mimetype, extension, req.user!.id);
+    const storage = getMediaStorage(env.NODE_ENV);
+    let replayKey: string | undefined;
+    if (req.query.liveId !== undefined) {
+      if (typeof req.query.liveId !== 'string' || !req.query.liveId.trim()) {
+        return res.status(400).json({ message: 'A valid live broadcast ID is required for a replay upload.' });
+      }
+      const live = await isDatabaseAvailable()
+        ? await prisma.liveBroadcast.findUnique({
+          where: { id: req.query.liveId },
+          select: { hostId: true, status: true, recordingStatus: true },
+        })
+        : getLiveSession(req.query.liveId);
+      if (!live || live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the broadcast host can upload its replay.' });
+      if (!['live', 'ended'].includes(live.status) || !['RECORDING', 'PROCESSING'].includes(live.recordingStatus)) {
+        return res.status(409).json({ message: 'This broadcast is not accepting a replay recording.' });
+      }
+      replayKey = liveReplayMediaKey(req.query.liveId, extension);
+      const existing = await storage.getMetadata(replayKey);
+      if (existing && existing.ownerUserId !== req.user!.id) {
+        return res.status(409).json({ message: 'The replay media key is already owned by another account.' });
+      }
+    }
+    const stored = await storage.putAttachment(req.file.buffer, req.file.mimetype, extension, req.user!.id, replayKey);
     return res.status(201).json({ mediaUrl: stored.publicUrl, contentType: req.file.mimetype });
   } catch (error) {
     if (error instanceof MediaStorageUnavailableError) return res.status(503).json({ message: 'Persistent video storage is not configured.' });
@@ -400,6 +422,7 @@ mediaRouter.get('/files/:key', requireAuth, async (req, res, next) => {
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Vary', 'Cookie, Authorization');
     res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Range, Content-Length');
     const rangeHeader = req.headers.range;
     const range = rangeHeader ? parseByteRange(rangeHeader, metadata.size) : null;
     if (rangeHeader) {

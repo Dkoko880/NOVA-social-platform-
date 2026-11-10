@@ -90,6 +90,29 @@ describe('PostMedia loading and playback', () => {
     expect(host?.querySelector('img')?.getAttribute('decoding')).toBe('async')
   })
 
+  it('retries an uploaded image request when Retry media is selected', async () => {
+    mocks.fetchMediaBlob
+      .mockRejectedValueOnce(new Error('Network request failed'))
+      .mockResolvedValueOnce(new Blob(['recovered image']))
+    await renderMedia({ url: '/api/media/uploads/image.jpg' })
+
+    await act(async () => {
+      TestIntersectionObserver.instances[0].trigger()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(host?.querySelector('[role="alert"]')?.textContent).toContain('Network request failed')
+    await act(async () => {
+      host?.querySelector<HTMLButtonElement>('button')?.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(mocks.fetchMediaBlob).toHaveBeenCalledTimes(2)
+    expect(host?.querySelector('img')?.getAttribute('src')).toBe('blob:post-media')
+  })
+
   it('does not preload or schedule heartbeat work for an inactive video', async () => {
     const setInterval = vi.spyOn(window, 'setInterval')
     await renderMedia({ url: '/api/media/files/clip.mp4', active: false, autoPlay: true, postId: 'post-1' })

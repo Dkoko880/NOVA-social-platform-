@@ -452,6 +452,7 @@ async function serializePost(post: any, currentUserId?: string, blockedUserIds?:
         title: live.title,
         description: live.description,
         status: live.status,
+        recordingStatus: live.recordingStatus,
         viewerCount: liveViewerCount,
       },
     } : {}),

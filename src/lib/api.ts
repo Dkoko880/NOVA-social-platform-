@@ -88,8 +88,11 @@ export function uploadMedia(file: File, onProgress?: (progress: number) => void)
   return uploadFile('/api/media/uploads', file, onProgress)
 }
 
-export function uploadVideo(file: File, onProgress?: (progress: number) => void) {
-  return uploadFile('/api/media/videos', file, onProgress)
+export function uploadVideo(file: File, onProgress?: (progress: number) => void, liveId?: string) {
+  const path = liveId
+    ? `/api/media/videos?liveId=${encodeURIComponent(liveId)}`
+    : '/api/media/videos'
+  return uploadFile(path, file, onProgress)
 }
 
 export async function uploadMessageAttachment(file: File) {

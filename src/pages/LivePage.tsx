@@ -7,10 +7,10 @@ import { PostMedia } from '../components/PostMedia'
 import { useAuth } from '../context/AuthContext'
 import { apiRequest, uploadVideo } from '../lib/api'
 import { openAuthenticatedEventStream } from '../lib/eventStream'
+import { deletePendingLiveRecording, getPendingLiveRecordings, savePendingLiveRecording, type PendingLiveRecording } from '../lib/liveRecordingStore'
 import { cameraSwitchErrorMessage, switchToNextCamera } from '../lib/cameraSwitching'
 
 type LiveComment = { id: string; userId: string; text: string; createdAt: string }
-type PendingLiveRecording = { liveId: string; blob: Blob; durationSeconds: number; mediaUrl?: string; contentType?: string }
 type LiveSession = {
   id: string
   hostId: string
@@ -18,6 +18,7 @@ type LiveSession = {
   description?: string | null
   visibility: string
   status: string
+  recordingStatus: 'UNAVAILABLE' | 'RECORDING' | 'PROCESSING' | 'READY'
   viewerCount: number
   moderators: string[]
   blockedUserIds: string[]
@@ -51,6 +52,7 @@ function AttachedTrack({ track, muted = false, className }: { track: Track; mute
 
 export function LivePage() {
   const { user } = useAuth()
+  const userId = user?.id
   const [searchParams] = useSearchParams()
   const [lives, setLives] = useState<LiveSession[]>([])
   const [joinedLive, setJoinedLive] = useState<LiveSession | null>(null)
@@ -95,6 +97,26 @@ export function LivePage() {
   const pendingRecordingRef = useRef<PendingLiveRecording | null>(null)
   const attemptedNotificationLiveRef = useRef('')
   const replayActionInFlightRef = useRef(false)
+
+  useEffect(() => {
+    if (!userId) {
+      pendingRecordingRef.current = null
+      return
+    }
+
+    let cancelled = false
+    void getPendingLiveRecordings(userId).then((pending) => {
+      if (cancelled || pendingRecordingRef.current || pending.length === 0) return
+      const recording = pending[0]
+      pendingRecordingRef.current = recording
+      setRecordingRetryLiveId(recording.liveId)
+      setRecordingError('A finalized live recording is waiting to be saved. Retry to finish publishing it.')
+    }).catch((loadError: unknown) => {
+      if (!cancelled) setRecordingError(loadError instanceof Error ? loadError.message : 'A pending live recording could not be restored.')
+    })
+
+    return () => { cancelled = true }
+  }, [userId])
 
   useEffect(() => {
     const video = previewVideoRef.current
@@ -184,24 +206,27 @@ export function LivePage() {
   const savePendingRecording = useCallback(async (liveId: string) => {
     const pending = pendingRecordingRef.current
     if (!pending || pending.liveId !== liveId) throw new Error('The local replay data is no longer available. No recording was uploaded.')
+    if (!userId || pending.ownerUserId !== userId) throw new Error('Sign in to the account that hosted this broadcast before retrying its recording.')
     if (!pending.mediaUrl || !pending.contentType) {
       const extension = pending.blob.type.includes('mp4') ? 'mp4' : pending.blob.type.includes('ogg') ? 'ogg' : 'webm'
       const recordingFile = new File([pending.blob], `live-${liveId}.${extension}`, { type: pending.blob.type || 'video/webm' })
-      const uploaded = await uploadVideo(recordingFile)
+      const uploaded = await uploadVideo(recordingFile, undefined, liveId)
       pending.mediaUrl = uploaded.mediaUrl
       pending.contentType = uploaded.contentType
+      await savePendingLiveRecording(pending)
     }
     const response = await apiRequest<{ replay: LiveReplay; live: LiveSession; duplicate?: boolean }>(`/api/live/${encodeURIComponent(liveId)}/replay`, {
       method: 'POST',
       body: JSON.stringify({ mediaUrl: pending.mediaUrl, contentType: pending.contentType, durationSeconds: pending.durationSeconds }),
     })
+    await deletePendingLiveRecording(pending.ownerUserId, pending.liveId)
     pendingRecordingRef.current = null
     setRecordingRetryLiveId('')
     setRecordingError('')
     setReplays((current) => [response.replay, ...current.filter((entry) => entry.id !== response.replay.id)])
     setReplayChoice(response.replay)
     return response.replay
-  }, [])
+  }, [userId])
 
   const refreshLives = () => {
     setLoading(true)
@@ -259,6 +284,7 @@ export function LivePage() {
       const viewerLive = !hostLive && joinedLiveRef.current?.id
         ? joinedLiveRef.current
         : null
+      const recordingUnavailable = Boolean(hostLive && recorderRef.current)
       roomRef.current = null
       hostRoomRef.current = null
       setGuestRoom(null)
@@ -272,7 +298,10 @@ export function LivePage() {
           ? `/api/live/${encodeURIComponent(viewerLive.id)}/viewers/leave`
           : null
       if (cleanupPath) {
-        void apiRequest(cleanupPath, { method: 'POST' })
+        void apiRequest(cleanupPath, {
+          method: 'POST',
+          ...(hostLive ? { body: JSON.stringify({ recordingUnavailable }) } : {}),
+        })
           .catch((cleanupError: unknown) => console.error('Unable to close live media while leaving the live page.', cleanupError))
       }
     }
@@ -340,6 +369,7 @@ export function LivePage() {
       room.on(RoomEvent.Disconnected, () => {
         if (roomRef.current !== room) return
         const wasHost = hostRoomRef.current === room
+        const recordingUnavailable = wasHost && Boolean(recorderRef.current)
         roomRef.current = null
         hostRoomRef.current = null
         setHostRoom(null)
@@ -352,7 +382,10 @@ export function LivePage() {
             recordingChunksRef.current = []
           }
           if (livesRef.current.find((entry) => entry.id === live.id)?.status === 'live') {
-            void apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/end`, { method: 'POST' })
+            void apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/end`, {
+              method: 'POST',
+              body: JSON.stringify({ recordingUnavailable }),
+            })
               .then(({ live: ended }) => setLiveState(ended))
               .catch((disconnectError) => setError(disconnectError instanceof Error ? disconnectError.message : 'Unable to close the disconnected broadcast.'))
           }
@@ -431,7 +464,16 @@ export function LivePage() {
         })
         const durationSeconds = Math.max(1, Math.floor((Date.now() - recordingStartedAtRef.current) / 1000))
         if (recording.size > 100 * 1024 * 1024) throw new Error('This replay exceeds the 100 MB video upload limit and was not saved.')
-        pendingRecordingRef.current = { liveId: live.id, blob: recording, durationSeconds }
+        if (!userId) throw new Error('Sign in again before saving this live recording.')
+        const pending: PendingLiveRecording = {
+          liveId: live.id,
+          ownerUserId: userId,
+          blob: recording,
+          durationSeconds,
+          updatedAt: Date.now(),
+        }
+        pendingRecordingRef.current = pending
+        await savePendingLiveRecording(pending)
         savedReplay = await savePendingRecording(live.id)
       } else {
         setRecordingError(recordingError || 'No replay was produced. LiveKit does not automatically record broadcasts; this device/browser must support MediaRecorder, and the server must have DATABASE_URL configured with the Prisma migrations applied.')
@@ -444,7 +486,12 @@ export function LivePage() {
       recordingChunksRef.current = []
     }
     try {
-      const response = await apiRequest<{ live: LiveSession; persistenceWarning?: boolean }>(`/api/live/${encodeURIComponent(live.id)}/end`, { method: 'POST' })
+      const recordingUnavailable = live.recordingStatus === 'RECORDING'
+        && pendingRecordingRef.current?.liveId !== live.id
+      const response = await apiRequest<{ live: LiveSession; persistenceWarning?: boolean }>(`/api/live/${encodeURIComponent(live.id)}/end`, {
+        method: 'POST',
+        body: JSON.stringify({ recordingUnavailable }),
+      })
       setLiveState(response.live)
       if (response.persistenceWarning) {
         setRecordingError((current) => [current, 'The broadcast ended, but its session history could not be saved. Configure the server DATABASE_URL, apply Prisma migrations, and ensure PostgreSQL is reachable.'].filter(Boolean).join(' '))

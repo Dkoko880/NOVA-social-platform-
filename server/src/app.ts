@@ -60,7 +60,7 @@ app.use(cors({
     callback(new Error('Origin not allowed by CORS policy.'));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 }));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());

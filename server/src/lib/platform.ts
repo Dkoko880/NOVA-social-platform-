@@ -99,7 +99,7 @@ export type LiveSession = {
   reactions: LiveReaction[];
   replayUrl?: string | null;
   recordingUrl?: string | null;
-  recordingStatus: 'UNAVAILABLE' | 'RECORDING' | 'READY';
+  recordingStatus: 'UNAVAILABLE' | 'RECORDING' | 'PROCESSING' | 'READY';
   analyticsHook: string | null;
   provider: 'livekit';
   providerConfigured: boolean;

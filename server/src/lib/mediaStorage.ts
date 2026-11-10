@@ -1,10 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDatabaseAvailable, prisma } from '../lib/prisma.js';
 import { socialStore } from './socialStore.js';
 
 export interface MediaStorage {
   put(bytes: Buffer, contentType: string, ownerUserId?: string): Promise<{ key: string; publicUrl: string }>;
-  putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string): Promise<{ key: string; publicUrl: string }>;
+  putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string, key?: string): Promise<{ key: string; publicUrl: string }>;
   setOwner(key: string, ownerUserId: string): Promise<boolean>;
   delete(key: string): Promise<void>;
   get(key: string): Promise<{ bytes: Buffer; contentType: string; ownerUserId: string | null } | null>;
@@ -28,10 +28,10 @@ class MemoryMediaStorage implements MediaStorage {
     return { key, publicUrl: `/api/media/avatars/${key}` };
   }
 
-  async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string) {
-    const key = `${randomUUID()}.${extension}`;
-    this.objects.set(key, { bytes: Buffer.from(bytes), contentType, ownerUserId });
-    return { key, publicUrl: `/api/media/files/${key}` };
+  async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string, key?: string) {
+    const storedKey = key ?? `${randomUUID()}.${extension}`;
+    this.objects.set(storedKey, { bytes: Buffer.from(bytes), contentType, ownerUserId });
+    return { key: storedKey, publicUrl: `/api/media/files/${storedKey}` };
   }
 
   async delete(key: string) {
@@ -91,17 +91,23 @@ class DatabaseMediaStorage implements MediaStorage {
     };
   }
 
-  async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string) {
-    const key = `${randomUUID()}.${extension}`;
-    await prisma.registrationMediaObject.create({
-      data: {
-        key,
+  async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string, key?: string) {
+    const storedKey = key ?? `${randomUUID()}.${extension}`;
+    await prisma.registrationMediaObject.upsert({
+      where: { key: storedKey },
+      create: {
+        key: storedKey,
+        bytes: Buffer.from(bytes),
+        contentType,
+        ownerUserId,
+      },
+      update: {
         bytes: Buffer.from(bytes),
         contentType,
         ownerUserId,
       },
     });
-    return { key, publicUrl: `/api/media/files/${key}` };
+    return { key: storedKey, publicUrl: `/api/media/files/${storedKey}` };
   }
 
   async delete(key: string) {
@@ -194,6 +200,12 @@ export function imageFileMediaKeyFromUrl(url: string) {
 export function videoMediaKeyFromUrl(url: string) {
   const match = /^\/api\/media\/files\/([0-9a-f-]{36}\.(?:webm|mp4|ogg))$/.exec(url);
   return match?.[1] ?? null;
+}
+
+export function liveReplayMediaKey(liveId: string, extension: string) {
+  const hash = createHash('sha256').update(`novachat-live-replay:${liveId}`).digest('hex').slice(0, 32);
+  const uuid = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20)}`;
+  return `${uuid}.${extension}`;
 }
 
 export async function uploadedMediaBelongsTo(url: string, userId: string, nodeEnv: string) {

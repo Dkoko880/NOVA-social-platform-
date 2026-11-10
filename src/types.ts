@@ -36,6 +36,7 @@ export type Post = {
     title: string
     description?: string | null
     status: 'live' | 'paused' | 'ended'
+    recordingStatus?: 'UNAVAILABLE' | 'RECORDING' | 'PROCESSING' | 'READY'
     viewerCount: number
   }
 }

@@ -153,8 +153,32 @@ describe('live broadcast lifecycle', () => {
     expect((await request(app).get('/api/live').set('Cookie', host.auth)).body.lives[0]).toMatchObject({
       id: liveId,
       status: 'ended',
-      recordingStatus: 'RECORDING',
+      recordingStatus: 'PROCESSING',
     });
+
+    const retry = await request(app).post(`/api/live/${liveId}/end`).set('Cookie', host.auth);
+    const feed = await request(app).get('/api/posts').set('Cookie', host.auth);
+
+    expect(retry.status).toBe(200);
+    expect(feed.body.posts.filter((post: { live?: { id: string } }) => post.live?.id === liveId)).toHaveLength(1);
+    expect(feed.body.posts[0].live).toMatchObject({ recordingStatus: 'PROCESSING' });
+  });
+
+  it('marks a failed local finalization as unavailable instead of reporting a saved replay', async () => {
+    const host = await register('UnavailableReplayHost');
+    const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Unfinalized stream' });
+    updateLiveSession(created.body.live.id, (live) => ({ ...live, status: 'live', recordingStatus: 'RECORDING' }));
+
+    const response = await request(app)
+      .post(`/api/live/${created.body.live.id}/end`)
+      .set('Cookie', host.auth)
+      .send({ recordingUnavailable: true });
+    const feed = await request(app).get('/api/posts').set('Cookie', host.auth);
+
+    expect(response.status).toBe(200);
+    expect(response.body.live.recordingStatus).toBe('UNAVAILABLE');
+    expect(feed.body.posts[0].live.recordingStatus).toBe('UNAVAILABLE');
+    expect(feed.body.posts[0].imageUrl).toBeNull();
   });
 
   it('does not allow another account to end a broadcast', async () => {

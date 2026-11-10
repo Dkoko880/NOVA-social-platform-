@@ -340,7 +340,15 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
               {post.live.status === 'live' ? <span className="ml-auto text-xs font-medium">{liveViewerCount} watching</span> : null}
             </p>
             {post.live.description ? <p className="mt-2 text-sm text-slate-700">{post.live.description}</p> : null}
-            {post.live.status === 'live' ? <LiveFeedPlayer liveId={post.live.id} title={post.live.title} viewerCount={liveViewerCount} onViewerCountChange={setLiveViewerCount} /> : <p className="mt-2 text-xs text-slate-600">{imageUrl ? 'Watch the saved replay below.' : 'This broadcast has ended.'}</p>}
+            {post.live.status === 'live'
+              ? <LiveFeedPlayer liveId={post.live.id} title={post.live.title} viewerCount={liveViewerCount} onViewerCountChange={setLiveViewerCount} />
+              : <p className="mt-2 text-xs text-slate-600">
+                {imageUrl
+                  ? 'Watch the saved replay below.'
+                  : post.live.recordingStatus === 'PROCESSING' || post.live.recordingStatus === 'RECORDING'
+                    ? 'The replay is still being finalized. Check back soon.'
+                    : 'This broadcast ended without an available recording.'}
+              </p>}
           </section> : null}
           {imageUrl ? <PostMedia url={imageUrl} postId={post.id} measurementSource="feed" alt="Post attachment" className="mt-4 max-h-[32rem] w-full rounded-[24px] object-cover" /> : null}
           <p className="mt-2 text-xs text-slate-500">{visibility === 'PUBLIC' ? 'Everyone' : visibility === 'FOLLOWERS' ? 'Followers' : 'Only me'}</p>

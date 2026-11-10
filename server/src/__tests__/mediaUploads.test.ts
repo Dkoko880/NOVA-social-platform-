@@ -193,6 +193,37 @@ describe('authenticated media uploads', () => {
     expect((await request(app).get(replay.publicUrl).set('Cookie', host.auth)).status).toBe(200);
   });
 
+  it('reuses one host-owned media object when a live replay upload is retried', async () => {
+    const host = await register('IdempotentReplayHost');
+    const other = await register('IdempotentReplayOther');
+    const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({
+      title: 'Retryable recording',
+    });
+    const liveId = created.body.live.id as string;
+    updateLiveSession(liveId, (live) => ({ ...live, status: 'live', recordingStatus: 'RECORDING' }));
+
+    const firstUpload = await request(app)
+      .post('/api/media/videos')
+      .query({ liveId })
+      .set('Cookie', host.auth)
+      .attach('file', Buffer.from('0000ftypisom'), { filename: 'recording.mp4', contentType: 'video/mp4' });
+    const retryUpload = await request(app)
+      .post('/api/media/videos')
+      .query({ liveId })
+      .set('Cookie', host.auth)
+      .attach('file', Buffer.from('0000ftypmp42'), { filename: 'recording.mp4', contentType: 'video/mp4' });
+
+    expect(firstUpload.status).toBe(201);
+    expect(retryUpload.status).toBe(201);
+    expect(retryUpload.body.mediaUrl).toBe(firstUpload.body.mediaUrl);
+    expect((await request(app).get(firstUpload.body.mediaUrl).set('Cookie', host.auth)).body).toEqual(Buffer.from('0000ftypmp42'));
+    expect((await request(app)
+      .post('/api/media/videos')
+      .query({ liveId })
+      .set('Cookie', other.auth)
+      .attach('file', Buffer.from('0000ftypisom'), { filename: 'recording.mp4', contentType: 'video/mp4' })).status).toBe(403);
+  });
+
   it('serves legacy feed images from the files endpoint with cookie or bearer auth while protecting private posts', async () => {
     const owner = await register('LegacyFileImageOwner');
     const registration = await request(app).post('/api/auth/register').send({
@@ -404,6 +435,16 @@ describe('authenticated media uploads', () => {
     expect(wrongType.status).toBe(400);
     expect((await request(app).post('/api/media/videos').attach('file', videoBytes, { filename: 'clip.mp4', contentType: 'video/mp4' })).status).toBe(401);
   }, 30_000);
+
+  it('allows cross-origin HEAD requests needed by authenticated video playback', async () => {
+    const response = await request(app)
+      .options('/api/media/files/example.mp4')
+      .set('Origin', 'https://nova-social-platform.vercel.app')
+      .set('Access-Control-Request-Method', 'HEAD');
+
+    expect(response.status).toBe(204);
+    expect(response.headers['access-control-allow-methods']).toContain('HEAD');
+  });
 
   it('serves empty video objects and rejects byte ranges for them', async () => {
     const owner = await register('EmptyVideoOwner');

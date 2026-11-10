@@ -150,6 +150,7 @@ async function publishLiveFeedPost(live: NonNullable<ReturnType<typeof getLiveSe
           visibility,
           sourceLiveBroadcastId: live.id,
           imageUrl: replayUrl,
+          createdAt: new Date(live.createdAt),
         },
         update: {
           content,
@@ -177,7 +178,7 @@ async function publishLiveFeedPost(live: NonNullable<ReturnType<typeof getLiveSe
     imageUrl: null,
     visibility,
     sourceLiveBroadcastId: live.id,
-    createdAt: now,
+    createdAt: live.createdAt,
     updatedAt: now,
   });
 }
@@ -278,7 +279,7 @@ function liveSessionFromRecord(record: {
     })),
     replayUrl: record.replayUrl,
     recordingUrl: record.replayUrl,
-    recordingStatus: record.recordingStatus as 'UNAVAILABLE' | 'RECORDING' | 'READY',
+    recordingStatus: record.recordingStatus as 'UNAVAILABLE' | 'RECORDING' | 'PROCESSING' | 'READY',
     analyticsHook: null,
     provider: 'livekit' as const,
     providerConfigured: isLiveKitConfigured(),
@@ -971,11 +972,22 @@ command2aRouter.post('/live/:id/stage/token', requireAuth, async (req, res) => {
   return res.set('Cache-Control', 'no-store').json({ token, url: liveKitUrl(), room: liveRoomName(live.id), role: guest.role.toLowerCase() });
 });
 
+const endLiveSchema = z.object({
+  recordingUnavailable: z.boolean().optional(),
+}).strict();
+
 command2aRouter.post('/live/:id/end', requireAuth, async (req, res) => {
+  const parsed = endLiveSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ message: 'Invalid live session end request.', errors: parsed.error.flatten() });
   const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the host can end this live session.' });
-  if (live.status === 'ended') return res.json({ live, message: 'Live session already ended.' });
+  if (live.status === 'ended') {
+    await persistLiveSession(live);
+    await publishLiveFeedPost(live);
+    await emitLiveFeedUpdate(live);
+    return res.json({ live, message: 'Live session already ended.' });
+  }
   if (isLiveKitConfigured()) {
     try {
       await endLiveKitRoom(liveRoomName(live.id));
@@ -986,9 +998,23 @@ command2aRouter.post('/live/:id/end', requireAuth, async (req, res) => {
   if (await isDatabaseAvailable()) {
     await prisma.liveBroadcastViewer.deleteMany({ where: { liveId: live.id } });
   }
-  const endedLive = { ...live, status: 'ended' as const, viewers: [], viewerCount: 0 };
+  const endedLive = {
+    ...live,
+    status: 'ended' as const,
+    recordingStatus: live.recordingStatus === 'RECORDING'
+      ? parsed.data.recordingUnavailable ? 'UNAVAILABLE' as const : 'PROCESSING' as const
+      : live.recordingStatus,
+    viewers: [],
+    viewerCount: 0,
+  };
   const persisted = await persistLiveSession(endedLive, new Date());
-  const next = updateLiveSession(live.id, (session) => ({ ...session, status: 'ended', viewers: [], viewerCount: 0 })) ?? endedLive;
+  const next = updateLiveSession(live.id, (session) => ({
+    ...session,
+    status: 'ended',
+    recordingStatus: endedLive.recordingStatus,
+    viewers: [],
+    viewerCount: 0,
+  })) ?? endedLive;
   await publishLiveFeedPost(next);
   await emitLiveFeedUpdate(next);
   return res.json({ live: next, message: 'Live session ended.', persistenceWarning: !persisted });
@@ -1022,7 +1048,7 @@ command2aRouter.post('/live/:id/replay', requireAuth, async (req, res) => {
     }
     return res.status(409).json({ message: 'A replay has already been saved for this broadcast.' });
   }
-  if (!['live', 'ended'].includes(live.status) || live.recordingStatus !== 'RECORDING') {
+  if (!['live', 'ended'].includes(live.status) || !['RECORDING', 'PROCESSING'].includes(live.recordingStatus)) {
     return res.status(409).json({ message: 'A recording must be active or awaiting upload before its replay can be saved.' });
   }
   const replay = await prisma.liveReplay.upsert({
@@ -1591,9 +1617,9 @@ command2aRouter.post('/live/:id/recording/stop', requireAuth, async (req, res) =
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can control recording.' });
   if (live.recordingStatus !== 'RECORDING') return res.status(409).json({ message: 'No recording is active.' });
-  const recordingStatus = live.replayUrl ? 'READY' as const : 'UNAVAILABLE' as const;
+  const recordingStatus = live.replayUrl ? 'READY' as const : 'PROCESSING' as const;
   await persistLiveSession({ ...live, recordingStatus });
-  const next = updateLiveSession(live.id, (session) => ({ ...session, recordingStatus: session.replayUrl ? 'READY' : 'UNAVAILABLE' }));
+  const next = updateLiveSession(live.id, (session) => ({ ...session, recordingStatus: session.replayUrl ? 'READY' : 'PROCESSING' }));
   return res.json({ live: next, replayReady: Boolean(next?.replayUrl) });
 });
 
