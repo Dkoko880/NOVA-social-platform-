@@ -224,6 +224,25 @@ describe('authenticated media uploads', () => {
       .attach('file', Buffer.from('0000ftypisom'), { filename: 'recording.mp4', contentType: 'video/mp4' })).status).toBe(403);
   });
 
+  it('accepts browser MediaRecorder MIME types with codec parameters', async () => {
+    const host = await register('CodecReplayHost');
+    const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Codec recording' });
+    const liveId = created.body.live.id as string;
+    updateLiveSession(liveId, (live) => ({ ...live, status: 'live', recordingStatus: 'RECORDING' }));
+
+    const upload = await request(app)
+      .post('/api/media/videos')
+      .query({ liveId })
+      .set('Cookie', host.auth)
+      .attach('file', Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x01]), {
+        filename: 'recording.webm',
+        contentType: 'video/webm;codecs=vp9,opus',
+      });
+
+    expect(upload.status, JSON.stringify(upload.body)).toBe(201);
+    expect(upload.body.contentType).toBe('video/webm');
+  });
+
   it('serves legacy feed images from the files endpoint with cookie or bearer auth while protecting private posts', async () => {
     const owner = await register('LegacyFileImageOwner');
     const registration = await request(app).post('/api/auth/register').send({

@@ -5,6 +5,7 @@ export type PendingLiveRecording = {
   durationSeconds: number
   mediaUrl?: string
   contentType?: string
+  status?: 'FINALIZED' | 'UPLOADING' | 'UPLOADED' | 'PUBLISHED'
   updatedAt: number
 }
 

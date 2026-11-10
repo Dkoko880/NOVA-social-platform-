@@ -10,7 +10,7 @@ import { reviewContentForSafety } from '../lib/moderation.js';
 import { callRoomName, createLiveKitToken, endLiveKitRoom, getLiveKitParticipants, isLiveKitConfigured, liveKitUrl, liveRoomName, removeLiveKitParticipant } from '../lib/livekit.js';
 import { getMediaStorage, uploadedVideoBelongsTo, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
 import { reviewContentForSafety as reviewPostContentForSafety } from '../lib/moderation.js';
-import { canDeleteLiveReplayMedia, isLiveReplayOwner } from '../lib/liveReplayPolicy.js';
+import { canDeleteLiveReplayMedia, isLiveReplayOwner, isLiveReplayUploadRetry } from '../lib/liveReplayPolicy.js';
 import { realtimeHub } from '../lib/realtime.js';
 
 const command2aRouter = Router();
@@ -1038,7 +1038,7 @@ command2aRouter.post('/live/:id/replay', requireAuth, async (req, res) => {
   if (!(await isDatabaseAvailable())) return res.status(503).json({ message: 'Persistent replay storage is unavailable. Configure the server DATABASE_URL, apply Prisma migrations, and ensure PostgreSQL is reachable; no replay was marked ready.' });
   const existing = await prisma.liveReplay.findUnique({ where: { id: live.id } });
   if (existing && existing.status !== 'DELETED') {
-    if (existing.hostId === req.user!.id && existing.status === 'READY' && existing.mediaUrl === parsed.data.mediaUrl) {
+    if (isLiveReplayUploadRetry(existing, req.user!.id, parsed.data.mediaUrl)) {
       const replayReadyLive = { ...live, recordingStatus: 'READY' as const, replayUrl: existing.mediaUrl, recordingUrl: existing.mediaUrl };
       const next = updateLiveSession(live.id, (session) => ({ ...session, ...replayReadyLive }));
       await persistLiveSession(next ?? replayReadyLive);
@@ -1604,9 +1604,9 @@ command2aRouter.post('/live/:id/block/:userId', requireAuth, async (req, res) =>
 command2aRouter.post('/live/:id/recording/start', requireAuth, async (req, res) => {
   const live = await loadLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
-  if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can control recording.' });
+  if (live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the host can start the live recording.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'Recording requires a running live session.' });
-  if (live.recordingStatus === 'RECORDING') return res.status(409).json({ message: 'Recording is already active.' });
+  if (live.recordingStatus === 'RECORDING') return res.json({ live, message: 'Live recording is already active.' });
   await persistLiveSession({ ...live, recordingStatus: 'RECORDING' });
   const next = updateLiveSession(live.id, (session) => ({ ...session, recordingStatus: 'RECORDING' }));
   return res.json({ live: next, providerConfigured: live.providerConfigured });

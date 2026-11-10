@@ -23,6 +23,11 @@ const attachmentTypes = new Map([
   ['application/pdf', 'pdf'],
   ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx'],
 ]);
+const videoTypesByExtension = new Map([
+  ['webm', 'video/webm'],
+  ['mp4', 'video/mp4'],
+  ['ogg', 'video/ogg'],
+]);
 
 export const mediaRouter = Router();
 
@@ -111,11 +116,12 @@ function uploadVideoFile(req: Request, res: Response, next: NextFunction) {
     limits: { fileSize: MAX_VIDEO_BYTES, files: 1 },
     fileFilter(_request, file, callback) {
       const extension = file.originalname.split('.').at(-1)?.toLowerCase();
-      if (!['video/mp4', 'video/webm', 'video/ogg'].includes(file.mimetype)
-        || attachmentTypes.get(file.mimetype) !== extension) {
+      const contentType = normalizedVideoContentType(file.mimetype, extension);
+      if (!contentType || attachmentTypes.get(contentType) !== extension) {
         callback(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'file'));
         return;
       }
+      file.mimetype = contentType;
       callback(null, true);
     },
   }).single('file')(req, res, (error) => {
@@ -127,6 +133,15 @@ function uploadVideoFile(req: Request, res: Response, next: NextFunction) {
     }
     return next(error);
   });
+}
+
+function normalizedVideoContentType(mimetype: string, extension?: string) {
+  const contentType = mimetype.split(';', 1)[0].trim().toLowerCase();
+  if (['video/webm', 'video/mp4', 'video/ogg'].includes(contentType)) return contentType;
+  if (contentType === 'text/plain' || contentType === 'application/octet-stream') {
+    return videoTypesByExtension.get(extension ?? '') ?? null;
+  }
+  return null;
 }
 
 function hasValidFileSignature(contentType: string, bytes: Buffer) {
@@ -331,37 +346,40 @@ mediaRouter.post('/uploads', requireAuth, uploadMediaFile, async (req, res, next
 mediaRouter.post('/videos', requireAuth, uploadVideoFile, async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'Choose a video to upload.' });
-    if (!hasValidFileSignature(req.file.mimetype, req.file.buffer)) {
-      return res.status(400).json({ message: 'The uploaded file does not match its declared video type.' });
-    }
-    const extension = attachmentTypes.get(req.file.mimetype);
-    if (!extension) {
+    const fileExtension = req.file.originalname.split('.').at(-1)?.toLowerCase();
+    const contentType = normalizedVideoContentType(req.file.mimetype, fileExtension);
+    const extension = contentType ? attachmentTypes.get(contentType) : undefined;
+    if (!contentType || !extension || extension !== fileExtension) {
       return res.status(400).json({ message: 'Choose an MP4, WebM, or Ogg video.' });
+    }
+    if (!hasValidFileSignature(contentType, req.file.buffer)) {
+      return res.status(400).json({ message: 'The uploaded file does not match its declared video type.' });
     }
     const storage = getMediaStorage(env.NODE_ENV);
     let replayKey: string | undefined;
-    if (req.query.liveId !== undefined) {
-      if (typeof req.query.liveId !== 'string' || !req.query.liveId.trim()) {
+    const liveId = req.query.liveId;
+    if (liveId !== undefined) {
+      if (typeof liveId !== 'string' || !liveId.trim()) {
         return res.status(400).json({ message: 'A valid live broadcast ID is required for a replay upload.' });
       }
       const live = await isDatabaseAvailable()
         ? await prisma.liveBroadcast.findUnique({
-          where: { id: req.query.liveId },
+          where: { id: liveId },
           select: { hostId: true, status: true, recordingStatus: true },
         })
-        : getLiveSession(req.query.liveId);
+        : getLiveSession(liveId);
       if (!live || live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the broadcast host can upload its replay.' });
       if (!['live', 'ended'].includes(live.status) || !['RECORDING', 'PROCESSING'].includes(live.recordingStatus)) {
         return res.status(409).json({ message: 'This broadcast is not accepting a replay recording.' });
       }
-      replayKey = liveReplayMediaKey(req.query.liveId, extension);
+      replayKey = liveReplayMediaKey(liveId, extension);
       const existing = await storage.getMetadata(replayKey);
       if (existing && existing.ownerUserId !== req.user!.id) {
         return res.status(409).json({ message: 'The replay media key is already owned by another account.' });
       }
     }
-    const stored = await storage.putAttachment(req.file.buffer, req.file.mimetype, extension, req.user!.id, replayKey);
-    return res.status(201).json({ mediaUrl: stored.publicUrl, contentType: req.file.mimetype });
+    const stored = await storage.putAttachment(req.file.buffer, contentType, extension, req.user!.id, replayKey);
+    return res.status(201).json({ mediaUrl: stored.publicUrl, contentType });
   } catch (error) {
     if (error instanceof MediaStorageUnavailableError) return res.status(503).json({ message: 'Persistent video storage is not configured.' });
     return next(error);

@@ -22,7 +22,7 @@ import { app } from '../app.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { socialStore } from '../lib/socialStore.js';
 import { clearCommand2AStores, updateLiveSession } from '../lib/platform.js';
-import { canDeleteLiveReplayMedia, isLiveReplayOwner } from '../lib/liveReplayPolicy.js';
+import { canDeleteLiveReplayMedia, isLiveReplayOwner, isLiveReplayUploadRetry } from '../lib/liveReplayPolicy.js';
 
 function cookie(response: { headers: Record<string, string | string[] | undefined> }) {
   const value = response.headers['set-cookie'];
@@ -164,6 +164,22 @@ describe('live broadcast lifecycle', () => {
     expect(feed.body.posts[0].live).toMatchObject({ recordingStatus: 'PROCESSING' });
   });
 
+  it('allows only the host to start a recording and treats duplicate starts as success', async () => {
+    const host = await register('RecordingStartHost');
+    const other = await register('RecordingStartOther');
+    const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Recording start' });
+    const liveId = created.body.live.id as string;
+    updateLiveSession(liveId, (live) => ({ ...live, status: 'live' }));
+
+    expect((await request(app).post(`/api/live/${liveId}/recording/start`).set('Cookie', other.auth)).status).toBe(403);
+    const started = await request(app).post(`/api/live/${liveId}/recording/start`).set('Cookie', host.auth);
+    const repeated = await request(app).post(`/api/live/${liveId}/recording/start`).set('Cookie', host.auth);
+
+    expect(started.status).toBe(200);
+    expect(repeated.status).toBe(200);
+    expect(repeated.body.live.recordingStatus).toBe('RECORDING');
+  });
+
   it('marks a failed local finalization as unavailable instead of reporting a saved replay', async () => {
     const host = await register('UnavailableReplayHost');
     const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Unfinalized stream' });
@@ -226,5 +242,14 @@ describe('live broadcast lifecycle', () => {
     expect(canDeleteLiveReplayMedia('DELETING', null, 'creator-1')).toBe(true);
     expect(canDeleteLiveReplayMedia('DELETING', { contentType: 'video/webm', ownerUserId: 'another-user' }, 'creator-1')).toBe(false);
     expect(canDeleteLiveReplayMedia('DELETING', { contentType: 'application/pdf', ownerUserId: 'creator-1' }, 'creator-1')).toBe(false);
+  });
+
+  it('only treats same-owner READY or PUBLISHED replay uploads as idempotent retries', () => {
+    const replay = { hostId: 'creator-1', mediaUrl: '/api/media/files/replay.webm', status: 'PUBLISHED' };
+    expect(isLiveReplayUploadRetry(replay, 'creator-1', replay.mediaUrl)).toBe(true);
+    expect(isLiveReplayUploadRetry({ ...replay, status: 'READY' }, 'creator-1', replay.mediaUrl)).toBe(true);
+    expect(isLiveReplayUploadRetry(replay, 'another-user', replay.mediaUrl)).toBe(false);
+    expect(isLiveReplayUploadRetry(replay, 'creator-1', '/api/media/files/other.webm')).toBe(false);
+    expect(isLiveReplayUploadRetry({ ...replay, status: 'DELETED' }, 'creator-1', replay.mediaUrl)).toBe(false);
   });
 });

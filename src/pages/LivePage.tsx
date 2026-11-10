@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { Heart, Headphones, Mic, MicOff, PhoneOff, Radio, RefreshCw, Send, Share2, Users, Video, VideoOff, Volume2 } from 'lucide-react'
+import { Heart, Headphones, Maximize, Mic, MicOff, Minimize, PhoneOff, Radio, RefreshCw, Send, Share2, Users, Video, VideoOff, Volume2 } from 'lucide-react'
 import type { RemoteTrack, Room, Track } from 'livekit-client'
 import { Link, useSearchParams } from 'react-router-dom'
 import { Button } from '../components/ui/Button'
@@ -7,6 +7,7 @@ import { PostMedia } from '../components/PostMedia'
 import { useAuth } from '../context/AuthContext'
 import { apiRequest, uploadVideo } from '../lib/api'
 import { openAuthenticatedEventStream } from '../lib/eventStream'
+import { finalizeLiveRecording } from '../lib/liveRecording'
 import { deletePendingLiveRecording, getPendingLiveRecordings, savePendingLiveRecording, type PendingLiveRecording } from '../lib/liveRecordingStore'
 import { cameraSwitchErrorMessage, switchToNextCamera } from '../lib/cameraSwitching'
 
@@ -31,6 +32,7 @@ type LiveSession = {
   host?: { name: string; avatar?: string | null } | null
 }
 type LiveReplay = { id: string; title: string; mediaUrl: string; durationSeconds: number; status: string; createdAt: string; publishedPostId?: string | null }
+type RecordingPhase = 'IDLE' | 'RECORDING' | 'FINALIZING' | 'UPLOADING' | 'PROCESSING' | 'PUBLISHED' | 'FAILED' | 'UNAVAILABLE'
 const cameraTrackSource = 'camera' as Track.Source
 const microphoneTrackSource = 'microphone' as Track.Source
 
@@ -82,10 +84,14 @@ export function LivePage() {
   const [recordingError, setRecordingError] = useState('')
   const [recordingRetryLiveId, setRecordingRetryLiveId] = useState('')
   const [recordingRetryBusy, setRecordingRetryBusy] = useState(false)
+  const [recordingPhase, setRecordingPhase] = useState<RecordingPhase>('IDLE')
+  const [fullscreenFallback, setFullscreenFallback] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const [shareNotice, setShareNotice] = useState('')
   const [replayBusy, setReplayBusy] = useState(false)
   const [replayActionError, setReplayActionError] = useState('')
   const roomRef = useRef<Room | null>(null)
+  const liveContainerRef = useRef<HTMLElement | null>(null)
   const hostRoomRef = useRef<Room | null>(null)
   const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   const joinedLiveRef = useRef<LiveSession | null>(null)
@@ -95,6 +101,9 @@ export function LivePage() {
   const recordingChunksRef = useRef<Blob[]>([])
   const recordingStartedAtRef = useRef(0)
   const pendingRecordingRef = useRef<PendingLiveRecording | null>(null)
+  const recordingPipelineRef = useRef(new Map<string, Promise<LiveReplay>>())
+  const autoRecoveryAttemptRef = useRef(new Set<string>())
+  const endInFlightRef = useRef(false)
   const attemptedNotificationLiveRef = useRef('')
   const replayActionInFlightRef = useRef(false)
 
@@ -106,10 +115,15 @@ export function LivePage() {
 
     let cancelled = false
     void getPendingLiveRecordings(userId).then((pending) => {
-      if (cancelled || pendingRecordingRef.current || pending.length === 0) return
+      if (cancelled || pendingRecordingRef.current) return
+      if (pending.length === 0) {
+        setRecordingRetryLiveId('')
+        return
+      }
       const recording = pending[0]
       pendingRecordingRef.current = recording
       setRecordingRetryLiveId(recording.liveId)
+      setRecordingPhase(recording.status === 'UPLOADED' ? 'PROCESSING' : 'FAILED')
       setRecordingError('A finalized live recording is waiting to be saved. Retry to finish publishing it.')
     }).catch((loadError: unknown) => {
       if (!cancelled) setRecordingError(loadError instanceof Error ? loadError.message : 'A pending live recording could not be restored.')
@@ -149,24 +163,6 @@ export function LivePage() {
     setReplaysLoading(true)
     await loadReplays()
   }
-
-  const clearRoom = useCallback(async (room: Room) => {
-    intentionalDisconnectRef.current.add(room)
-    if (hostRoomRef.current === room && recorderRef.current) {
-      if (recorderRef.current.state === 'recording') recorderRef.current.stop()
-      recorderRef.current = null
-      recordingChunksRef.current = []
-      setRecordingError('The broadcast ended before the replay recording could be finalized.')
-    }
-    if (roomRef.current === room) roomRef.current = null
-    if (hostRoomRef.current === room) hostRoomRef.current = null
-    setGuestRoom((current) => current === room ? null : current)
-    setHostRoom((current) => current === room ? null : current)
-    setRemoteTracks([])
-    setNeedsAudioPlayback(false)
-    setNeedsVideoPlayback(false)
-    await room.disconnect(true)
-  }, [])
 
   const fetchLives = useCallback((signal?: AbortSignal) => apiRequest<{ lives: LiveSession[] }>('/api/live', { signal }), [])
 
@@ -208,25 +204,100 @@ export function LivePage() {
     if (!pending || pending.liveId !== liveId) throw new Error('The local replay data is no longer available. No recording was uploaded.')
     if (!userId || pending.ownerUserId !== userId) throw new Error('Sign in to the account that hosted this broadcast before retrying its recording.')
     if (!pending.mediaUrl || !pending.contentType) {
-      const extension = pending.blob.type.includes('mp4') ? 'mp4' : pending.blob.type.includes('ogg') ? 'ogg' : 'webm'
-      const recordingFile = new File([pending.blob], `live-${liveId}.${extension}`, { type: pending.blob.type || 'video/webm' })
+      const contentType = pending.blob.type.split(';', 1)[0].trim().toLowerCase() || 'video/webm'
+      const extension = contentType.includes('mp4') ? 'mp4' : contentType.includes('ogg') ? 'ogg' : 'webm'
+      const recordingFile = new File([pending.blob], `live-${liveId}.${extension}`, { type: contentType })
+      pending.status = 'UPLOADING'
+      setRecordingPhase('UPLOADING')
+      await savePendingLiveRecording(pending)
       const uploaded = await uploadVideo(recordingFile, undefined, liveId)
       pending.mediaUrl = uploaded.mediaUrl
       pending.contentType = uploaded.contentType
+      pending.status = 'UPLOADED'
       await savePendingLiveRecording(pending)
     }
     const response = await apiRequest<{ replay: LiveReplay; live: LiveSession; duplicate?: boolean }>(`/api/live/${encodeURIComponent(liveId)}/replay`, {
       method: 'POST',
       body: JSON.stringify({ mediaUrl: pending.mediaUrl, contentType: pending.contentType, durationSeconds: pending.durationSeconds }),
     })
+    setRecordingPhase('PROCESSING')
+    const live = livesRef.current.find((entry) => entry.id === liveId)
+    const visibility = live?.visibility === 'private' ? 'PRIVATE' : live?.visibility === 'followers' ? 'FOLLOWERS' : 'PUBLIC'
+    const published = await apiRequest<{ replay: LiveReplay }>(`/api/live/${encodeURIComponent(liveId)}/replay/publish`, {
+      method: 'POST',
+      body: JSON.stringify({ content: response.replay.title, visibility }),
+    })
+    pending.status = 'PUBLISHED'
     await deletePendingLiveRecording(pending.ownerUserId, pending.liveId)
-    pendingRecordingRef.current = null
-    setRecordingRetryLiveId('')
-    setRecordingError('')
-    setReplays((current) => [response.replay, ...current.filter((entry) => entry.id !== response.replay.id)])
-    setReplayChoice(response.replay)
-    return response.replay
+    const remaining = await getPendingLiveRecordings(pending.ownerUserId)
+    pendingRecordingRef.current = remaining[0] ?? null
+    setRecordingRetryLiveId(remaining[0]?.liveId ?? '')
+    setRecordingError(remaining.length ? 'Another finalized live recording is waiting to be saved.' : '')
+    setRecordingPhase('PUBLISHED')
+    setReplays((current) => [published.replay, ...current.filter((entry) => entry.id !== published.replay.id)])
+    setReplayChoice(published.replay)
+    return published.replay
   }, [userId])
+
+  const finalizeAndPublishRecording = useCallback(async (liveId: string) => {
+    const active = recordingPipelineRef.current.get(liveId)
+    if (active) return active
+    const operation = (async () => {
+      let pending = pendingRecordingRef.current
+      if (!pending || pending.liveId !== liveId) {
+        const recorder = recorderRef.current
+        if (!recorder) throw new Error('No finalized live recording is available on this device.')
+        setRecordingPhase('FINALIZING')
+        const blob = await finalizeLiveRecording(recorder, recordingChunksRef.current)
+        if (blob.size > 100 * 1024 * 1024) throw new Error('This replay exceeds the 100 MB video upload limit and was not saved.')
+        if (!userId) throw new Error('Sign in again before saving this live recording.')
+        pending = {
+          liveId,
+          ownerUserId: userId,
+          blob,
+          durationSeconds: Math.max(1, Math.floor((Date.now() - recordingStartedAtRef.current) / 1000)),
+          updatedAt: Date.now(),
+          status: 'FINALIZED',
+        }
+        pendingRecordingRef.current = pending
+        await savePendingLiveRecording(pending)
+        recordingChunksRef.current = []
+      }
+      recorderRef.current = null
+      return await savePendingRecording(liveId)
+    })()
+    recordingPipelineRef.current.set(liveId, operation)
+    try {
+      return await operation
+    } catch (recordingFailure) {
+      setRecordingPhase(pendingRecordingRef.current?.liveId === liveId ? 'FAILED' : 'UNAVAILABLE')
+      throw recordingFailure
+    } finally {
+      recordingPipelineRef.current.delete(liveId)
+    }
+  }, [savePendingRecording, userId])
+
+  const clearRoom = useCallback(async (room: Room) => {
+    intentionalDisconnectRef.current.add(room)
+    if (hostRoomRef.current === room && recorderRef.current) {
+      const live = livesRef.current.find((entry) => entry.hostId === userId && entry.status === 'live')
+      if (live) {
+        try {
+          await finalizeAndPublishRecording(live.id)
+        } catch (recordingFailure) {
+          setRecordingError(recordingFailure instanceof Error ? recordingFailure.message : 'The live replay could not be saved.')
+        }
+      }
+    }
+    if (roomRef.current === room) roomRef.current = null
+    if (hostRoomRef.current === room) hostRoomRef.current = null
+    setGuestRoom((current) => current === room ? null : current)
+    setHostRoom((current) => current === room ? null : current)
+    setRemoteTracks([])
+    setNeedsAudioPlayback(false)
+    setNeedsVideoPlayback(false)
+    await room.disconnect(true)
+  }, [finalizeAndPublishRecording, userId])
 
   const refreshLives = () => {
     setLoading(true)
@@ -284,13 +355,15 @@ export function LivePage() {
       const viewerLive = !hostLive && joinedLiveRef.current?.id
         ? joinedLiveRef.current
         : null
-      const recordingUnavailable = Boolean(hostLive && recorderRef.current)
+      const recordingPromise = hostLive && recorderRef.current
+        ? finalizeAndPublishRecording(hostLive.id).catch((recordingFailure) => {
+          console.error('Unable to finalize the live recording while leaving the live page.', recordingFailure)
+          return null
+        })
+        : Promise.resolve(null)
       roomRef.current = null
       hostRoomRef.current = null
       setGuestRoom(null)
-      if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
-      recorderRef.current = null
-      recordingChunksRef.current = []
       void room.disconnect(true)
       const cleanupPath = hostLive
         ? `/api/live/${encodeURIComponent(hostLive.id)}/end`
@@ -298,14 +371,16 @@ export function LivePage() {
           ? `/api/live/${encodeURIComponent(viewerLive.id)}/viewers/leave`
           : null
       if (cleanupPath) {
-        void apiRequest(cleanupPath, {
+        void recordingPromise.then(() => apiRequest(cleanupPath, {
           method: 'POST',
-          ...(hostLive ? { body: JSON.stringify({ recordingUnavailable }) } : {}),
-        })
+          ...(hostLive ? {
+            body: JSON.stringify({ recordingUnavailable: pendingRecordingRef.current?.liveId !== hostLive.id }),
+          } : {}),
+        }))
           .catch((cleanupError: unknown) => console.error('Unable to close live media while leaving the live page.', cleanupError))
       }
     }
-  }, [user?.id])
+  }, [finalizeAndPublishRecording, user?.id])
 
   const createLive = async (event: FormEvent) => {
     event.preventDefault()
@@ -369,23 +444,22 @@ export function LivePage() {
       room.on(RoomEvent.Disconnected, () => {
         if (roomRef.current !== room) return
         const wasHost = hostRoomRef.current === room
-        const recordingUnavailable = wasHost && Boolean(recorderRef.current)
         roomRef.current = null
         hostRoomRef.current = null
         setHostRoom(null)
         if (!intentionalDisconnectRef.current.has(room!)) {
           setError('The LiveKit broadcast disconnected.')
-          if (wasHost) {
-            setRecordingError('The connection ended before the replay recording could be finalized.')
-            if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
-            recorderRef.current = null
-            recordingChunksRef.current = []
-          }
           if (livesRef.current.find((entry) => entry.id === live.id)?.status === 'live') {
-            void apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/end`, {
+            const recordingPromise = wasHost && recorderRef.current
+              ? finalizeAndPublishRecording(live.id).catch((recordingFailure) => {
+                setRecordingError(recordingFailure instanceof Error ? recordingFailure.message : 'The live replay could not be finalized.')
+                return null
+              })
+              : Promise.resolve(null)
+            void recordingPromise.then(() => apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/end`, {
               method: 'POST',
-              body: JSON.stringify({ recordingUnavailable }),
-            })
+              body: JSON.stringify({ recordingUnavailable: wasHost && pendingRecordingRef.current?.liveId !== live.id }),
+            }))
               .then(({ live: ended }) => setLiveState(ended))
               .catch((disconnectError) => setError(disconnectError instanceof Error ? disconnectError.message : 'Unable to close the disconnected broadcast.'))
           }
@@ -409,7 +483,7 @@ export function LivePage() {
         const audioTrack = room.localParticipant.getTrackPublication(microphoneTrackSource)?.track
         if (!videoTrack || !audioTrack || typeof MediaRecorder === 'undefined') throw new Error('This browser cannot record the live camera and microphone stream.')
         const stream = new MediaStream([videoTrack.mediaStreamTrack, audioTrack.mediaStreamTrack])
-        const mimeType = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+        const mimeType = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
           .find((candidate) => MediaRecorder.isTypeSupported(candidate))
         if (!mimeType) throw new Error('This browser does not support a compatible live replay recording format.')
         const recorder = new MediaRecorder(stream, { mimeType })
@@ -419,9 +493,17 @@ export function LivePage() {
         recorderRef.current = recorder
         recorder.start(1000)
         await apiRequest(`/api/live/${encodeURIComponent(live.id)}/recording/start`, { method: 'POST' })
+        setRecordingPhase('RECORDING')
       } catch (recordError) {
-        if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
+        if (recorderRef.current) {
+          try {
+            await finalizeLiveRecording(recorderRef.current, recordingChunksRef.current)
+          } catch {
+            recordingChunksRef.current = []
+          }
+        }
         recorderRef.current = null
+        setRecordingPhase('UNAVAILABLE')
         setRecordingError(recordError instanceof Error ? `Live video is on, but replay recording is unavailable: ${recordError.message}` : 'Live video is on, but replay recording is unavailable.')
       }
     } catch (startError) {
@@ -445,48 +527,28 @@ export function LivePage() {
   }
 
   const endBroadcast = async (live: LiveSession) => {
+    if (endInFlightRef.current) return
+    endInFlightRef.current = true
     setBusy(true)
     setError('')
     setRecordingError('')
     let savedReplay: LiveReplay | null = null
     try {
-      const recorder = recorderRef.current
-      if (recorder?.state === 'recording') {
-        const recording = await new Promise<Blob>((resolve, reject) => {
-          recorder.addEventListener('stop', () => {
-            const blob = new Blob(recordingChunksRef.current, { type: recorder.mimeType })
-            recordingChunksRef.current = []
-            if (!blob.size) reject(new Error('The recording was empty; no replay was saved.'))
-            else resolve(blob)
-          }, { once: true })
-          recorder.addEventListener('error', () => reject(new Error('The browser could not finalize the live recording.')), { once: true })
-          recorder.stop()
-        })
-        const durationSeconds = Math.max(1, Math.floor((Date.now() - recordingStartedAtRef.current) / 1000))
-        if (recording.size > 100 * 1024 * 1024) throw new Error('This replay exceeds the 100 MB video upload limit and was not saved.')
-        if (!userId) throw new Error('Sign in again before saving this live recording.')
-        const pending: PendingLiveRecording = {
-          liveId: live.id,
-          ownerUserId: userId,
-          blob: recording,
-          durationSeconds,
-          updatedAt: Date.now(),
-        }
-        pendingRecordingRef.current = pending
-        await savePendingLiveRecording(pending)
-        savedReplay = await savePendingRecording(live.id)
+      if (recorderRef.current || pendingRecordingRef.current?.liveId === live.id) {
+        savedReplay = await finalizeAndPublishRecording(live.id)
       } else {
-        setRecordingError(recordingError || 'No replay was produced. LiveKit does not automatically record broadcasts; this device/browser must support MediaRecorder, and the server must have DATABASE_URL configured with the Prisma migrations applied.')
+        setRecordingPhase('UNAVAILABLE')
+        setRecordingError(recordingError || 'No replay recording was available from this device.')
       }
     } catch (recordError) {
       setRecordingError(recordError instanceof Error ? recordError.message : 'The live replay could not be finalized or stored.')
       if (pendingRecordingRef.current?.liveId === live.id) setRecordingRetryLiveId(live.id)
     } finally {
       recorderRef.current = null
-      recordingChunksRef.current = []
     }
     try {
       const recordingUnavailable = live.recordingStatus === 'RECORDING'
+        && !savedReplay
         && pendingRecordingRef.current?.liveId !== live.id
       const response = await apiRequest<{ live: LiveSession; persistenceWarning?: boolean }>(`/api/live/${encodeURIComponent(live.id)}/end`, {
         method: 'POST',
@@ -509,18 +571,61 @@ export function LivePage() {
         }
       }
       setBusy(false)
+      endInFlightRef.current = false
     }
   }
 
-  const retrySaveRecording = async () => {
+  const retrySaveRecording = useCallback(async () => {
     if (recordingRetryBusy || !recordingRetryLiveId) return
     setRecordingRetryBusy(true)
     try {
       await savePendingRecording(recordingRetryLiveId)
     } catch (retryError) {
+      setRecordingPhase('FAILED')
       setRecordingError(retryError instanceof Error ? retryError.message : 'Unable to save the replay. Check your connection and retry.')
     } finally {
       setRecordingRetryBusy(false)
+    }
+  }, [recordingRetryBusy, recordingRetryLiveId, savePendingRecording])
+
+  useEffect(() => {
+    if (!userId || !recordingRetryLiveId || autoRecoveryAttemptRef.current.has(recordingRetryLiveId)) return
+    autoRecoveryAttemptRef.current.add(recordingRetryLiveId)
+    void retrySaveRecording()
+  }, [recordingRetryLiveId, retrySaveRecording, userId])
+
+  useEffect(() => {
+    const onFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement))
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && fullscreenFallback) {
+        setFullscreenFallback(false)
+        setIsFullscreen(false)
+      }
+    }
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullscreenChange)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [fullscreenFallback])
+
+  const toggleFullscreen = async () => {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen()
+      return
+    }
+    const container = liveContainerRef.current
+    if (container?.requestFullscreen) {
+      try {
+        await container.requestFullscreen()
+      } catch (fullscreenError) {
+        setError(fullscreenError instanceof Error ? fullscreenError.message : 'Fullscreen mode could not be opened.')
+      }
+    } else {
+        const nextFullscreen = !fullscreenFallback
+        setFullscreenFallback(nextFullscreen)
+        setIsFullscreen(nextFullscreen)
     }
   }
 
@@ -881,15 +986,15 @@ export function LivePage() {
 
   return (
     <>
-    {activeLive ? <section className="fixed inset-0 z-[60] h-[100dvh] w-screen overflow-hidden bg-slate-950 text-white" aria-label="Live video session">
+    {activeLive ? <section ref={liveContainerRef} className="fixed inset-0 z-[60] h-[100dvh] w-screen overflow-hidden bg-slate-950 text-white" aria-label="Live video session">
       <div className="absolute inset-0 bg-slate-950">
-        {previewLive?.id === activeLive.id && previewStream ? <video ref={previewVideoRef} muted autoPlay playsInline className="h-full w-full object-cover" /> : (isHost || approvedGuest) && localVideoTrack ? <AttachedTrack track={localVideoTrack} muted className="h-full w-full object-cover" /> : remoteVideoTracks.map(({ key, track }) => <AttachedTrack key={key} track={track} className="h-full w-full object-cover" />)}
+        {previewLive?.id === activeLive.id && previewStream ? <video ref={previewVideoRef} muted autoPlay playsInline className="h-full w-full object-contain" /> : (isHost || approvedGuest) && localVideoTrack ? <AttachedTrack track={localVideoTrack} muted className="h-full w-full object-contain" /> : remoteVideoTracks.map(({ key, track }) => <AttachedTrack key={key} track={track} className="h-full w-full object-contain" />)}
         {!isHost && !approvedGuest && remoteVideoTracks.length === 0 ? <div className="absolute inset-0 flex items-center justify-center px-8 text-center text-sm text-white/80" role="status">Connecting to the live video…</div> : null}
         {isHost && !hostCameraOn ? <div className="absolute inset-0 flex items-center justify-center text-white/70"><VideoOff className="h-12 w-12" aria-hidden="true" /><span className="sr-only">Camera is off</span></div> : null}
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/70 via-transparent to-black/80" />
       </div>
 
-      <header className="absolute inset-x-0 top-0 flex flex-wrap items-center justify-between gap-3 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:px-6">
+      <header className="absolute inset-x-0 top-0 flex max-h-[36dvh] flex-wrap items-start justify-between gap-3 overflow-y-auto overscroll-contain px-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <div className="min-w-0">
             <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide"><span className={`rounded-full px-2 py-1 ${activeLive.status === 'live' ? 'bg-rose-600' : 'bg-amber-500'}`}>{activeLive.status === 'live' ? 'LIVE' : 'PREVIEW'}</span><span className="inline-flex items-center gap-1"><Users className="h-4 w-4" aria-hidden="true" />{activeLive.viewerCount}</span></p>
@@ -914,12 +1019,17 @@ export function LivePage() {
             </> : null}
             <button type="button" aria-label="Leave live broadcast" title="Leave live broadcast" onClick={() => void leaveLive()} disabled={busy} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75"><PhoneOff className="h-5 w-5" /><span className="hidden sm:inline">Leave</span></button>
           </>}
+          <button type="button" aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} onClick={() => void toggleFullscreen()} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 text-white ring-1 ring-white/20 hover:bg-black/75">
+            {isFullscreen ? <Minimize className="h-5 w-5" aria-hidden="true" /> : <Maximize className="h-5 w-5" aria-hidden="true" />}
+          </button>
         </div>
       </header>
 
-      {error ? <p className="absolute left-3 right-3 top-28 mx-auto max-w-xl rounded-xl bg-black/75 p-3 text-center text-sm text-white" role="alert">{error}</p> : null}
-      {!isHost && approvedGuest && !guestRoom ? <button type="button" onClick={() => void joinGuestStage(activeLive)} disabled={busy} className="absolute left-3 top-28 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">Join the stage</button> : null}
-      {canModerate ? <section aria-label="Live moderation controls" className="absolute right-3 top-28 max-h-[45dvh] w-72 max-w-[calc(100vw-1.5rem)] space-y-3 overflow-y-auto rounded-xl bg-black/75 p-3 text-xs text-white ring-1 ring-white/20">
+      {error ? <p className="absolute left-3 right-3 top-[max(5rem,calc(env(safe-area-inset-top)+4.5rem))] mx-auto max-w-xl rounded-xl bg-black/75 p-3 text-center text-sm text-white" role="alert">{error}</p> : null}
+      {!isHost && approvedGuest && !guestRoom ? <button type="button" onClick={() => void joinGuestStage(activeLive)} disabled={busy} className="absolute left-3 top-[max(5rem,calc(env(safe-area-inset-top)+4.5rem))] min-h-11 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">Join the stage</button> : null}
+      {canModerate ? <details aria-label="Live moderation controls" className="absolute right-3 top-[max(5rem,calc(env(safe-area-inset-top)+4.5rem))] max-h-[45dvh] w-72 max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-xl bg-black/80 text-xs text-white ring-1 ring-white/20">
+        <summary className="min-h-11 cursor-pointer list-none px-3 py-3 font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-white">Live controls · {activeLive.guests.filter((guest) => guest.status === 'REQUESTED').length} requests · {activeLive.viewerCount} viewers</summary>
+        <div className="max-h-[calc(45dvh-3rem)] space-y-3 overflow-y-auto overscroll-contain px-3 pb-3">
         <div><h2 className="font-semibold">Guest requests</h2>
           {activeLive.guests.filter((guest) => guest.status !== 'REMOVED').map((guest) => <div key={guest.userId} className="mt-2 flex items-center justify-between gap-2">
             <span className="truncate">{guest.userId} · {guest.role.toLowerCase()} · {guest.status.toLowerCase()}</span>
@@ -937,9 +1047,11 @@ export function LivePage() {
             <button type="button" onClick={() => void updateViewerControl(activeLive, viewer.userId, 'block')} className="rounded bg-rose-900 px-2 py-1">Block</button>
           </div>)}
         </div>
-      </section> : null}
+        </div>
+      </details> : null}
       {!isHost && (needsAudioPlayback || needsVideoPlayback) ? <button type="button" onClick={() => void enablePlayback()} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white px-5 py-3 font-semibold text-slate-900 shadow-lg"><Volume2 className="mr-2 inline h-5 w-5" aria-hidden="true" />Tap to enable sound</button> : null}
-      {recordingError && isHost ? <p className="absolute bottom-36 left-3 right-3 mx-auto max-w-lg rounded-xl bg-amber-950/90 p-3 text-center text-xs text-amber-50" role="status">{recordingError}</p> : null}
+      {isHost && recordingPhase !== 'IDLE' ? <p className="absolute bottom-36 left-3 right-3 mx-auto max-w-lg rounded-xl bg-black/75 p-2 text-center text-xs text-white" role="status">Replay: {recordingPhase.toLowerCase()}</p> : null}
+      {recordingError && isHost ? <p className="absolute bottom-24 left-3 right-3 mx-auto max-w-lg rounded-xl bg-amber-950/90 p-3 text-center text-xs text-amber-50" role="status">{recordingError}</p> : null}
       {shareNotice ? <p className="absolute bottom-36 left-3 right-3 text-center text-sm text-white" role="status">{shareNotice}</p> : null}
 
       {!isHost ? <div className="absolute inset-x-0 bottom-0 flex max-h-[40dvh] flex-col bg-gradient-to-t from-black/85 to-transparent px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-12 sm:px-6">
@@ -962,7 +1074,7 @@ export function LivePage() {
 
       <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900" role="status">Live broadcasts use LiveKit for encrypted, low-latency audio and video. Your administrator must configure the LiveKit media server.</div>
       {error ? <p className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p> : null}
-      {recordingError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status"><p>{recordingError}</p>{recordingRetryLiveId ? <Button variant="secondary" size="sm" className="mt-2" onClick={() => void retrySaveRecording()} disabled={recordingRetryBusy}>{recordingRetryBusy ? 'Retrying replay save…' : 'Retry replay save'}</Button> : null}</div> : null}
+      {recordingError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status"><p>{recordingError}</p>{recordingRetryLiveId ? <Button variant="secondary" size="sm" className="mt-2" onClick={() => void retrySaveRecording()} disabled={recordingRetryBusy}>{recordingRetryBusy ? 'Retrying upload…' : 'Retry upload and publish'}</Button> : null}</div> : null}
 
       <form onSubmit={(event) => void createLive(event)} className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
         <h3 className="font-semibold text-slate-900">Create a live session</h3>
