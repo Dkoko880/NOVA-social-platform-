@@ -346,21 +346,34 @@ async function addNotification(recipientId: string, actorId: string | null, type
   });
 }
 
-async function serializePost(post: any, currentUserId?: string) {
+async function serializePost(post: any, currentUserId?: string, blockedUserIds?: string[]) {
   const author = await getUserById(post.authorId ?? post.author?.id);
   const authorSummary = author ? await getUserSummary(author) : null;
   const reactionCounts = await getPostReactionCounts(post.id);
   const currentUserReaction = currentUserId ? await getCurrentUserReaction(post.id, currentUserId) : null;
   const likeCount = reactionCounts.LIKE ?? 0;
+  const hiddenCommentAuthors = new Set(blockedUserIds ?? (currentUserId ? await getBlockedUserIds(currentUserId) : []));
   const commentCount = post.comments
-    ? post.comments.filter((comment: { moderationHiddenAt?: Date | string | null }) => !comment.moderationHiddenAt).length
+    ? post.comments.filter((comment: { authorId?: string; moderationHiddenAt?: Date | string | null }) =>
+      !comment.moderationHiddenAt && (!comment.authorId || !hiddenCommentAuthors.has(comment.authorId)),
+    ).length
     : await (async () => {
     const dbAvailable = await isDatabaseAvailable();
     if (dbAvailable) {
-      return prisma.comment.count({ where: { postId: post.id, moderationHiddenAt: null } });
+      return prisma.comment.count({
+        where: {
+          postId: post.id,
+          moderationHiddenAt: null,
+          ...(hiddenCommentAuthors.size ? { authorId: { notIn: [...hiddenCommentAuthors] } } : {}),
+        },
+      });
     }
 
-    return socialStore.state.comments.filter((comment) => comment.postId === post.id && !comment.moderationHiddenAt).length;
+    return socialStore.state.comments.filter((comment) =>
+      comment.postId === post.id
+      && !comment.moderationHiddenAt
+      && !hiddenCommentAuthors.has(comment.authorId),
+    ).length;
   })();
   const dbAvailable = await isDatabaseAvailable();
   const liveRecord = post.sourceLiveBroadcastId && dbAvailable
@@ -984,7 +997,7 @@ socialRouter.get('/posts', async (req, res) => {
     ));
     const result = await Promise.all(visiblePosts
       .filter((post): post is NonNullable<typeof post> => post !== null)
-      .map((post) => serializePost(post, req.user?.id)));
+      .map((post) => serializePost(post, req.user?.id, blockedUserIds)));
     return res.json({ posts: result });
   }
 
@@ -992,7 +1005,7 @@ socialRouter.get('/posts', async (req, res) => {
     await canViewPost(post, req.user?.id) ? post : null
   )))).filter((post): post is NonNullable<typeof post> => post !== null);
   const posts = visiblePosts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(offset, offset + (Number.isFinite(limit) && limit > 0 ? limit : 10));
-  const result = await Promise.all(posts.map((post) => serializePost(post, req.user?.id)));
+  const result = await Promise.all(posts.map((post) => serializePost(post, req.user?.id, blockedUserIds)));
   return res.json({ posts: result });
 });
 

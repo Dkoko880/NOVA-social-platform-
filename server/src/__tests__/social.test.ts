@@ -413,6 +413,40 @@ describe('social platform features', () => {
     expect(visiblePost.body.post.shares).toBe(2);
   });
 
+  it('does not count comments from blocked users in Feed post summaries', async () => {
+    const accounts = await Promise.all([
+      { name: 'FeedOwner', email: 'feed-owner@example.com' },
+      { name: 'FeedCommenter', email: 'feed-commenter@example.com' },
+      { name: 'FeedViewer', email: 'feed-viewer@example.com' },
+    ].map(async (account) => {
+      await request(app).post('/api/auth/register').send({
+        ...account,
+        password: 'Password123',
+        communityRulesAccepted: true,
+      });
+      const login = await request(app).post('/api/auth/login').send({
+        email: account.email,
+        password: 'Password123',
+      });
+      return { user: login.body.user as { id: string }, auth: getCookieHeader(login) };
+    }));
+    const [owner, commenter, viewer] = accounts;
+    const created = await request(app).post('/api/posts').set('Cookie', owner.auth).send({ content: 'Feed privacy' });
+    const postId = created.body.post.id as string;
+    const comment = await request(app).post(`/api/posts/${postId}/comments`).set('Cookie', commenter.auth).send({ content: 'Hidden by block' });
+
+    expect(comment.status).toBe(201);
+    await request(app).post(`/api/users/${commenter.user.id}/block`).set('Cookie', viewer.auth);
+
+    const feed = await request(app).get('/api/posts').set('Cookie', viewer.auth);
+    const post = await request(app).get(`/api/posts/${postId}`).set('Cookie', viewer.auth);
+    const comments = await request(app).get(`/api/posts/${postId}/comments`).set('Cookie', viewer.auth);
+
+    expect(feed.body.posts.find((entry: { id: string }) => entry.id === postId).comments).toBe(0);
+    expect(post.body.post.comments).toBe(0);
+    expect(comments.body.comments).toEqual([]);
+  });
+
   it('user cannot delete another user post', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',
