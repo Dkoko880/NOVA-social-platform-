@@ -215,6 +215,9 @@ describe('authenticated media uploads', () => {
 
     expect(firstUpload.status).toBe(201);
     expect(retryUpload.status).toBe(201);
+    expect(firstUpload.body.uploadMetrics).toMatchObject({ sizeBytes: 12 });
+    expect(firstUpload.body.uploadMetrics.receiveDurationMs).toBeGreaterThanOrEqual(0);
+    expect(firstUpload.body.uploadMetrics.serverProcessingMs).toBeGreaterThanOrEqual(0);
     expect(retryUpload.body.mediaUrl).toBe(firstUpload.body.mediaUrl);
     expect((await request(app).get(firstUpload.body.mediaUrl).set('Cookie', host.auth)).body).toEqual(Buffer.from('0000ftypisom'));
     expect((await request(app)
@@ -222,6 +225,60 @@ describe('authenticated media uploads', () => {
       .query({ liveId })
       .set('Cookie', other.auth)
       .attach('file', Buffer.from('0000ftypisom'), { filename: 'recording.mp4', contentType: 'video/mp4' })).status).toBe(403);
+  });
+
+  it('records local throughput and memory observations across replay upload sizes', async () => {
+    const host = await register('ReplayPerfHost');
+    const sizes = [256 * 1024, 2 * 1024 * 1024, 10 * 1024 * 1024];
+    const measurements: Array<Record<string, number>> = [];
+    let observedPeakRssBytes = process.memoryUsage().rss;
+
+    for (const sizeBytes of sizes) {
+      const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: `Replay ${sizeBytes}` });
+      const liveId = created.body.live.id as string;
+      updateLiveSession(liveId, (live) => ({ ...live, status: 'live', recordingStatus: 'RECORDING' }));
+      const videoBytes = Buffer.alloc(sizeBytes);
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]).copy(videoBytes);
+      const rssBeforeBytes = process.memoryUsage().rss;
+      let peakRssBytes = rssBeforeBytes;
+      const memorySampler = setInterval(() => {
+        peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
+      }, 1);
+      const startedAt = performance.now();
+      let upload;
+      try {
+        upload = await request(app)
+          .post('/api/media/videos')
+          .query({ liveId })
+          .set('Cookie', host.auth)
+          .attach('file', videoBytes, { filename: 'recording.webm', contentType: 'video/webm' });
+      } finally {
+        clearInterval(memorySampler);
+      }
+      const uploadDurationMs = performance.now() - startedAt;
+      observedPeakRssBytes = Math.max(observedPeakRssBytes, peakRssBytes);
+      expect(upload.status).toBe(201);
+      expect(upload.body.uploadMetrics).toMatchObject({ sizeBytes });
+      measurements.push({
+        sizeBytes,
+        uploadDurationMs: Math.round(uploadDurationMs),
+        throughputBytesPerSecond: Math.round(sizeBytes / (uploadDurationMs / 1000)),
+        serverReceiveDurationMs: upload.body.uploadMetrics.receiveDurationMs,
+        serverProcessingMs: upload.body.uploadMetrics.serverProcessingMs,
+        rssBeforeBytes,
+        observedPeakRssBytes: peakRssBytes,
+        observedPeakRssDeltaBytes: Math.max(0, peakRssBytes - rssBeforeBytes),
+      });
+      const mediaKey = String(upload.body.mediaUrl).split('/').at(-1);
+      if (mediaKey) await getMediaStorage('test').delete(mediaKey);
+    }
+
+    expect(observedPeakRssBytes).toBeGreaterThan(0);
+    console.info('LIVE_REPLAY_UPLOAD_BENCHMARK', JSON.stringify({
+      network: 'in-process Supertest; no external network shaping',
+      payload: 'synthetic WebM signature plus zero-filled bytes',
+      measurements,
+    }));
   });
 
   it('accepts browser MediaRecorder MIME types with codec parameters', async () => {

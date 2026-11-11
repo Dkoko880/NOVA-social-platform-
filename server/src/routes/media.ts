@@ -30,6 +30,7 @@ const videoTypesByExtension = new Map([
 ]);
 
 export const mediaRouter = Router();
+const videoUploadStartedAt = new WeakMap<Request, number>();
 
 function parseByteRange(value: string, size: number) {
   const match = /^bytes=(\d*)-(\d*)$/.exec(value);
@@ -111,6 +112,7 @@ function uploadAttachmentFile(req: Request, res: Response, next: NextFunction) {
 }
 
 function uploadVideoFile(req: Request, res: Response, next: NextFunction) {
+  videoUploadStartedAt.set(req, performance.now());
   multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_VIDEO_BYTES, files: 1 },
@@ -346,6 +348,9 @@ mediaRouter.post('/uploads', requireAuth, uploadMediaFile, async (req, res, next
 mediaRouter.post('/videos', requireAuth, uploadVideoFile, async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'Choose a video to upload.' });
+    const receiveDurationMs = Math.round(performance.now() - (videoUploadStartedAt.get(req) ?? performance.now()));
+    videoUploadStartedAt.delete(req);
+    const processingStartedAt = performance.now();
     const fileExtension = req.file.originalname.split('.').at(-1)?.toLowerCase();
     const contentType = normalizedVideoContentType(req.file.mimetype, fileExtension);
     const extension = contentType ? attachmentTypes.get(contentType) : undefined;
@@ -378,11 +383,19 @@ mediaRouter.post('/videos', requireAuth, uploadVideoFile, async (req, res, next)
         return res.status(409).json({ message: 'The replay media key is already owned by another account.' });
       }
       if (existing) {
-        return res.status(201).json({ mediaUrl: `/api/media/files/${replayKey}`, contentType: existing.contentType });
+        return res.status(201).json({
+          mediaUrl: `/api/media/files/${replayKey}`,
+          contentType: existing.contentType,
+          uploadMetrics: { sizeBytes: req.file.size, receiveDurationMs, serverProcessingMs: Math.round(performance.now() - processingStartedAt) },
+        });
       }
     }
     const stored = await storage.putAttachment(req.file.buffer, contentType, extension, req.user!.id, replayKey);
-    return res.status(201).json({ mediaUrl: stored.publicUrl, contentType });
+    return res.status(201).json({
+      mediaUrl: stored.publicUrl,
+      contentType,
+      uploadMetrics: { sizeBytes: req.file.size, receiveDurationMs, serverProcessingMs: Math.round(performance.now() - processingStartedAt) },
+    });
   } catch (error) {
     if (error instanceof MediaStorageUnavailableError) return res.status(503).json({ message: 'Persistent video storage is not configured.' });
     return next(error);

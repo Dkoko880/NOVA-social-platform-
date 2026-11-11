@@ -5,7 +5,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { Button } from '../components/ui/Button'
 import { PostMedia } from '../components/PostMedia'
 import { useAuth } from '../context/AuthContext'
-import { apiRequest, uploadVideo } from '../lib/api'
+import { apiRequest, uploadVideo, type VideoUploadProgress } from '../lib/api'
 import { openAuthenticatedEventStream } from '../lib/eventStream'
 import { finalizeLiveRecording } from '../lib/liveRecording'
 import { deletePendingLiveRecording, getPendingLiveRecordings, savePendingLiveRecording, type PendingLiveRecording } from '../lib/liveRecordingStore'
@@ -35,6 +35,26 @@ type LiveReplay = { id: string; title: string; mediaUrl: string; durationSeconds
 type RecordingPhase = 'IDLE' | 'RECORDING' | 'FINALIZING' | 'UPLOADING' | 'PROCESSING' | 'PUBLISHED' | 'FAILED' | 'UNAVAILABLE'
 const cameraTrackSource = 'camera' as Track.Source
 const microphoneTrackSource = 'microphone' as Track.Source
+
+function formatUploadBytes(bytes: number) {
+  return `${new Intl.NumberFormat().format(bytes)} bytes`
+}
+
+function describeUploadProgress(progress: VideoUploadProgress | null, percent: number | null) {
+  if (!progress) return 'Preparing replay upload…'
+  if (progress.phase === 'SAVING') {
+    return progress.serverProcessingMs === undefined
+      ? 'Upload complete; saving replay on the server…'
+      : `Server saved the replay in ${(progress.serverProcessingMs / 1000).toFixed(1)} seconds.`
+  }
+  const speed = progress.bytesPerSecond && progress.bytesPerSecond > 0
+    ? `${(progress.bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s`
+    : 'measuring speed'
+  const remaining = progress.estimatedSecondsRemaining === null
+    ? 'estimating time'
+    : `${progress.estimatedSecondsRemaining}s remaining`
+  return `${percent ?? 0}% · ${formatUploadBytes(progress.uploadedBytes)} of ${formatUploadBytes(progress.totalBytes)} transferred · ${formatUploadBytes(progress.recordingBytes)} recording · ${speed} · ${remaining}`
+}
 
 function AttachedTrack({ track, muted = false, className }: { track: Track; muted?: boolean; className: string }) {
   const elementRef = useRef<HTMLMediaElement | null>(null)
@@ -85,6 +105,7 @@ export function LivePage() {
   const [recordingRetryLiveId, setRecordingRetryLiveId] = useState('')
   const [recordingRetryBusy, setRecordingRetryBusy] = useState(false)
   const [recordingUploadProgress, setRecordingUploadProgress] = useState<number | null>(null)
+  const [recordingUploadDetails, setRecordingUploadDetails] = useState<VideoUploadProgress | null>(null)
   const [recordingPhase, setRecordingPhase] = useState<RecordingPhase>('IDLE')
   const [fullscreenFallback, setFullscreenFallback] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -103,6 +124,7 @@ export function LivePage() {
   const recordingStartedAtRef = useRef(0)
   const pendingRecordingRef = useRef<PendingLiveRecording | null>(null)
   const recordingPipelineRef = useRef(new Map<string, Promise<LiveReplay>>())
+  const recordingSaveRef = useRef(new Map<string, Promise<LiveReplay>>())
   const autoRecoveryAttemptRef = useRef(new Set<string>())
   const endInFlightRef = useRef(false)
   const attemptedNotificationLiveRef = useRef('')
@@ -200,50 +222,59 @@ export function LivePage() {
     }
   }, [])
 
-  const savePendingRecording = useCallback(async (liveId: string) => {
-    const pending = pendingRecordingRef.current
-    if (!pending || pending.liveId !== liveId) throw new Error('The local replay data is no longer available. No recording was uploaded.')
-    if (!userId || pending.ownerUserId !== userId) throw new Error('Sign in to the account that hosted this broadcast before retrying its recording.')
-    if (!pending.mediaUrl || !pending.contentType) {
-      const contentType = pending.blob.type.split(';', 1)[0].trim().toLowerCase() || 'video/webm'
-      const extension = contentType.includes('mp4') ? 'mp4' : contentType.includes('ogg') ? 'ogg' : 'webm'
-      const recordingFile = new File([pending.blob], `live-${liveId}.${extension}`, { type: contentType })
-      pending.status = 'UPLOADING'
-      setRecordingPhase('UPLOADING')
-      await savePendingLiveRecording(pending)
-      setRecordingUploadProgress(0)
-      let uploaded: Awaited<ReturnType<typeof uploadVideo>>
-      try {
-        uploaded = await uploadVideo(recordingFile, setRecordingUploadProgress, liveId)
-      } finally {
-        setRecordingUploadProgress(null)
+  const savePendingRecording = useCallback((liveId: string) => {
+    const active = recordingSaveRef.current.get(liveId)
+    if (active) return active
+    const operation = (async () => {
+      const pending = pendingRecordingRef.current
+      if (!pending || pending.liveId !== liveId) throw new Error('The local replay data is no longer available. No recording was uploaded.')
+      if (!userId || pending.ownerUserId !== userId) throw new Error('Sign in to the account that hosted this broadcast before retrying its recording.')
+      if (!pending.mediaUrl || !pending.contentType) {
+        const contentType = pending.blob.type.split(';', 1)[0].trim().toLowerCase() || 'video/webm'
+        const extension = contentType.includes('mp4') ? 'mp4' : contentType.includes('ogg') ? 'ogg' : 'webm'
+        const recordingFile = new File([pending.blob], `live-${liveId}.${extension}`, { type: contentType })
+        pending.status = 'UPLOADING'
+        setRecordingPhase('UPLOADING')
+        setRecordingUploadProgress(0)
+        setRecordingUploadDetails(null)
+        let uploaded: Awaited<ReturnType<typeof uploadVideo>>
+        try {
+          uploaded = await uploadVideo(recordingFile, setRecordingUploadProgress, liveId, setRecordingUploadDetails)
+        } finally {
+          setRecordingUploadProgress(null)
+        }
+        pending.mediaUrl = uploaded.mediaUrl
+        pending.contentType = uploaded.contentType
+        pending.status = 'UPLOADED'
+        await savePendingLiveRecording(pending)
       }
-      pending.mediaUrl = uploaded.mediaUrl
-      pending.contentType = uploaded.contentType
-      pending.status = 'UPLOADED'
-      await savePendingLiveRecording(pending)
-    }
-    const response = await apiRequest<{ replay: LiveReplay; live: LiveSession; duplicate?: boolean }>(`/api/live/${encodeURIComponent(liveId)}/replay`, {
-      method: 'POST',
-      body: JSON.stringify({ mediaUrl: pending.mediaUrl, contentType: pending.contentType, durationSeconds: pending.durationSeconds }),
-    })
-    setRecordingPhase('PROCESSING')
-    const live = livesRef.current.find((entry) => entry.id === liveId)
-    const visibility = live?.visibility === 'private' ? 'PRIVATE' : live?.visibility === 'followers' ? 'FOLLOWERS' : 'PUBLIC'
-    const published = await apiRequest<{ replay: LiveReplay }>(`/api/live/${encodeURIComponent(liveId)}/replay/publish`, {
-      method: 'POST',
-      body: JSON.stringify({ content: response.replay.title, visibility }),
-    })
-    pending.status = 'PUBLISHED'
-    await deletePendingLiveRecording(pending.ownerUserId, pending.liveId)
-    const remaining = await getPendingLiveRecordings(pending.ownerUserId)
-    pendingRecordingRef.current = remaining[0] ?? null
-    setRecordingRetryLiveId(remaining[0]?.liveId ?? '')
-    setRecordingError(remaining.length ? 'Another finalized live recording is waiting to be saved.' : '')
-    setRecordingPhase('PUBLISHED')
-    setReplays((current) => [published.replay, ...current.filter((entry) => entry.id !== published.replay.id)])
-    setReplayChoice(published.replay)
-    return published.replay
+      const response = await apiRequest<{ replay: LiveReplay; live: LiveSession; duplicate?: boolean }>(`/api/live/${encodeURIComponent(liveId)}/replay`, {
+        method: 'POST',
+        body: JSON.stringify({ mediaUrl: pending.mediaUrl, contentType: pending.contentType, durationSeconds: pending.durationSeconds }),
+      })
+      setRecordingPhase('PROCESSING')
+      const live = livesRef.current.find((entry) => entry.id === liveId)
+      const visibility = live?.visibility === 'private' ? 'PRIVATE' : live?.visibility === 'followers' ? 'FOLLOWERS' : 'PUBLIC'
+      const published = await apiRequest<{ replay: LiveReplay }>(`/api/live/${encodeURIComponent(liveId)}/replay/publish`, {
+        method: 'POST',
+        body: JSON.stringify({ content: response.replay.title, visibility }),
+      })
+      pending.status = 'PUBLISHED'
+      await deletePendingLiveRecording(pending.ownerUserId, pending.liveId)
+      const remaining = await getPendingLiveRecordings(pending.ownerUserId)
+      pendingRecordingRef.current = remaining[0] ?? null
+      setRecordingRetryLiveId(remaining[0]?.liveId ?? '')
+      setRecordingError(remaining.length ? 'Another finalized live recording is waiting to be saved.' : '')
+      setRecordingPhase('PUBLISHED')
+      setReplays((current) => [published.replay, ...current.filter((entry) => entry.id !== published.replay.id)])
+      setReplayChoice(published.replay)
+      return published.replay
+    })()
+    recordingSaveRef.current.set(liveId, operation)
+    void operation.finally(() => {
+      if (recordingSaveRef.current.get(liveId) === operation) recordingSaveRef.current.delete(liveId)
+    }).catch(() => {})
+    return operation
   }, [userId])
 
   const finalizeAndPublishRecording = useCallback(async (liveId: string) => {
@@ -493,7 +524,7 @@ export function LivePage() {
         const mimeType = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
           .find((candidate) => MediaRecorder.isTypeSupported(candidate))
         if (!mimeType) throw new Error('This browser does not support a compatible live replay recording format.')
-        const recorder = new MediaRecorder(stream, { mimeType })
+        const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 1_500_000, audioBitsPerSecond: 96_000 })
         recordingChunksRef.current = []
         recordingStartedAtRef.current = Date.now()
         recorder.ondataavailable = (event) => { if (event.data.size > 0) recordingChunksRef.current.push(event.data) }
@@ -1058,6 +1089,7 @@ export function LivePage() {
       </details> : null}
       {!isHost && (needsAudioPlayback || needsVideoPlayback) ? <button type="button" onClick={() => void enablePlayback()} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white px-5 py-3 font-semibold text-slate-900 shadow-lg"><Volume2 className="mr-2 inline h-5 w-5" aria-hidden="true" />Tap to enable sound</button> : null}
       {isHost && recordingPhase !== 'IDLE' ? <p className="absolute bottom-36 left-3 right-3 mx-auto max-w-lg rounded-xl bg-black/75 p-2 text-center text-xs text-white" role="status">Replay: {recordingPhase.toLowerCase()}</p> : null}
+      {isHost && recordingPhase === 'UPLOADING' ? <p className="absolute bottom-24 left-3 right-3 mx-auto max-w-lg rounded-xl bg-black/80 p-3 text-center text-xs text-white" role="status">{describeUploadProgress(recordingUploadDetails, recordingUploadProgress)}</p> : null}
       {recordingError && isHost ? <p className="absolute bottom-24 left-3 right-3 mx-auto max-w-lg rounded-xl bg-amber-950/90 p-3 text-center text-xs text-amber-50" role="status">{recordingError}</p> : null}
       {shareNotice ? <p className="absolute bottom-36 left-3 right-3 text-center text-sm text-white" role="status">{shareNotice}</p> : null}
 
@@ -1081,6 +1113,7 @@ export function LivePage() {
 
       <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900" role="status">Live broadcasts use LiveKit for encrypted, low-latency audio and video. Your administrator must configure the LiveKit media server.</div>
       {error ? <p className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p> : null}
+      {recordingPhase === 'UPLOADING' || recordingPhase === 'PROCESSING' || recordingPhase === 'FINALIZING' ? <p className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900" role="status">{recordingPhase === 'UPLOADING' ? describeUploadProgress(recordingUploadDetails, recordingUploadProgress) : recordingPhase === 'PROCESSING' ? 'Publishing the uploaded replay to Feed…' : 'Finalizing the replay…'}</p> : null}
       {recordingError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status"><p>{recordingError}</p>{recordingRetryLiveId ? <Button variant="secondary" size="sm" className="mt-2" onClick={() => void retrySaveRecording()} disabled={recordingRetryBusy}>{recordingRetryBusy ? recordingUploadProgress === null ? 'Saving replay…' : `Uploading replay ${recordingUploadProgress}%…` : 'Retry upload and publish'}</Button> : null}</div> : null}
 
       <form onSubmit={(event) => void createLive(event)} className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">

@@ -37,7 +37,9 @@ describe('post media selection and video navigation', () => {
 
   it('reports upload progress and completes only after the video upload API confirms success', async () => {
     const progress: number[] = []
+    const details: Array<{ phase: string; uploadedBytes: number; totalBytes: number; recordingBytes: number }> = []
     let requestUrl = ''
+    let requestTimeout = 0
     let credentials = false
     const headers = new Map<string, string>()
     class MockUploadRequest {
@@ -58,15 +60,26 @@ describe('post media selection and video navigation', () => {
       }
       set withCredentials(value: boolean) { credentials = value }
       get withCredentials() { return credentials }
-      set timeout(_value: number) {}
+      set timeout(value: number) { requestTimeout = value }
+      get timeout() { return requestTimeout }
     }
     vi.stubGlobal('localStorage', { getItem: () => null, removeItem: vi.fn() })
     vi.stubGlobal('XMLHttpRequest', MockUploadRequest)
 
-    await expect(uploadVideo(new File(['video'], 'clip.mp4', { type: 'video/mp4' }), (value) => progress.push(value)))
+    await expect(uploadVideo(
+      new File(['video'], 'clip.mp4', { type: 'video/mp4' }),
+      (value) => progress.push(value),
+      undefined,
+      (value) => details.push(value),
+    ))
       .resolves.toEqual({ mediaUrl: '/api/media/files/123.mp4', contentType: 'video/mp4' })
     expect(progress).toEqual([51, 100])
+    expect(details).toEqual([
+      expect.objectContaining({ phase: 'UPLOADING', uploadedBytes: 51, totalBytes: 100, recordingBytes: 5 }),
+      expect.objectContaining({ phase: 'SAVING', uploadedBytes: 51, totalBytes: 100, recordingBytes: 5 }),
+    ])
     expect(requestUrl).toMatch(/\/api\/media\/videos$/)
+    expect(requestTimeout).toBe(195000)
     expect(credentials).toBe(true)
   })
 })

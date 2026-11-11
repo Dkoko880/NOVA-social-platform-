@@ -75,11 +75,12 @@ class MemoryMediaStorage implements MediaStorage {
 class DatabaseMediaStorage implements MediaStorage {
   async put(bytes: Buffer, contentType: string, ownerUserId?: string) {
     const key = `${randomUUID()}.webp`;
+    const mediaBytes = new Uint8Array(bytes);
 
     await prisma.registrationMediaObject.create({
       data: {
         key,
-        bytes: Buffer.from(bytes),
+        bytes: mediaBytes,
         contentType,
         ownerUserId,
       },
@@ -93,17 +94,17 @@ class DatabaseMediaStorage implements MediaStorage {
 
   async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string, key?: string) {
     const storedKey = key ?? `${randomUUID()}.${extension}`;
-    const storedBytes = new Uint8Array(bytes);
+    const mediaBytes = new Uint8Array(bytes);
     await prisma.registrationMediaObject.upsert({
       where: { key: storedKey },
       create: {
         key: storedKey,
-        bytes: storedBytes,
+        bytes: mediaBytes,
         contentType,
         ownerUserId,
       },
       update: {
-        bytes: storedBytes,
+        bytes: mediaBytes,
         contentType,
         ownerUserId,
       },

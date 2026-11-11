@@ -15,6 +15,16 @@ const apiReadCache = new Map<string, { value: unknown; expiresAt: number }>()
 let apiReadCacheToken: string | null | undefined
 let apiReadCacheGeneration = 0
 
+export type VideoUploadProgress = {
+  phase: 'UPLOADING' | 'SAVING'
+  uploadedBytes: number
+  totalBytes: number
+  recordingBytes: number
+  bytesPerSecond: number | null
+  estimatedSecondsRemaining: number | null
+  serverProcessingMs?: number
+}
+
 function invalidateApiReadCache() {
   apiReadCache.clear()
   apiReadCacheGeneration += 1
@@ -34,7 +44,12 @@ export function resolveMediaUrl(url: string | null | undefined) {
   return url.startsWith('/api/media/') ? `${API_BASE_URL}${url}` : url;
 }
 
-async function uploadFile(path: string, file: File, onProgress?: (progress: number) => void) {
+async function uploadFile(
+  path: string,
+  file: File,
+  onProgress?: (progress: number) => void,
+  onDetails?: (progress: VideoUploadProgress) => void,
+) {
   const body = new FormData();
   body.append('file', file);
   const headers = new Headers()
@@ -43,17 +58,61 @@ async function uploadFile(path: string, file: File, onProgress?: (progress: numb
 
   return new Promise<{ mediaUrl: string; contentType: string }>((resolve, reject) => {
     const request = new XMLHttpRequest()
+    let inactivityTimer: ReturnType<typeof setTimeout> | null = null
+    const clearInactivityTimer = () => {
+      if (inactivityTimer !== null) clearTimeout(inactivityTimer)
+      inactivityTimer = null
+    }
+    const armInactivityTimer = () => {
+      clearInactivityTimer()
+      inactivityTimer = setTimeout(() => {
+        reject(new ApiError(null, 'Replay upload stalled for 2 minutes. Your saved recording is still available; check your connection and retry.', undefined, 'TIMEOUT'))
+        request.abort()
+      }, 2 * 60 * 1000)
+    }
     request.open('POST', `${API_BASE_URL}${path}`)
     request.withCredentials = true
-    request.timeout = path === '/api/media/videos' ? 5 * 60 * 1000 : 30000
+    request.timeout = path.startsWith('/api/media/videos')
+      ? Math.min(45 * 60 * 1000, 3 * 60 * 1000 + Math.ceil(file.size / (1024 * 1024)) * 15 * 1000)
+      : 30000
     headers.forEach((value, key) => request.setRequestHeader(key, value))
+    let transferLoadedBytes = 0
+    let transferTotalBytes = file.size
     request.upload.onprogress = (event) => {
-      if (event.lengthComputable && event.total > 0) onProgress?.(Math.min(99, Math.floor(event.loaded / event.total * 100)))
+      if (!event.lengthComputable || event.total <= 0) return
+      const fraction = Math.min(1, event.loaded / event.total)
+      const elapsedSeconds = (performance.now() - startedAt) / 1000
+      transferLoadedBytes = event.loaded
+      transferTotalBytes = event.total
+      const bytesPerSecond = elapsedSeconds > 0 ? event.loaded / elapsedSeconds : null
+      onProgress?.(Math.min(99, Math.floor(fraction * 100)))
+      if (fraction >= 1) clearInactivityTimer()
+      else armInactivityTimer()
+      onDetails?.({
+        phase: fraction >= 1 ? 'SAVING' : 'UPLOADING',
+        uploadedBytes: event.loaded,
+        totalBytes: event.total,
+        recordingBytes: file.size,
+        bytesPerSecond,
+        estimatedSecondsRemaining: bytesPerSecond && fraction < 1
+          ? Math.ceil((event.total - event.loaded) / bytesPerSecond)
+          : null,
+      })
     }
-    request.onerror = () => reject(new ApiError(null, 'Unable to reach the novachat API. Check your connection and try again shortly.', undefined, 'NETWORK_ERROR'))
-    request.ontimeout = () => reject(new ApiError(null, 'The novachat upload timed out. Please try again shortly.', undefined, 'TIMEOUT'))
-    request.onabort = () => reject(new DOMException('The upload was cancelled.', 'AbortError'))
+    request.onerror = () => {
+      clearInactivityTimer()
+      reject(new ApiError(null, 'Unable to reach the novachat API. Your saved replay is available to retry; check your connection.', undefined, 'NETWORK_ERROR'))
+    }
+    request.ontimeout = () => {
+      clearInactivityTimer()
+      reject(new ApiError(null, 'The replay upload timed out. Your saved recording is still available; check your connection and retry.', undefined, 'TIMEOUT'))
+    }
+    request.onabort = () => {
+      clearInactivityTimer()
+      reject(new DOMException('The upload was cancelled.', 'AbortError'))
+    }
     request.onload = () => {
+      clearInactivityTimer()
       const contentType = request.getResponseHeader('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? ''
       let payload: unknown
       try {
@@ -77,9 +136,23 @@ async function uploadFile(path: string, file: File, onProgress?: (progress: numb
         reject(new ApiError(request.status, 'The novachat API returned an invalid upload response.'))
         return
       }
+      const uploadMetrics = (payload as { uploadMetrics?: { serverProcessingMs?: unknown } }).uploadMetrics
+      onDetails?.({
+        phase: 'SAVING',
+        uploadedBytes: transferLoadedBytes,
+        totalBytes: transferTotalBytes,
+        recordingBytes: file.size,
+        bytesPerSecond: null,
+        estimatedSecondsRemaining: null,
+        ...(typeof uploadMetrics?.serverProcessingMs === 'number'
+          ? { serverProcessingMs: uploadMetrics.serverProcessingMs }
+          : {}),
+      })
       onProgress?.(100)
       resolve(payload as { mediaUrl: string; contentType: string })
     }
+    const startedAt = performance.now()
+    armInactivityTimer()
     request.send(body)
   })
 }
@@ -88,11 +161,16 @@ export function uploadMedia(file: File, onProgress?: (progress: number) => void)
   return uploadFile('/api/media/uploads', file, onProgress)
 }
 
-export function uploadVideo(file: File, onProgress?: (progress: number) => void, liveId?: string) {
+export function uploadVideo(
+  file: File,
+  onProgress?: (progress: number) => void,
+  liveId?: string,
+  onDetails?: (progress: VideoUploadProgress) => void,
+) {
   const path = liveId
     ? `/api/media/videos?liveId=${encodeURIComponent(liveId)}`
     : '/api/media/videos'
-  return uploadFile(path, file, onProgress)
+  return uploadFile(path, file, onProgress, onDetails)
 }
 
 export async function uploadMessageAttachment(file: File) {

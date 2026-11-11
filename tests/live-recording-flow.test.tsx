@@ -72,9 +72,16 @@ const publishedReplay = { ...readyReplay, status: 'PUBLISHED', publishedPostId: 
 
 class TestMediaRecorder extends EventTarget {
   static isTypeSupported = vi.fn(() => true)
+  static lastOptions: MediaRecorderOptions | undefined
   state: RecordingState = 'inactive'
   mimeType = 'video/webm;codecs=vp9,opus'
   ondataavailable: ((event: BlobEvent) => void) | null = null
+
+  constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
+    super()
+    TestMediaRecorder.lastOptions = options
+    this.mimeType = options?.mimeType ?? this.mimeType
+  }
 
   start() {
     this.state = 'recording'
@@ -144,7 +151,8 @@ beforeEach(async () => {
   mocks.roomDisconnect.mockReset().mockResolvedValue(undefined)
   mocks.setMicrophoneEnabled.mockReset().mockResolvedValue(undefined)
   mocks.setCameraEnabled.mockReset().mockResolvedValue(undefined)
-  TestMediaRecorder.isTypeSupported.mockReset().mockReturnValue(true)
+  TestMediaRecorder.isTypeSupported.mockReset().mockImplementation((candidate) => candidate.includes('webm'))
+  TestMediaRecorder.lastOptions = undefined
   vi.stubGlobal('MediaRecorder', TestMediaRecorder)
   vi.stubGlobal('MediaStream', class { constructor(readonly tracks: MediaStreamTrack[]) {} })
   vi.stubGlobal('confirm', vi.fn(() => true))
@@ -183,6 +191,7 @@ describe('automatic live recording and replay publishing', () => {
       await new Promise((resolve) => setTimeout(resolve, 0))
     })
     expect(mocks.apiRequest).toHaveBeenCalledWith('/api/live/live-1/recording/start', { method: 'POST' })
+    expect(TestMediaRecorder.lastOptions).toMatchObject({ videoBitsPerSecond: 1_500_000, audioBitsPerSecond: 96_000 })
     await act(async () => { mocks.roomHandlers.reconnecting?.() })
     expect(host.textContent).toContain('LiveKit connection interrupted; attempting to reconnect')
     await act(async () => { mocks.roomHandlers.reconnected?.() })
