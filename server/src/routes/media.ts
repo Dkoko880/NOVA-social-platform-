@@ -85,7 +85,16 @@ async function canReadAttachment(key: string, ownerUserId: string, viewerId: str
   if (ownerUserId === viewerId) return true;
   const mediaUrl = `/api/media/files/${key}`;
   if (!(await isDatabaseAvailable())) {
-    return socialStore.state.messages.some((message) =>
+    const referencedByPost = socialStore.state.posts.some((post) =>
+      post.imageUrl === mediaUrl
+      && (post.visibility === 'PUBLIC'
+        || (post.visibility === 'FOLLOWERS' && socialStore.state.follows.some((follow) => follow.followerId === viewerId && follow.followingId === ownerUserId))),
+    );
+    const isBlocked = socialStore.state.blocks.some((block) =>
+      (block.blockerId === viewerId && block.blockedId === ownerUserId)
+      || (block.blockerId === ownerUserId && block.blockedId === viewerId),
+    );
+    return !isBlocked && (referencedByPost || socialStore.state.messages.some((message) =>
       message.mediaUrl === mediaUrl
       && !message.deletedAt
       && (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now())
@@ -94,17 +103,30 @@ async function canReadAttachment(key: string, ownerUserId: string, viewerId: str
         && participant.userId === viewerId
         && !participant.leftAt,
       ),
-    );
+    ));
   }
-  return Boolean(await prisma.message.findFirst({
-    where: {
-      mediaUrl,
-      deletedAt: null,
-      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-      conversation: { participants: { some: { userId: viewerId, leftAt: null } } },
-    },
-    select: { id: true },
-  }));
+  const [blocked, publicPost, message] = await Promise.all([
+    prisma.block.findFirst({
+      where: { OR: [{ blockerId: viewerId, blockedId: ownerUserId }, { blockerId: ownerUserId, blockedId: viewerId }] },
+      select: { id: true },
+    }),
+    prisma.post.findFirst({ where: { imageUrl: mediaUrl, visibility: 'PUBLIC' }, select: { id: true } }),
+    prisma.message.findFirst({
+      where: {
+        mediaUrl,
+        deletedAt: null,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        conversation: { participants: { some: { userId: viewerId, leftAt: null } } },
+      },
+      select: { id: true },
+    }),
+  ]);
+  if (blocked || message || publicPost) return !blocked;
+  const [follow, followerPost] = await Promise.all([
+    prisma.follow.findUnique({ where: { followerId_followingId: { followerId: viewerId, followingId: ownerUserId } }, select: { id: true } }),
+    prisma.post.findFirst({ where: { imageUrl: mediaUrl, visibility: 'FOLLOWERS', authorId: ownerUserId }, select: { id: true } }),
+  ]);
+  return Boolean(follow && followerPost);
 }
 
 async function canReadUploadedMedia(key: string, ownerUserId: string, viewerId: string) {

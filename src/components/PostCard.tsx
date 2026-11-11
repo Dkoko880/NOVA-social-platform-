@@ -361,7 +361,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
       ) : (
         <>
           {content ? <p className="mt-4 whitespace-pre-wrap text-[15px] leading-7 text-slate-700">{content}</p> : null}
-          {imageUrl ? <img src={resolveMediaUrl(imageUrl)} crossOrigin={imageUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="Post attachment" className="mt-4 max-h-[32rem] w-full rounded-[24px] object-cover" /> : null}
+          {imageUrl && /\.(?:webm|mp4)(?:$|\?)/i.test(imageUrl) ? <video src={resolveMediaUrl(imageUrl)} crossOrigin={imageUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} controls playsInline preload="metadata" aria-label="Post video" className="mt-4 max-h-[32rem] w-full rounded-xl bg-slate-950 object-contain" /> : imageUrl ? <img src={resolveMediaUrl(imageUrl)} crossOrigin={imageUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="Post attachment" className="mt-4 max-h-[32rem] w-full rounded-xl object-cover" /> : null}
           <p className="mt-2 text-xs text-slate-500">{visibility === 'PUBLIC' ? 'Everyone' : visibility === 'FOLLOWERS' ? 'Followers' : 'Only me'}</p>
         </>
       )}

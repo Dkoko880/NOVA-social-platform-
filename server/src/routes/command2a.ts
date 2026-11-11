@@ -1,5 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { createHmac } from 'node:crypto';
+import multer from 'multer';
+import { AccessToken } from 'livekit-server-sdk';
 import { z } from 'zod';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
 import env from '../config/env.js';
@@ -9,6 +11,7 @@ import { findUserById } from '../lib/fallbackStore.js';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 import { reviewContentForSafety } from '../lib/moderation.js';
 import { realtimeHub } from '../lib/realtime.js';
+import { getMediaStorage, MediaStorageUnavailableError } from '../lib/mediaStorage.js';
 
 const command2aRouter = Router();
 command2aRouter.use(requireActiveAccountIfAuthenticated);
@@ -77,6 +80,55 @@ const liveReportSchema = z.object({
 });
 const liveGuestSchema = z.object({ role: z.enum(['GUEST', 'COHOST']).default('GUEST') });
 const liveViewerControlSchema = z.object({ isMuted: z.boolean() });
+const liveReplayParamsSchema = z.object({ recordingId: z.string().uuid() });
+const liveReplayUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 512 * 1024 * 1024, files: 1 },
+  fileFilter(_req, file, callback) {
+    callback(null, ['video/webm', 'video/mp4'].includes(file.mimetype));
+  },
+}).single('file');
+const LIVE_VIEWER_TIMEOUT_MS = 60_000;
+
+function isLiveKitConfigured() {
+  if (!env.LIVEKIT_URL.trim() || !env.LIVEKIT_API_KEY.trim() || !env.LIVEKIT_API_SECRET.trim()) return false;
+  try {
+    const protocol = new URL(env.LIVEKIT_URL).protocol;
+    return protocol === 'wss:' || protocol === 'https:' || (env.NODE_ENV !== 'production' && (protocol === 'ws:' || protocol === 'http:'));
+  } catch {
+    return false;
+  }
+}
+
+function pruneLiveViewers(liveId: string) {
+  const live = getLiveSession(liveId);
+  if (!live) return null;
+  const cutoff = Date.now() - LIVE_VIEWER_TIMEOUT_MS;
+  const activeViewers = live.viewers.filter((viewer) => new Date(viewer.lastSeenAt ?? viewer.joinedAt).getTime() >= cutoff);
+  if (activeViewers.length === live.viewers.length) return live;
+  return updateLiveSession(liveId, (session) => ({ ...session, viewers: activeViewers, viewerCount: activeViewers.length }));
+}
+
+function runLiveReplayUpload(req: Request, res: Response, next: (error?: unknown) => void) {
+  liveReplayUpload(req, res, (error) => {
+    if (error instanceof multer.MulterError) {
+      const tooLarge = error.code === 'LIMIT_FILE_SIZE';
+      res.status(tooLarge ? 413 : 400).json({ message: tooLarge ? 'Live replays must be 512 MB or smaller.' : 'Choose one WebM or MP4 recording.' });
+      return;
+    }
+    if (error) return next(error);
+    if (!req.file || !['video/webm', 'video/mp4'].includes(req.file.mimetype)) {
+      res.status(400).json({ message: 'Choose one WebM or MP4 recording.' });
+      return;
+    }
+    next();
+  });
+}
+
+function validReplaySignature(contentType: string, bytes: Buffer) {
+  if (contentType === 'video/webm') return bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+  return contentType === 'video/mp4' && bytes.subarray(4, 8).toString() === 'ftyp';
+}
 
 async function canViewConversation(conversationId: string, userId: string) {
   const dbAvailable = await isDatabaseAvailable();
@@ -377,17 +429,17 @@ command2aRouter.post('/calls/:id/speaker', requireAuth, async (req, res) => {
 
 command2aRouter.post('/live/create', requireAuth, async (req, res) => {
   const payload = liveCreateSchema.parse(req.body ?? {});
-  const live = createLiveSession(req.user!.id, payload);
-  return res.status(201).json({ live, message: 'Live session created. Start broadcasting to publish encrypted peer-to-peer video.' });
+  const live = createLiveSession(req.user!.id, { ...payload, providerConfigured: isLiveKitConfigured() });
+  return res.status(201).json({ live, message: 'Live session created.' });
 });
 
 command2aRouter.get('/live', requireAuth, async (req, res) => {
-  const lives = listLiveSessions().filter((live) => live.visibility === 'public' || canManageLive(live, req.user!.id) || live.viewers.some((viewer) => viewer.userId === req.user!.id));
+  const lives = listLiveSessions().map((live) => pruneLiveViewers(live.id) ?? live).filter((live) => live.visibility === 'public' || canManageLive(live, req.user!.id) || live.viewers.some((viewer) => viewer.userId === req.user!.id));
   return res.json({ lives });
 });
 
 command2aRouter.get('/live/:id', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = pruneLiveViewers(String(req.params.id));
   if (!live) {
     return res.status(404).json({ message: 'Live session not found.' });
   }
@@ -401,14 +453,27 @@ command2aRouter.post('/live/:id/start', requireAuth, async (req, res) => {
   const live = getLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the host can start this live session.' });
-  const next = updateLiveSession(live.id, (session) => ({ ...session, status: 'live', viewerCount: Math.max(0, session.viewerCount) }));
+  const next = updateLiveSession(live.id, (session) => ({ ...session, status: 'live', recordingStatus: 'RECORDING', viewerCount: Math.max(0, session.viewers.length) }));
   return res.json({ live: next, message: 'Live session started.' });
 });
 
+command2aRouter.post('/live/:id/livekit-token', requireAuth, async (req, res) => {
+  const live = pruneLiveViewers(String(req.params.id));
+  if (!live) return res.status(404).json({ message: 'Live session not found.' });
+  if (live.provider !== 'livekit' || !isLiveKitConfigured()) return res.status(503).json({ message: 'LiveKit is not configured for this session.' });
+  if (live.status !== 'live') return res.status(409).json({ message: 'This live session is not running.' });
+  const isHost = live.hostId === req.user!.id;
+  if (!isHost && !live.viewers.some((viewer) => viewer.userId === req.user!.id)) return res.status(403).json({ message: 'Join this live session before requesting media access.' });
+  const token = new AccessToken(env.LIVEKIT_API_KEY, env.LIVEKIT_API_SECRET, { identity: req.user!.id, ttl: '1h' });
+  token.addGrant({ roomJoin: true, room: live.id, canPublish: isHost, canSubscribe: true, canPublishData: isHost });
+  return res.json({ serverUrl: env.LIVEKIT_URL, token: await token.toJwt(), role: isHost ? 'host' : 'viewer' });
+});
+
 command2aRouter.post('/live/:id/signaling', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = pruneLiveViewers(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'This live stream is not running.' });
+  if (live.provider === 'livekit') return res.status(409).json({ message: 'LiveKit sessions do not use peer signaling.' });
   const userId = req.user!.id;
   const payload = liveSignalSchema.parse(req.body ?? {});
   const viewer = live.viewers.find((entry) => entry.userId === userId);
@@ -521,17 +586,49 @@ command2aRouter.post('/live/:id/moderators/:userId/remove', requireAuth, async (
 });
 
 command2aRouter.post('/live/:id/viewers/join', requireAuth, async (req, res) => {
-  const live = getLiveSession(String(req.params.id));
+  const live = pruneLiveViewers(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'This live session is not running.' });
   if (live.visibility === 'private' && !canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'This live session is private.' });
   if (await isBlocked(req.user!.id, live.hostId)) return res.status(403).json({ message: 'You cannot join this live session.' });
   const existing = live.viewers.find((viewer) => viewer.userId === req.user!.id);
-  if (existing) return res.json({ viewer: existing, live });
-  const viewer = { userId: req.user!.id, isMuted: false, isBlocked: false, joinedAt: new Date().toISOString() };
+  if (existing) {
+    const lastSeenAt = new Date().toISOString();
+    const next = updateLiveSession(live.id, (session) => ({ ...session, viewers: session.viewers.map((entry) => entry.userId === req.user!.id ? { ...entry, lastSeenAt } : entry) }));
+    return res.json({ viewer: { ...existing, lastSeenAt }, live: next });
+  }
+  const joinedAt = new Date().toISOString();
+  const viewer = { userId: req.user!.id, isMuted: false, isBlocked: false, joinedAt, lastSeenAt: joinedAt };
   const next = updateLiveSession(live.id, (session) => ({ ...session, viewers: [...session.viewers, viewer], viewerCount: session.viewers.length + 1 }));
   await createNotification(live.hostId, req.user!.id, 'live_viewer', `${req.user!.name} joined your live session.`);
   return res.status(201).json({ viewer, live: next });
+});
+
+command2aRouter.post('/live/:id/viewers/heartbeat', requireAuth, async (req, res) => {
+  const live = pruneLiveViewers(String(req.params.id));
+  if (!live) return res.status(404).json({ message: 'Live session not found.' });
+  if (live.status !== 'live') return res.status(409).json({ message: 'This live session is not running.' });
+  if (!live.viewers.some((viewer) => viewer.userId === req.user!.id)) return res.status(403).json({ message: 'Join this live session before sending a viewer heartbeat.' });
+  const lastSeenAt = new Date().toISOString();
+  const next = updateLiveSession(live.id, (session) => ({ ...session, viewers: session.viewers.map((viewer) => viewer.userId === req.user!.id ? { ...viewer, lastSeenAt } : viewer) }));
+  return res.json({ live: next });
+});
+
+command2aRouter.get('/live/:id/viewers', requireAuth, async (req, res) => {
+  const live = pruneLiveViewers(String(req.params.id));
+  if (!live) return res.status(404).json({ message: 'Live session not found.' });
+  if (!canManageLive(live, req.user!.id) && !live.viewers.some((viewer) => viewer.userId === req.user!.id)) return res.status(403).json({ message: 'Join this live session to view its audience.' });
+  const dbAvailable = await isDatabaseAvailable();
+  const viewers = await Promise.all(live.viewers.map(async (viewer) => {
+    if (dbAvailable) {
+      const user = await prisma.user.findUnique({ where: { id: viewer.userId }, select: { name: true, profile: { select: { displayName: true } } } });
+      return user ? { userId: viewer.userId, name: user.profile?.displayName ?? user.name, joinedAt: viewer.joinedAt } : null;
+    }
+    const user = findUserById(viewer.userId);
+    const profile = socialStore.state.profiles.find((entry) => entry.userId === viewer.userId);
+    return user ? { userId: viewer.userId, name: profile?.displayName ?? user.name, joinedAt: viewer.joinedAt } : null;
+  }));
+  return res.json({ viewers: viewers.filter((viewer) => viewer !== null), viewerCount: live.viewers.length });
 });
 
 command2aRouter.post('/live/:id/viewers/leave', requireAuth, async (req, res) => {
@@ -643,16 +740,79 @@ command2aRouter.post('/live/:id/recording/start', requireAuth, async (req, res) 
   if (live.status !== 'live') return res.status(409).json({ message: 'Recording requires a running live session.' });
   if (live.recordingStatus === 'RECORDING') return res.status(409).json({ message: 'Recording is already active.' });
   const next = updateLiveSession(live.id, (session) => ({ ...session, recordingStatus: 'RECORDING' }));
-  return res.json({ live: next, providerConfigured: live.providerConfigured });
+  return res.json({ live: next, recordingProvider: 'browser-media-recorder', egressConfigured: false });
 });
 
 command2aRouter.post('/live/:id/recording/stop', requireAuth, async (req, res) => {
   const live = getLiveSession(String(req.params.id));
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can control recording.' });
-  if (live.recordingStatus !== 'RECORDING') return res.status(409).json({ message: 'No recording is active.' });
-  const next = updateLiveSession(live.id, (session) => ({ ...session, recordingStatus: session.providerConfigured ? 'READY' : 'UNAVAILABLE' }));
-  return res.json({ live: next, replayReady: Boolean(next?.replayUrl) });
+  if (live.replayUrl) return res.json({ live, replayReady: true });
+  return res.status(409).json({ message: 'Upload the retained browser recording to publish its replay.' });
+});
+
+command2aRouter.post('/live/:id/recording/replay/:recordingId', requireAuth, runLiveReplayUpload, async (req, res) => {
+  const live = getLiveSession(String(req.params.id));
+  if (!live) return res.status(404).json({ message: 'Live session not found.' });
+  if (live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the host can publish this replay.' });
+  const { recordingId } = liveReplayParamsSchema.parse(req.params);
+  const file = req.file!;
+  if (!validReplaySignature(file.mimetype, file.buffer)) return res.status(400).json({ message: 'The recording data does not match its media type.' });
+  const extension = file.mimetype === 'video/webm' ? 'webm' : 'mp4';
+  const key = `${recordingId}.${extension}`;
+  const mediaUrl = `/api/media/files/${key}`;
+  const storage = getMediaStorage(env.NODE_ENV);
+
+  try {
+    const existingMedia = await storage.get(key);
+    if (existingMedia) {
+      if (existingMedia.ownerUserId !== req.user!.id || existingMedia.contentType !== file.mimetype || !existingMedia.bytes.equals(file.buffer)) {
+        return res.status(409).json({ message: 'This replay identifier is already associated with different media.' });
+      }
+    } else {
+      await storage.putAttachment(file.buffer, file.mimetype, extension, req.user!.id, key);
+    }
+
+    const postId = `live_replay_${live.id}_${recordingId}`;
+    const dbAvailable = await isDatabaseAvailable();
+    let postExists = false;
+    if (dbAvailable) {
+      const existingPost = await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, imageUrl: true } });
+      if (existingPost) {
+        if (existingPost.authorId !== req.user!.id || existingPost.imageUrl !== mediaUrl) return res.status(409).json({ message: 'This replay identifier is already in use.' });
+        postExists = true;
+      } else {
+        const content = `Replay: ${live.title}`;
+        const moderation = reviewContentForSafety({ type: 'post', text: content, userId: req.user!.id });
+        if (moderation !== 'ALLOW') return res.status(moderation === 'REMOVE' ? 400 : 422).json({ message: 'This replay requires moderation before publication.' });
+        try {
+          await prisma.post.create({ data: { id: postId, authorId: req.user!.id, content, imageUrl: mediaUrl, visibility: live.visibility === 'public' ? 'PUBLIC' : 'PRIVATE' } });
+        } catch (error) {
+          const retriedPost = await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, imageUrl: true } });
+          if (!retriedPost || retriedPost.authorId !== req.user!.id || retriedPost.imageUrl !== mediaUrl) throw error;
+          postExists = true;
+        }
+      }
+    } else {
+      const existingPost = socialStore.state.posts.find((post) => post.id === postId);
+      if (existingPost) {
+        if (existingPost.authorId !== req.user!.id || existingPost.imageUrl !== mediaUrl) return res.status(409).json({ message: 'This replay identifier is already in use.' });
+        postExists = true;
+      } else {
+        const content = `Replay: ${live.title}`;
+        const moderation = reviewContentForSafety({ type: 'post', text: content, userId: req.user!.id });
+        if (moderation !== 'ALLOW') return res.status(moderation === 'REMOVE' ? 400 : 422).json({ message: 'This replay requires moderation before publication.' });
+        const createdAt = new Date().toISOString();
+        socialStore.state.posts.push({ id: postId, authorId: req.user!.id, content, imageUrl: mediaUrl, visibility: live.visibility === 'public' ? 'PUBLIC' : 'PRIVATE', createdAt, updatedAt: createdAt });
+      }
+    }
+
+    const next = updateLiveSession(live.id, (session) => ({ ...session, replayUrl: mediaUrl, recordingUrl: mediaUrl, recordingStatus: 'READY' }));
+    return res.status(postExists ? 200 : 201).json({ live: next, postId, mediaUrl, replayReady: true });
+  } catch (error) {
+    if (error instanceof MediaStorageUnavailableError) return res.status(503).json({ message: 'Persistent replay storage is not configured.' });
+    throw error;
+  }
 });
 
 command2aRouter.post('/live/:id/share', requireAuth, async (req, res) => {

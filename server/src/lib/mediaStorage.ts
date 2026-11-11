@@ -4,7 +4,7 @@ import { socialStore } from './socialStore.js';
 
 export interface MediaStorage {
   put(bytes: Buffer, contentType: string, ownerUserId?: string): Promise<{ key: string; publicUrl: string }>;
-  putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string): Promise<{ key: string; publicUrl: string }>;
+  putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string, key?: string): Promise<{ key: string; publicUrl: string }>;
   setOwner(key: string, ownerUserId: string): Promise<boolean>;
   delete(key: string): Promise<void>;
   get(key: string): Promise<{ bytes: Buffer; contentType: string; ownerUserId: string | null } | null>;
@@ -26,10 +26,10 @@ class MemoryMediaStorage implements MediaStorage {
     return { key, publicUrl: `/api/media/avatars/${key}` };
   }
 
-  async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string) {
-    const key = `${randomUUID()}.${extension}`;
-    this.objects.set(key, { bytes: Buffer.from(bytes), contentType, ownerUserId });
-    return { key, publicUrl: `/api/media/files/${key}` };
+  async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string, key?: string) {
+    const objectKey = key ?? `${randomUUID()}.${extension}`;
+    this.objects.set(objectKey, { bytes: Buffer.from(bytes), contentType, ownerUserId });
+    return { key: objectKey, publicUrl: `/api/media/files/${objectKey}` };
   }
 
   async delete(key: string) {
@@ -73,17 +73,17 @@ class DatabaseMediaStorage implements MediaStorage {
     };
   }
 
-  async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string) {
-    const key = `${randomUUID()}.${extension}`;
+  async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string, key?: string) {
+    const objectKey = key ?? `${randomUUID()}.${extension}`;
     await prisma.registrationMediaObject.create({
       data: {
-        key,
+        key: objectKey,
         bytes: Buffer.from(bytes),
         contentType,
         ownerUserId,
       },
     });
-    return { key, publicUrl: `/api/media/files/${key}` };
+    return { key: objectKey, publicUrl: `/api/media/files/${objectKey}` };
   }
 
   async delete(key: string) {

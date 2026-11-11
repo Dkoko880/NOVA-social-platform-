@@ -41,7 +41,7 @@ export type CallSession = {
   type: CallType;
   status: CallStatus;
   participants: CallParticipantState[];
-  provider: 'webrtc-peer';
+  provider: 'livekit' | 'webrtc-peer';
   providerConfigured: boolean;
   createdAt: string;
   updatedAt: string;
@@ -55,6 +55,7 @@ export type LiveViewer = {
   isMuted: boolean;
   isBlocked: boolean;
   joinedAt: string;
+  lastSeenAt?: string;
 };
 
 export type LiveComment = {
@@ -95,7 +96,7 @@ export type LiveSession = {
   recordingUrl?: string | null;
   recordingStatus: 'UNAVAILABLE' | 'RECORDING' | 'READY';
   analyticsHook: string | null;
-  provider: 'webrtc-peer';
+  provider: 'livekit' | 'webrtc-peer';
   providerConfigured: boolean;
   createdAt: string;
   updatedAt: string;
@@ -408,7 +409,7 @@ export function listLiveSessions() {
   return [...getStore().liveSessions].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 }
 
-export function createLiveSession(hostId: string, input: { title: string; description?: string; visibility: LiveVisibility }) {
+export function createLiveSession(hostId: string, input: { title: string; description?: string; visibility: LiveVisibility; providerConfigured?: boolean }) {
   const now = new Date().toISOString();
   const live: LiveSession = {
     id: `live_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
@@ -427,8 +428,8 @@ export function createLiveSession(hostId: string, input: { title: string; descri
     recordingUrl: null,
     recordingStatus: 'UNAVAILABLE',
     analyticsHook: null,
-    provider: 'webrtc-peer',
-    providerConfigured: true,
+    provider: input.providerConfigured ? 'livekit' : 'webrtc-peer',
+    providerConfigured: input.providerConfigured ?? false,
     createdAt: now,
     updatedAt: now,
   };

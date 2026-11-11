@@ -7,10 +7,10 @@ import { socialStore } from '../lib/socialStore.js';
 import { reviewContentForSafety } from '../lib/moderation.js';
 import { isNotificationEnabled } from '../lib/platform.js';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
-import { mediaKeyFromUrl, uploadedMediaBelongsTo } from '../lib/mediaStorage.js';
+import { attachmentMediaKeyFromUrl, mediaKeyFromUrl, uploadedMediaBelongsTo } from '../lib/mediaStorage.js';
 
 function isSafeMediaUrl(value: string) {
-  if (value === '' || mediaKeyFromUrl(value)) return true;
+  if (value === '' || mediaKeyFromUrl(value) || attachmentMediaKeyFromUrl(value)) return true;
   try {
     return new URL(value).protocol === 'https:';
   } catch {

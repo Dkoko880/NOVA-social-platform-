@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
+import env from '../config/env.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { socialStore } from '../lib/socialStore.js';
 import { clearCommand2AStores } from '../lib/platform.js';
@@ -131,14 +132,105 @@ describe('product area gaps', () => {
   it('creates real browser-to-browser live sessions and authorizes viewer signaling', async () => {
     const host = await register('LiveHost');
     const viewer = await register('LiveGuest');
+    const outsider = await register('LiveOutsider');
     const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Community stream' });
     expect(created.status).toBe(201);
-    expect(created.body.live.providerConfigured).toBe(true);
-    expect((await request(app).post(`/api/live/${created.body.live.id}/start`).set('Cookie', host.auth)).status).toBe(200);
+    expect(created.body.live.providerConfigured).toBe(created.body.live.provider === 'livekit');
+    const started = await request(app).post(`/api/live/${created.body.live.id}/start`).set('Cookie', host.auth);
+    expect(started.status).toBe(200);
+    expect(started.body.live.recordingStatus).toBe('RECORDING');
     const joined = await request(app).post(`/api/live/${created.body.live.id}/viewers/join`).set('Cookie', viewer.auth);
     expect(joined.status).toBe(201);
-    expect((await request(app).post(`/api/live/${created.body.live.id}/signaling`).set('Cookie', viewer.auth).send({ to: host.user.id, signal: { type: 'join' } })).status).toBe(202);
-    expect((await request(app).post(`/api/live/${created.body.live.id}/signaling`).set('Cookie', viewer.auth).send({ to: host.user.id, signal: { type: 'offer', sdp: 'v=0\\r\\n' } })).status).toBe(403);
-    expect((await request(app).post(`/api/live/${created.body.live.id}/signaling`).set('Cookie', host.auth).send({ to: viewer.user.id, signal: { type: 'offer', sdp: 'v=0\\r\\n' } })).status).toBe(202);
+    const viewers = await request(app).get(`/api/live/${created.body.live.id}/viewers`).set('Cookie', viewer.auth);
+    expect(viewers.body).toMatchObject({ viewerCount: 1, viewers: [{ userId: viewer.user.id, name: 'LiveGuest' }] });
+    expect((await request(app).get(`/api/live/${created.body.live.id}/viewers`).set('Cookie', outsider.auth)).status).toBe(403);
+    expect((await request(app).post(`/api/live/${created.body.live.id}/viewers/heartbeat`).set('Cookie', viewer.auth)).status).toBe(200);
+    expect((await request(app).post(`/api/live/${created.body.live.id}/block/${outsider.user.id}`).set('Cookie', host.auth)).status).toBe(200);
+    expect((await request(app).post(`/api/live/${created.body.live.id}/viewers/join`).set('Cookie', outsider.auth)).status).toBe(403);
+
+    if (created.body.live.provider === 'livekit') {
+      const hostToken = await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', host.auth);
+      const viewerToken = await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', viewer.auth);
+      expect(hostToken.body).toMatchObject({ role: 'host' });
+      expect(viewerToken.body).toMatchObject({ role: 'viewer' });
+      expect(hostToken.body.token).toBeTruthy();
+      expect(viewerToken.body.token).toBeTruthy();
+      expect((await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', outsider.auth)).status).toBe(403);
+    } else {
+      expect((await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', host.auth)).status).toBe(503);
+      expect((await request(app).post(`/api/live/${created.body.live.id}/signaling`).set('Cookie', viewer.auth).send({ to: host.user.id, signal: { type: 'join' } })).status).toBe(202);
+      expect((await request(app).post(`/api/live/${created.body.live.id}/signaling`).set('Cookie', viewer.auth).send({ to: host.user.id, signal: { type: 'offer', sdp: 'v=0\\r\\n' } })).status).toBe(403);
+      expect((await request(app).post(`/api/live/${created.body.live.id}/signaling`).set('Cookie', host.auth).send({ to: viewer.user.id, signal: { type: 'offer', sdp: 'v=0\\r\\n' } })).status).toBe(202);
+    }
+
+    const ended = await request(app).post(`/api/live/${created.body.live.id}/end`).set('Cookie', host.auth);
+    expect(ended.body.live).toMatchObject({ status: 'ended', recordingStatus: 'RECORDING' });
+    const recordingId = 'c0cce6c0-0000-4000-8000-000000000001';
+    const recording = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x01, 0x02]);
+    const publishPath = `/api/live/${created.body.live.id}/recording/replay/${recordingId}`;
+    const firstPublish = await request(app).post(publishPath).set('Cookie', host.auth).attach('file', recording, { filename: 'replay.webm', contentType: 'video/webm' });
+    const retriedPublish = await request(app).post(publishPath).set('Cookie', host.auth).attach('file', recording, { filename: 'replay.webm', contentType: 'video/webm' });
+    expect(firstPublish.status).toBe(201);
+    expect(retriedPublish.status).toBe(200);
+    expect(retriedPublish.body.postId).toBe(firstPublish.body.postId);
+    expect(retriedPublish.body.live.recordingStatus).toBe('READY');
+    expect(socialStore.state.posts.filter((post) => post.id === firstPublish.body.postId)).toHaveLength(1);
+    expect((await request(app).get(firstPublish.body.mediaUrl).set('Cookie', viewer.auth)).status).toBe(200);
+    expect((await request(app).get(firstPublish.body.mediaUrl).set('Cookie', outsider.auth)).status).toBe(404);
+    expect((await request(app).post(publishPath).set('Cookie', outsider.auth).attach('file', recording, { filename: 'replay.webm', contentType: 'video/webm' })).status).toBe(403);
+
+    const privateLive = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Private replay', visibility: 'private' });
+    const privateReplayId = 'c0cce6c0-0000-4000-8000-000000000002';
+    const privateReplay = await request(app).post(`/api/live/${privateLive.body.live.id}/recording/replay/${privateReplayId}`).set('Cookie', host.auth).attach('file', recording, { filename: 'replay.webm', contentType: 'video/webm' });
+    expect(privateReplay.status).toBe(201);
+    expect((await request(app).get(privateReplay.body.mediaUrl).set('Cookie', outsider.auth)).status).toBe(404);
+    expect((await request(app).get(privateReplay.body.mediaUrl).set('Cookie', host.auth)).status).toBe(200);
+  });
+
+  it('issues LiveKit tokens with publish access limited to the host', async () => {
+    const previousConfig = {
+      url: env.LIVEKIT_URL,
+      apiKey: env.LIVEKIT_API_KEY,
+      apiSecret: env.LIVEKIT_API_SECRET,
+    };
+    Object.assign(env, {
+      LIVEKIT_URL: 'wss://livekit.example.test',
+      LIVEKIT_API_KEY: 'test-livekit-key',
+      LIVEKIT_API_SECRET: 'test-livekit-secret-not-a-credential',
+    });
+
+    try {
+      const host = await register('LiveKitHost');
+      const viewer = await register('LiveKitViewer');
+      const outsider = await register('LiveKitOutsider');
+      const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Token-scoped stream' });
+      expect(created.body.live).toMatchObject({ provider: 'livekit', providerConfigured: true });
+      await request(app).post(`/api/live/${created.body.live.id}/start`).set('Cookie', host.auth);
+      await request(app).post(`/api/live/${created.body.live.id}/viewers/join`).set('Cookie', viewer.auth);
+
+      const hostToken = await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', host.auth);
+      const viewerToken = await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', viewer.auth);
+      expect(hostToken.body).toMatchObject({ serverUrl: 'wss://livekit.example.test', role: 'host' });
+      expect(viewerToken.body).toMatchObject({ serverUrl: 'wss://livekit.example.test', role: 'viewer' });
+      expect(hostToken.body.token).toBeTruthy();
+      expect(viewerToken.body.token).toBeTruthy();
+
+      const viewerClaims = JSON.parse(Buffer.from(viewerToken.body.token.split('.')[1], 'base64url').toString()) as {
+        video?: { roomJoin?: boolean; room?: string; canPublish?: boolean; canSubscribe?: boolean };
+      };
+      expect(viewerClaims.video).toMatchObject({
+        roomJoin: true,
+        room: created.body.live.id,
+        canPublish: false,
+        canSubscribe: true,
+      });
+      expect((await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', outsider.auth)).status).toBe(403);
+    } finally {
+      Object.assign(env, {
+        LIVEKIT_URL: previousConfig.url,
+        LIVEKIT_API_KEY: previousConfig.apiKey,
+        LIVEKIT_API_SECRET: previousConfig.apiSecret,
+      });
+    }
   });
 });
