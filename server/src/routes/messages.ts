@@ -13,6 +13,7 @@ const createConversationSchema = z.object({
   participantId: z.string().min(1).optional(),
   participantIds: z.array(z.string().min(1)).min(1).max(49).optional(),
   name: z.string().trim().max(120).optional(),
+  description: z.string().trim().max(500).optional(),
   isChannel: z.boolean().optional(),
   isGroup: z.boolean().optional(),
 }).refine((payload) => Boolean(payload.participantId) !== Boolean(payload.participantIds), {
@@ -31,15 +32,32 @@ function isAllowedMessageMediaUrl(value: string) {
 }
 
 const messageSchema = z.object({
-  contentType: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'CONTACT', 'LOCATION']).default('TEXT'),
+  contentType: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'CONTACT', 'LOCATION', 'POLL', 'EVENT']).default('TEXT'),
   text: z.string().trim().max(2000).optional(),
-  mediaUrl: z.string().trim().max(2000).refine(isAllowedMessageMediaUrl, 'Use an HTTPS URL or an uploaded NOVAKOKO image.').optional(),
+  mediaUrl: z.string().trim().max(2000).refine(isAllowedMessageMediaUrl, 'Use an HTTPS URL or an uploaded novachat image.').optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   replyToId: z.string().min(1).optional(),
   status: z.enum(['SENT', 'DELIVERED', 'READ', 'FAILED']).optional(),
 }).refine((payload) => payload.contentType !== 'TEXT' || Boolean(payload.text?.trim()), { message: 'Text messages need content.' })
   .refine((payload) => !['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE'].includes(payload.contentType) || Boolean(payload.mediaUrl), { message: 'Media messages need a media URL.' })
-  .refine((payload) => !['CONTACT', 'LOCATION'].includes(payload.contentType) || Boolean(payload.metadata), { message: 'Contact and location messages need metadata.' });
+  .refine((payload) => !['CONTACT', 'LOCATION', 'POLL', 'EVENT'].includes(payload.contentType) || Boolean(payload.metadata), { message: 'This message type needs metadata.' })
+  .refine((payload) => payload.contentType !== 'POLL' || (
+    typeof payload.metadata?.question === 'string'
+    && Array.isArray(payload.metadata.options)
+    && payload.metadata.options.length >= 2
+    && payload.metadata.options.length <= 10
+    && payload.metadata.options.every((option) => typeof option === 'object' && option !== null && typeof (option as { id?: unknown }).id === 'string' && typeof (option as { text?: unknown }).text === 'string')
+  ), { message: 'Polls need a question and two to ten options.' })
+  .refine((payload) => payload.contentType !== 'EVENT' || (
+    typeof payload.metadata?.title === 'string'
+    && typeof payload.metadata.startsAt === 'string'
+    && !Number.isNaN(Date.parse(payload.metadata.startsAt))
+  ), { message: 'Events need a title and a valid start time.' });
+
+const interactiveResponseSchema = z.object({
+  optionId: z.string().min(1).optional(),
+  response: z.enum(['GOING', 'MAYBE', 'NOT_GOING']).optional(),
+}).refine((payload) => Boolean(payload.optionId) !== Boolean(payload.response), { message: 'Provide either a poll option or an event response.' });
 
 const messageEditSchema = z.object({ text: z.string().trim().min(1).max(2000) });
 const reactionSchema = z.object({ type: z.string().trim().min(1).max(24) });
@@ -56,6 +74,18 @@ const addParticipantSchema = z.object({
   message: 'Group participants must be unique.',
 });
 const roleSchema = z.object({ role: z.enum(['MEMBER', 'MODERATOR']) });
+const groupDetailsSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  description: z.string().trim().max(500).optional(),
+  imageUrl: z.string().trim().max(500).refine((value) => {
+    if (!value || mediaKeyFromUrl(value)) return true;
+    try {
+      return new URL(value).protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }, 'Use an HTTPS URL or an uploaded novachat image.').optional(),
+}).refine((payload) => Object.keys(payload).length > 0, { message: 'Provide group details to update.' });
 const reportSchema = z.object({
   category: z.enum(['SPAM', 'HARASSMENT', 'SEXUAL_CONTENT', 'HATE', 'VIOLENCE', 'SCAM', 'OTHER']),
   reason: z.string().trim().min(4).max(500),
@@ -66,23 +96,27 @@ const canViewConversation = async (conversationId: string, userId: string) => {
 
   if (dbAvailable) {
     const participant = await prisma.conversationParticipant.findFirst({
-      where: { conversationId, userId },
+      where: { conversationId, userId, leftAt: null },
       select: { id: true },
     });
     return Boolean(participant);
   }
 
   return socialStore.state.conversationParticipants.some(
-    (participant) => participant.conversationId === conversationId && participant.userId === userId,
+    (participant) => participant.conversationId === conversationId && participant.userId === userId && !participant.leftAt,
   );
 };
 
 const listConversationParticipantIds = async (conversationId: string) => {
   if (await isDatabaseAvailable()) {
-    return (await prisma.conversationParticipant.findMany({ where: { conversationId }, select: { userId: true } })).map((participant) => participant.userId);
+    return (await prisma.conversationParticipant.findMany({ where: { conversationId, leftAt: null }, select: { userId: true } })).map((participant) => participant.userId);
   }
-  return socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversationId).map((participant) => participant.userId);
+  return socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversationId && !participant.leftAt).map((participant) => participant.userId);
 };
+
+const isConversationOwner = (conversation: { ownerId?: string | null }, userId: string) => conversation.ownerId === userId;
+const canManageGroupMembers = (conversation: { ownerId?: string | null }, participant: { role: string }, userId: string) =>
+  participant.role === 'OWNER' || isConversationOwner(conversation, userId) || participant.role === 'MODERATOR';
 
 const isBlocked = async (userId: string, targetUserId: string) => {
   const dbAvailable = await isDatabaseAvailable();
@@ -104,15 +138,15 @@ const messageToPublicShape = (message: any) => ({
   id: message.id,
   conversationId: message.conversationId,
   senderId: message.senderId,
-  text: message.deletedAt ? '[deleted]' : message.text,
+  text: message.deletedAt ? '[deleted]' : message.moderationHiddenAt ? '[removed by moderators]' : message.text,
   createdAt: message.createdAt,
   updatedAt: message.updatedAt,
   readAt: message.readAt,
   deletedAt: message.deletedAt,
   status: message.status,
   contentType: message.contentType ?? 'TEXT',
-  mediaUrl: message.deletedAt ? null : message.mediaUrl ?? null,
-  metadata: message.deletedAt ? null : message.metadata ?? null,
+  mediaUrl: message.deletedAt || message.moderationHiddenAt ? null : message.mediaUrl ?? null,
+  metadata: message.deletedAt || message.moderationHiddenAt ? null : message.metadata ?? null,
   replyToId: message.replyToId ?? null,
   forwardedFromId: message.forwardedFromId ?? null,
   editedAt: message.editedAt ?? null,
@@ -170,6 +204,8 @@ messagesRouter.post('/conversations', requireAuth, async (req, res) => {
     const conversation = await prisma.conversation.create({
       data: {
         name: payload.name ?? null,
+        description: payload.description ?? null,
+        imageUrl: null,
         ownerId: userId,
         isChannel: payload.isChannel ?? false,
         isGroup: payload.isGroup ?? (Boolean(payload.participantIds) || Boolean(payload.isChannel)),
@@ -186,6 +222,8 @@ messagesRouter.post('/conversations', requireAuth, async (req, res) => {
     return res.status(201).json({ conversation: {
       id: conversation.id,
       name: conversation.name,
+      description: conversation.description,
+      imageUrl: conversation.imageUrl,
       isGroup: conversation.isGroup,
       isChannel: conversation.isChannel,
       updatedAt: conversation.updatedAt,
@@ -218,6 +256,9 @@ messagesRouter.post('/conversations', requireAuth, async (req, res) => {
   const conversation = {
     id: `conversation_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     name: payload.name ?? null,
+    description: payload.description ?? null,
+    imageUrl: null,
+    ownerId: userId,
     isChannel: payload.isChannel ?? false,
     isGroup: payload.isGroup ?? (Boolean(payload.participantIds) || Boolean(payload.isChannel)),
     createdAt: new Date().toISOString(),
@@ -249,56 +290,67 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
 
   if (dbAvailable) {
     const conversations = await prisma.conversation.findMany({
-      where: { participants: { some: { userId } } },
+      where: { participants: { some: { userId, leftAt: null } } },
       include: {
-        participants: { include: { user: { select: { id: true, name: true } } } },
+        participants: { where: { leftAt: null }, include: { user: { select: { id: true, name: true, profile: { select: { avatarUrl: true } } } } } },
         messages: { orderBy: { createdAt: 'desc' }, take: 1 },
-        _count: { select: { messages: { where: { senderId: { not: userId }, readAt: null, deletedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] } } } },
+        _count: { select: { messages: { where: { senderId: { not: userId }, readAt: null, deletedAt: null, moderationHiddenAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] } } } },
       },
       orderBy: { updatedAt: 'desc' },
     });
 
     return res.json({ conversations: conversations.map((conversation) => {
       const currentParticipant = conversation.participants.find((participant) => participant.userId === userId);
+      const lastMessage = conversation.messages[0];
+      const publicLastMessage = lastMessage ? messageToPublicShape(lastMessage) : null;
       return {
         id: conversation.id,
         name: conversation.name,
+        description: conversation.description,
+        imageUrl: conversation.imageUrl,
+        isGroup: conversation.isGroup,
+        isChannel: conversation.isChannel,
         updatedAt: conversation.updatedAt,
         lastMessageAt: conversation.lastMessageAt,
-        lastMessagePreview: conversation.lastMessagePreview,
+        lastMessagePreview: publicLastMessage?.text ?? conversation.lastMessagePreview,
         pinnedAt: currentParticipant?.pinnedAt ?? null,
         archivedAt: currentParticipant?.archivedAt ?? null,
         starredAt: currentParticipant?.starredAt ?? null,
         mutedUntil: currentParticipant?.mutedUntil ?? null,
         unreadCount: conversation._count.messages,
-        participants: conversation.participants.map((participant) => ({ id: participant.id, userId: participant.userId, role: participant.role, user: participant.user })),
-        lastMessage: conversation.messages[0] ? messageToPublicShape(conversation.messages[0]) : null,
+        participants: conversation.participants.map((participant) => ({ id: participant.id, userId: participant.userId, role: conversation.ownerId === participant.userId ? 'OWNER' : participant.role, user: { id: participant.user.id, name: participant.user.name, avatar: participant.user.profile?.avatarUrl ?? '' } })),
+        lastMessage: publicLastMessage,
       };
     }) });
   }
 
   const conversations = socialStore.state.conversations.filter((conversation) => {
     const participants = socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversation.id);
-    return participants.some((participant) => participant.userId === userId);
+    return participants.some((participant) => participant.userId === userId && !participant.leftAt);
   });
 
   return res.json({ conversations: conversations.map((conversation) => {
-    const participants = socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversation.id);
+    const participants = socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversation.id && !participant.leftAt);
     const currentParticipant = participants.find((participant) => participant.userId === userId);
+    const lastMessage = socialStore.state.messages
+      .filter((message) => message.conversationId === conversation.id)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] ?? null;
     return {
       ...conversation,
+      description: conversation.description ?? null,
+      imageUrl: conversation.imageUrl ?? null,
       pinnedAt: currentParticipant?.pinnedAt ?? null,
       archivedAt: currentParticipant?.archivedAt ?? null,
       starredAt: currentParticipant?.starredAt ?? null,
       mutedUntil: currentParticipant?.mutedUntil ?? null,
-      unreadCount: socialStore.state.messages.filter((message) => message.conversationId === conversation.id && message.senderId !== userId && !message.readAt && !message.deletedAt && (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now())).length,
+      unreadCount: socialStore.state.messages.filter((message) => message.conversationId === conversation.id && message.senderId !== userId && !message.readAt && !message.deletedAt && !message.moderationHiddenAt && (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now())).length,
       participants: participants.map((participant) => ({
         ...participant,
-        user: findUserById(participant.userId) ? { id: participant.userId, name: findUserById(participant.userId)!.name } : undefined,
+        role: conversation.ownerId === participant.userId ? 'OWNER' : participant.role,
+        user: findUserById(participant.userId) ? { id: participant.userId, name: findUserById(participant.userId)!.name, avatar: socialStore.state.profiles.find((profile) => profile.userId === participant.userId)?.avatarUrl ?? '' } : undefined,
       })),
-      lastMessage: socialStore.state.messages
-        .filter((message) => message.conversationId === conversation.id)
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] ?? null,
+      lastMessage: lastMessage ? messageToPublicShape(lastMessage) : null,
+      lastMessagePreview: lastMessage ? messageToPublicShape(lastMessage).text : conversation.lastMessagePreview,
     };
   }) });
 });
@@ -316,7 +368,7 @@ messagesRouter.get('/conversations/:id', requireAuth, async (req, res) => {
     const conversation = await prisma.conversation.findUnique({
       where: { id: conversationId },
       include: {
-        participants: { include: { user: { select: { id: true, name: true } } } },
+        participants: { include: { user: { select: { id: true, name: true, profile: { select: { avatarUrl: true } } } } } },
         messages: { where: { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, include: { reactions: true }, orderBy: { createdAt: 'asc' } },
       },
     });
@@ -328,12 +380,15 @@ messagesRouter.get('/conversations/:id', requireAuth, async (req, res) => {
     return res.json({ conversation: {
       id: conversation.id,
       name: conversation.name,
+      isGroup: conversation.isGroup,
       updatedAt: conversation.updatedAt,
       lastMessageAt: conversation.lastMessageAt,
-      lastMessagePreview: conversation.lastMessagePreview,
+      lastMessagePreview: conversation.messages.length
+        ? messageToPublicShape(conversation.messages.at(-1)).text
+        : conversation.lastMessagePreview,
       isChannel: conversation.isChannel,
       disappearingAfterSeconds: conversation.disappearingAfterSeconds,
-      participants: conversation.participants.map((participant) => ({ id: participant.id, userId: participant.userId, role: participant.role, user: participant.user })),
+      participants: conversation.participants.map((participant) => ({ id: participant.id, userId: participant.userId, role: participant.role, user: { id: participant.user.id, name: participant.user.name, avatar: participant.user.profile?.avatarUrl ?? '' } })),
       messages: conversation.messages.filter((message) => !message.deletedAt).map(messageToPublicShape),
     } });
   }
@@ -343,14 +398,17 @@ messagesRouter.get('/conversations/:id', requireAuth, async (req, res) => {
     return res.status(404).json({ message: 'Conversation not found.' });
   }
 
+  const conversationMessages = socialStore.state.messages
+    .filter((message) => message.conversationId === conversationId && !message.deletedAt && (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now()))
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   return res.json({
     conversation: {
       ...conversation,
+      lastMessagePreview: conversationMessages.length
+        ? messageToPublicShape(conversationMessages.at(-1)).text
+        : conversation.lastMessagePreview,
       participants: socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversationId),
-      messages: socialStore.state.messages
-        .filter((message) => message.conversationId === conversationId && !message.deletedAt && (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now()))
-        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-        .map(messageToPublicShape),
+      messages: conversationMessages.map(messageToPublicShape),
     },
   });
 });
@@ -402,8 +460,8 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
 
   if (payload.replyToId) {
     const parent = dbAvailable
-      ? await prisma.message.findFirst({ where: { id: payload.replyToId, conversationId, deletedAt: null }, select: { id: true } })
-      : socialStore.state.messages.find((message) => message.id === payload.replyToId && message.conversationId === conversationId && !message.deletedAt);
+      ? await prisma.message.findFirst({ where: { id: payload.replyToId, conversationId, deletedAt: null, moderationHiddenAt: null }, select: { id: true } })
+      : socialStore.state.messages.find((message) => message.id === payload.replyToId && message.conversationId === conversationId && !message.deletedAt && !message.moderationHiddenAt);
     if (!parent) return res.status(404).json({ message: 'Reply target not found in this conversation.' });
   }
 
@@ -504,6 +562,37 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
   emitConversationEvent('message:new', conversationId, { message: messageToPublicShape(created), senderId: userId }, [userId, ...recipients]);
 
   return res.status(201).json({ message: messageToPublicShape(created) });
+});
+
+messagesRouter.post('/messages/:id/interactive-response', requireAuth, async (req, res) => {
+  const messageId = String(req.params.id);
+  const payload = interactiveResponseSchema.parse(req.body ?? {});
+  const dbAvailable = await isDatabaseAvailable();
+  const message = dbAvailable
+    ? await prisma.message.findUnique({ where: { id: messageId } })
+    : socialStore.state.messages.find((entry) => entry.id === messageId);
+  if (!message || message.deletedAt || message.moderationHiddenAt) return res.status(404).json({ message: 'Message not found.' });
+  if (!(await canViewConversation(message.conversationId, req.user!.id))) return res.status(403).json({ message: 'You do not have access to this message.' });
+
+  const metadata = (message.metadata ?? {}) as Record<string, unknown>;
+  let updatedMetadata: Record<string, unknown>;
+  if (message.contentType === 'POLL' && payload.optionId) {
+    const options = Array.isArray(metadata.options) ? metadata.options as Array<{ id?: unknown }> : [];
+    if (!options.some((option) => option.id === payload.optionId)) return res.status(400).json({ message: 'Choose an option from this poll.' });
+    const votes = metadata.votes && typeof metadata.votes === 'object' ? metadata.votes as Record<string, unknown> : {};
+    updatedMetadata = { ...metadata, votes: { ...votes, [req.user!.id]: payload.optionId } };
+  } else if (message.contentType === 'EVENT' && payload.response) {
+    const responses = metadata.responses && typeof metadata.responses === 'object' ? metadata.responses as Record<string, unknown> : {};
+    updatedMetadata = { ...metadata, responses: { ...responses, [req.user!.id]: payload.response } };
+  } else {
+    return res.status(400).json({ message: 'This message does not accept that response.' });
+  }
+
+  const updated = dbAvailable
+    ? await prisma.message.update({ where: { id: messageId }, data: { metadata: updatedMetadata as Prisma.InputJsonValue } })
+    : Object.assign(message, { metadata: updatedMetadata, updatedAt: new Date().toISOString() });
+  emitConversationEvent('message:new', message.conversationId, { message: messageToPublicShape(updated) }, await listConversationParticipantIds(message.conversationId));
+  return res.json({ message: messageToPublicShape(updated) });
 });
 
 messagesRouter.get('/conversations/:id/messages', requireAuth, async (req, res) => {
@@ -642,10 +731,10 @@ messagesRouter.delete('/messages/:id', requireAuth, async (req, res) => {
   if (dbAvailable) {
     const message = await prisma.message.findUnique({
       where: { id: messageId },
-      select: { id: true, senderId: true, conversationId: true, deletedAt: true },
+      select: { id: true, senderId: true, conversationId: true, deletedAt: true, moderationHiddenAt: true },
     });
 
-    if (!message) {
+    if (!message || message.moderationHiddenAt) {
       return res.status(404).json({ message: 'Message not found.' });
     }
 
@@ -662,7 +751,7 @@ messagesRouter.delete('/messages/:id', requireAuth, async (req, res) => {
   }
 
   const message = socialStore.state.messages.find((entry) => entry.id === messageId);
-  if (!message) {
+  if (!message || message.moderationHiddenAt) {
     return res.status(404).json({ message: 'Message not found.' });
   }
 
@@ -685,7 +774,7 @@ messagesRouter.patch('/messages/:id', requireAuth, async (req, res) => {
   const current = dbAvailable
     ? await prisma.message.findUnique({ where: { id: messageId } })
     : socialStore.state.messages.find((message) => message.id === messageId);
-  if (!current || current.deletedAt) return res.status(404).json({ message: 'Message not found.' });
+  if (!current || current.deletedAt || current.moderationHiddenAt) return res.status(404).json({ message: 'Message not found.' });
   if (current.senderId !== userId) return res.status(403).json({ message: 'You cannot edit this message.' });
   if ((current.contentType ?? 'TEXT') !== 'TEXT') return res.status(400).json({ message: 'Only text messages can be edited.' });
   const moderation = reviewContentForSafety({ type: 'message', text: payload.text, userId });
@@ -707,7 +796,7 @@ messagesRouter.post('/messages/:id/forward', requireAuth, async (req, res) => {
   const source = dbAvailable
     ? await prisma.message.findUnique({ where: { id: sourceId } })
     : socialStore.state.messages.find((message) => message.id === sourceId);
-  if (!source || source.deletedAt) return res.status(404).json({ message: 'Message not found.' });
+  if (!source || source.deletedAt || source.moderationHiddenAt) return res.status(404).json({ message: 'Message not found.' });
   if (!(await canViewConversation(source.conversationId, userId))) return res.status(403).json({ message: 'You do not have access to this message.' });
   const target = dbAvailable
     ? await prisma.conversation.findUnique({ where: { id: targetConversationId }, select: { isChannel: true, disappearingAfterSeconds: true } })
@@ -748,6 +837,7 @@ messagesRouter.post('/messages/:id/forward', requireAuth, async (req, res) => {
       updatedAt: new Date().toISOString(),
       readAt: null,
       deletedAt: null,
+      moderationHiddenAt: null,
       status: 'SENT' as const,
       contentType: source.contentType ?? 'TEXT',
       mediaUrl: source.mediaUrl ?? null,
@@ -780,7 +870,7 @@ messagesRouter.post('/messages/:id/reactions', requireAuth, async (req, res) => 
   const message = dbAvailable
     ? await prisma.message.findUnique({ where: { id: messageId }, include: { reactions: true } })
     : socialStore.state.messages.find((entry) => entry.id === messageId);
-  if (!message || message.deletedAt) return res.status(404).json({ message: 'Message not found.' });
+  if (!message || message.deletedAt || message.moderationHiddenAt) return res.status(404).json({ message: 'Message not found.' });
   if (!(await canViewConversation(message.conversationId, userId))) return res.status(403).json({ message: 'You do not have access to this message.' });
   if (dbAvailable) {
     const existing = await prisma.messageReaction.findUnique({ where: { messageId_userId_type: { messageId, userId, type } } });
@@ -808,6 +898,7 @@ messagesRouter.get('/messages/search', requireAuth, async (req, res) => {
     const messages = await prisma.message.findMany({
       where: {
         deletedAt: null,
+        moderationHiddenAt: null,
         OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
         text: { contains: query, mode: 'insensitive' },
         ...(conversationId ? { conversationId } : { conversation: { participants: { some: { userId: req.user!.id } } } }),
@@ -820,7 +911,7 @@ messagesRouter.get('/messages/search', requireAuth, async (req, res) => {
   }
   const allowedConversationIds = new Set(socialStore.state.conversationParticipants.filter((entry) => entry.userId === req.user!.id).map((entry) => entry.conversationId));
   const messages = socialStore.state.messages.filter((message) =>
-    message.text.toLowerCase().includes(query.toLowerCase()) && !message.deletedAt &&
+    message.text.toLowerCase().includes(query.toLowerCase()) && !message.deletedAt && !message.moderationHiddenAt &&
     (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now()) &&
     (conversationId ? message.conversationId === conversationId : allowedConversationIds.has(message.conversationId)))
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 50);
@@ -833,8 +924,8 @@ messagesRouter.get('/conversations/:id/media', requireAuth, async (req, res) => 
   const dbAvailable = await isDatabaseAvailable();
   const allowedTypes = ['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE'];
   const media = dbAvailable
-    ? await prisma.message.findMany({ where: { conversationId, contentType: { in: allowedTypes }, deletedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, include: { reactions: true }, orderBy: { createdAt: 'desc' }, take: 200 })
-    : socialStore.state.messages.filter((entry) => entry.conversationId === conversationId && allowedTypes.includes(entry.contentType ?? 'TEXT') && !entry.deletedAt && (!entry.expiresAt || new Date(entry.expiresAt).getTime() > Date.now())).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 200);
+    ? await prisma.message.findMany({ where: { conversationId, contentType: { in: allowedTypes }, deletedAt: null, moderationHiddenAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, include: { reactions: true }, orderBy: { createdAt: 'desc' }, take: 200 })
+    : socialStore.state.messages.filter((entry) => entry.conversationId === conversationId && allowedTypes.includes(entry.contentType ?? 'TEXT') && !entry.deletedAt && !entry.moderationHiddenAt && (!entry.expiresAt || new Date(entry.expiresAt).getTime() > Date.now())).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 200);
   return res.json({ media: media.map(messageToPublicShape) });
 });
 
@@ -850,10 +941,10 @@ messagesRouter.post('/messages/:id/report', requireAuth, async (req, res) => {
   if (message.senderId === req.user!.id) return res.status(400).json({ message: 'You cannot report your own message.' });
   const details = `Message report: ${messageId} in ${message.conversationId}\n\n${payload.reason}`;
   if (dbAvailable) {
-    const report = await prisma.report.create({ data: { reporterId: req.user!.id, targetUserId: message.senderId, category: payload.category, details } });
+    const report = await prisma.report.create({ data: { reporterId: req.user!.id, targetUserId: message.senderId, messageId, category: payload.category, details } });
     return res.status(201).json({ report, message: 'Report submitted.' });
   }
-  const report = { id: `report_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, reporterId: req.user!.id, targetType: 'user' as const, targetId: message.senderId, category: payload.category, reason: details, createdAt: new Date().toISOString() };
+  const report = { id: `report_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, reporterId: req.user!.id, targetType: 'message' as const, targetId: messageId, messageId, category: payload.category, reason: details, createdAt: new Date().toISOString() };
   socialStore.state.reports.push(report);
   return res.status(201).json({ report, message: 'Report submitted.' });
 });
@@ -905,29 +996,77 @@ const { participantIds } = validation.data;
   const userId = req.user!.id;
   const dbAvailable = await isDatabaseAvailable();
   if (dbAvailable) {
-    const actor = await prisma.conversationParticipant.findUnique({ where: { conversationId_userId: { conversationId, userId } }, select: { role: true } });
-    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, isGroup: true, isChannel: true } });
+    const actor = await prisma.conversationParticipant.findFirst({ where: { conversationId, userId, leftAt: null }, select: { role: true } });
+    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, ownerId: true, isGroup: true, isChannel: true } });
     if (!actor || !conversation) return res.status(404).json({ message: 'Conversation not found.' });
     if (!conversation.isGroup && !conversation.isChannel) return res.status(400).json({ message: 'Members can only be added to group conversations.' });
-    if (actor.role !== 'OWNER' && actor.role !== 'MODERATOR') return res.status(403).json({ message: 'Only group admins can add participants.' });
+    const isOwner = actor.role === 'OWNER' || isConversationOwner(conversation, userId);
+    const canAddParticipants = conversation.isChannel ? isOwner : canManageGroupMembers(conversation, actor, userId);
+    if (!canAddParticipants) return res.status(403).json({ message: conversation.isChannel ? 'Only channel owners can add participants.' : 'Only group admins can add participants.' });
     const found = await prisma.user.findMany({ where: { id: { in: participantIds } }, select: { id: true } });
     if (found.length !== participantIds.length) return res.status(404).json({ message: 'User not found.' });
-    const currentParticipants = await prisma.conversationParticipant.findMany({ where: { conversationId, userId: { in: participantIds } }, select: { userId: true } });
-    const newParticipantIds = participantIds.filter((targetId) => !currentParticipants.some((participant) => participant.userId === targetId));
+    const currentParticipants = await prisma.conversationParticipant.findMany({ where: { conversationId, userId: { in: participantIds } }, select: { id: true, userId: true, leftAt: true } });
+    const newParticipantIds = participantIds.filter((targetId) => !currentParticipants.some((participant) => participant.userId === targetId && participant.leftAt === null));
     for (const targetId of newParticipantIds) if (await isBlocked(userId, targetId)) return res.status(403).json({ message: 'You cannot add a blocked user.' });
-    await prisma.conversationParticipant.createMany({ data: newParticipantIds.map((targetId) => ({ conversationId, userId: targetId, role: 'MEMBER' })), skipDuplicates: true });
+    const rejoining = currentParticipants.filter((participant) => participant.leftAt !== null && newParticipantIds.includes(participant.userId));
+    for (const participant of rejoining) {
+      await prisma.conversationParticipant.update({ where: { id: participant.id }, data: { leftAt: null, role: 'MEMBER', joinedAt: new Date() } });
+    }
+    const newMemberships = newParticipantIds.filter((targetId) => !rejoining.some((participant) => participant.userId === targetId));
+    if (newMemberships.length) await prisma.conversationParticipant.createMany({ data: newMemberships.map((targetId) => ({ conversationId, userId: targetId, role: 'MEMBER' })), skipDuplicates: true });
     return res.status(201).json({ added: newParticipantIds });
   }
-  const actor = socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === userId);
+  const actor = socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === userId && !entry.leftAt);
   const conversation = socialStore.state.conversations.find((entry) => entry.id === conversationId);
   if (!actor || !conversation) return res.status(404).json({ message: 'Conversation not found.' });
   if (!conversation.isGroup && !conversation.isChannel) return res.status(400).json({ message: 'Members can only be added to group conversations.' });
-  if (actor.role !== 'OWNER' && actor.role !== 'MODERATOR') return res.status(403).json({ message: 'Only group admins can add participants.' });
+  const isOwner = actor.role === 'OWNER' || isConversationOwner(conversation, userId);
+  const canAddParticipants = conversation.isChannel ? isOwner : canManageGroupMembers(conversation, actor, userId);
+  if (!canAddParticipants) return res.status(403).json({ message: conversation.isChannel ? 'Only channel owners can add participants.' : 'Only group admins can add participants.' });
   for (const targetId of participantIds) if (!findUserById(targetId)) return res.status(404).json({ message: 'User not found.' });
-  const newParticipantIds = participantIds.filter((targetId) => !socialStore.state.conversationParticipants.some((entry) => entry.conversationId === conversationId && entry.userId === targetId));
+  const newParticipantIds = participantIds.filter((targetId) => !socialStore.state.conversationParticipants.some((entry) => entry.conversationId === conversationId && entry.userId === targetId && !entry.leftAt));
   for (const targetId of newParticipantIds) if (await isBlocked(userId, targetId)) return res.status(403).json({ message: 'You cannot add a blocked user.' });
-  for (const targetId of newParticipantIds) socialStore.state.conversationParticipants.push({ id: `participant_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, conversationId, userId: targetId, role: 'MEMBER', joinedAt: new Date().toISOString(), lastReadAt: null, leftAt: null });
+  for (const targetId of newParticipantIds) {
+    const former = socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === targetId);
+    if (former) Object.assign(former, { role: 'MEMBER', joinedAt: new Date().toISOString(), leftAt: null });
+    else socialStore.state.conversationParticipants.push({ id: `participant_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, conversationId, userId: targetId, role: 'MEMBER', joinedAt: new Date().toISOString(), lastReadAt: null, leftAt: null });
+  }
   return res.status(201).json({ added: newParticipantIds });
+});
+
+messagesRouter.patch('/conversations/:id/group', requireAuth, async (req, res) => {
+  const conversationId = String(req.params.id);
+  const validation = groupDetailsSchema.safeParse(req.body ?? {});
+  if (!validation.success) return res.status(400).json({ message: validation.error.issues[0]?.message ?? 'Invalid group details.' });
+
+  const userId = req.user!.id;
+  const dbAvailable = await isDatabaseAvailable();
+  const conversation = dbAvailable
+    ? await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, ownerId: true, isGroup: true, isChannel: true } })
+    : socialStore.state.conversations.find((entry) => entry.id === conversationId);
+  const actor = dbAvailable
+    ? await prisma.conversationParticipant.findFirst({ where: { conversationId, userId, leftAt: null }, select: { role: true } })
+    : socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === userId && !entry.leftAt);
+
+  if (!conversation || !actor) return res.status(404).json({ message: 'Group conversation not found.' });
+  if (!conversation.isGroup || conversation.isChannel) return res.status(400).json({ message: 'Only group conversations have group profile settings.' });
+  if (!canManageGroupMembers(conversation, actor, userId)) return res.status(403).json({ message: 'Only group admins can update group settings.' });
+
+  const { name, description, imageUrl } = validation.data;
+  if (imageUrl && !(await uploadedMediaBelongsTo(imageUrl, userId, process.env.NODE_ENV ?? 'development'))) {
+    return res.status(403).json({ message: 'You can only use images that you uploaded.' });
+  }
+  const updates = {
+    ...(name === undefined ? {} : { name }),
+    ...(description === undefined ? {} : { description }),
+    ...(imageUrl === undefined ? {} : { imageUrl: imageUrl || null }),
+  };
+  if (dbAvailable) {
+    const updated = await prisma.conversation.update({ where: { id: conversationId }, data: updates });
+    return res.json({ group: { id: updated.id, name: updated.name, description: updated.description, imageUrl: updated.imageUrl } });
+  }
+  const updated = Object.assign(conversation, updates, { updatedAt: new Date().toISOString() });
+  return res.json({ group: { id: updated.id, name: updated.name, description: updated.description ?? null, imageUrl: updated.imageUrl ?? null } });
 });
 
 messagesRouter.patch('/conversations/:id/participants/:userId', requireAuth, async (req, res) => {
@@ -935,15 +1074,21 @@ messagesRouter.patch('/conversations/:id/participants/:userId', requireAuth, asy
   const targetId = String(req.params.userId);
   const { role } = roleSchema.parse(req.body ?? {});
   const dbAvailable = await isDatabaseAvailable();
+  const conversation = dbAvailable
+    ? await prisma.conversation.findUnique({ where: { id: conversationId }, select: { ownerId: true, isGroup: true, isChannel: true } })
+    : socialStore.state.conversations.find((entry) => entry.id === conversationId);
   const actor = dbAvailable
-    ? await prisma.conversationParticipant.findUnique({ where: { conversationId_userId: { conversationId, userId: req.user!.id } }, select: { role: true } })
-    : socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === req.user!.id);
+    ? await prisma.conversationParticipant.findFirst({ where: { conversationId, userId: req.user!.id, leftAt: null }, select: { role: true } })
+    : socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === req.user!.id && !entry.leftAt);
   const target = dbAvailable
-    ? await prisma.conversationParticipant.findUnique({ where: { conversationId_userId: { conversationId, userId: targetId } } })
-    : socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === targetId);
-  if (!actor || !target) return res.status(404).json({ message: 'Conversation member not found.' });
-  if (actor.role !== 'OWNER') return res.status(403).json({ message: 'Only the group owner can change moderator roles.' });
-  if (target.role === 'OWNER') return res.status(409).json({ message: 'The owner role cannot be changed.' });
+    ? await prisma.conversationParticipant.findFirst({ where: { conversationId, userId: targetId, leftAt: null } })
+    : socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === targetId && !entry.leftAt);
+  if (!conversation || !actor || !target) return res.status(404).json({ message: 'Conversation member not found.' });
+  if (!conversation.isGroup && !conversation.isChannel) return res.status(400).json({ message: 'Roles can only be changed in group conversations.' });
+  const isOwner = actor.role === 'OWNER' || isConversationOwner(conversation, req.user!.id);
+  const canManageRoles = conversation.isChannel ? isOwner : canManageGroupMembers(conversation, actor, req.user!.id);
+  if (!canManageRoles) return res.status(403).json({ message: conversation.isChannel ? 'Only channel owners can change member roles.' : 'Only group admins can change member roles.' });
+  if (target.role === 'OWNER' || isConversationOwner(conversation, targetId)) return res.status(409).json({ message: 'The owner role cannot be changed.' });
   if (dbAvailable) return res.json({ participant: await prisma.conversationParticipant.update({ where: { conversationId_userId: { conversationId, userId: targetId } }, data: { role } }) });
   target.role = role;
   return res.json({ participant: target });
@@ -955,15 +1100,18 @@ messagesRouter.delete('/conversations/:id/participants/:userId', requireAuth, as
   const userId = req.user!.id;
   const dbAvailable = await isDatabaseAvailable();
   const actor = dbAvailable
-    ? await prisma.conversationParticipant.findUnique({ where: { conversationId_userId: { conversationId, userId } }, select: { role: true } })
-    : socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === userId);
+    ? await prisma.conversationParticipant.findFirst({ where: { conversationId, userId, leftAt: null }, select: { role: true } })
+    : socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === userId && !entry.leftAt);
   const target = dbAvailable
-    ? await prisma.conversationParticipant.findUnique({ where: { conversationId_userId: { conversationId, userId: targetId } } })
+    ? await prisma.conversationParticipant.findFirst({ where: { conversationId, userId: targetId, leftAt: null } })
     : socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === targetId);
-  if (!actor || !target) return res.status(404).json({ message: 'Conversation member not found.' });
+  const conversation = dbAvailable
+    ? await prisma.conversation.findUnique({ where: { id: conversationId }, select: { ownerId: true } })
+    : socialStore.state.conversations.find((entry) => entry.id === conversationId);
+  if (!actor || !target || !conversation) return res.status(404).json({ message: 'Conversation member not found.' });
   const selfLeave = targetId === userId;
   if (!selfLeave && actor.role !== 'OWNER' && actor.role !== 'MODERATOR') return res.status(403).json({ message: 'Only group admins can remove members.' });
-  if (target.role === 'OWNER') return res.status(409).json({ message: 'The owner cannot leave or be removed before transferring ownership.' });
+  if (target.role === 'OWNER' || isConversationOwner(conversation, targetId)) return res.status(409).json({ message: 'The owner cannot leave or be removed before transferring ownership.' });
   if (dbAvailable) await prisma.conversationParticipant.delete({ where: { conversationId_userId: { conversationId, userId: targetId } } });
   else socialStore.state.conversationParticipants.splice(socialStore.state.conversationParticipants.findIndex((participant) => participant.id === target.id), 1);
   return res.json({ removed: targetId });

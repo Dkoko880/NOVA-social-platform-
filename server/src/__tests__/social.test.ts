@@ -35,6 +35,52 @@ describe('social platform features', () => {
     vi.restoreAllMocks();
   });
 
+  it('does not expose a feed post when its linked live session is private', async () => {
+    vi.mocked(isDatabaseAvailable).mockResolvedValue(true);
+    vi.spyOn(prisma.post, 'findMany').mockResolvedValue([{
+      id: 'live-post',
+      authorId: 'live-host',
+      content: 'Private broadcast',
+      visibility: 'PUBLIC',
+      moderationHiddenAt: null,
+      sourceLiveBroadcastId: 'private-live',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      imageUrl: null,
+      communityId: null,
+      moderationHiddenById: null,
+      moderationReason: null,
+      sourceLiveReplayId: null,
+    }] as never);
+    vi.spyOn(prisma.liveBroadcast, 'findUnique').mockResolvedValue({
+      id: 'private-live',
+      hostId: 'live-host',
+      visibility: 'private',
+      blockedUserIds: [],
+    } as never);
+    vi.spyOn(prisma.post, 'findUnique').mockResolvedValue({
+      authorId: 'live-host',
+      visibility: 'PUBLIC',
+      moderationHiddenAt: null,
+      sourceLiveBroadcastId: 'private-live',
+    } as never);
+
+    const response = await request(app).get('/api/posts');
+    const comments = await request(app).get('/api/posts/live-post/comments');
+
+    expect(response.status).toBe(200);
+    expect(response.body.posts).toEqual([]);
+    expect(comments.status).toBe(404);
+    expect(prisma.liveBroadcast.findUnique).toHaveBeenCalledWith({
+      where: { id: 'private-live' },
+      select: { id: true, hostId: true, visibility: true, blockedUserIds: true },
+    });
+    expect(prisma.post.findUnique).toHaveBeenCalledWith({
+      where: { id: 'live-post' },
+      select: { authorId: true, visibility: true, moderationHiddenAt: true, sourceLiveBroadcastId: true },
+    });
+  });
+
   it('authenticated user can create a post', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',
@@ -367,6 +413,40 @@ describe('social platform features', () => {
     expect(visiblePost.body.post.shares).toBe(2);
   });
 
+  it('does not count comments from blocked users in Feed post summaries', async () => {
+    const accounts = await Promise.all([
+      { name: 'FeedOwner', email: 'feed-owner@example.com' },
+      { name: 'FeedCommenter', email: 'feed-commenter@example.com' },
+      { name: 'FeedViewer', email: 'feed-viewer@example.com' },
+    ].map(async (account) => {
+      await request(app).post('/api/auth/register').send({
+        ...account,
+        password: 'Password123',
+        communityRulesAccepted: true,
+      });
+      const login = await request(app).post('/api/auth/login').send({
+        email: account.email,
+        password: 'Password123',
+      });
+      return { user: login.body.user as { id: string }, auth: getCookieHeader(login) };
+    }));
+    const [owner, commenter, viewer] = accounts;
+    const created = await request(app).post('/api/posts').set('Cookie', owner.auth).send({ content: 'Feed privacy' });
+    const postId = created.body.post.id as string;
+    const comment = await request(app).post(`/api/posts/${postId}/comments`).set('Cookie', commenter.auth).send({ content: 'Hidden by block' });
+
+    expect(comment.status).toBe(201);
+    await request(app).post(`/api/users/${commenter.user.id}/block`).set('Cookie', viewer.auth);
+
+    const feed = await request(app).get('/api/posts').set('Cookie', viewer.auth);
+    const post = await request(app).get(`/api/posts/${postId}`).set('Cookie', viewer.auth);
+    const comments = await request(app).get(`/api/posts/${postId}/comments`).set('Cookie', viewer.auth);
+
+    expect(feed.body.posts.find((entry: { id: string }) => entry.id === postId).comments).toBe(0);
+    expect(post.body.post.comments).toBe(0);
+    expect(comments.body.comments).toEqual([]);
+  });
+
   it('user cannot delete another user post', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',
@@ -493,10 +573,33 @@ describe('social platform features', () => {
     expect(bobStory.status).toBe(201);
     expect(new Date(bobStory.body.story.expiresAt).getTime() - new Date(bobStory.body.story.createdAt).getTime()).toBe(24 * 60 * 60 * 1000);
 
+    const bobStatus = await request(app).post('/api/statuses').set('Cookie', getCookieHeader(bobLogin)).send({ text: 'A distinct text status' });
+    const caraStatus = await request(app).post('/api/statuses').set('Cookie', getCookieHeader(caraLogin)).send({ text: 'Only followers can see this status' });
+    const videoUpload = await request(app)
+      .post('/api/media/videos')
+      .set('Cookie', getCookieHeader(bobLogin))
+      .attach('file', Buffer.from([0, 0, 0, 24, 102, 116, 121, 112, 105, 115, 111, 109]), 'status.mp4');
+    const bobVideoStatus = await request(app).post('/api/statuses').set('Cookie', getCookieHeader(bobLogin))
+      .send({ text: 'A media status', mediaUrl: videoUpload.body.mediaUrl });
+    expect(bobStatus.status).toBe(201);
+    expect(bobStatus.body.status.mediaUrl).toBeNull();
+    expect(new Date(bobStatus.body.status.expiresAt).getTime() - new Date(bobStatus.body.status.createdAt).getTime()).toBe(24 * 60 * 60 * 1000);
+    expect(videoUpload.status).toBe(201);
+    expect(bobVideoStatus.status).toBe(201);
+    expect(bobVideoStatus.body.status.mediaUrl).toBe(videoUpload.body.mediaUrl);
+
     const aliceStories = await request(app).get('/api/stories').set('Cookie', getCookieHeader(aliceLogin));
     expect(aliceStories.body.stories.map((story: { id: string }) => story.id)).toContain(bobStory.body.story.id);
     expect(aliceStories.body.stories.map((story: { id: string }) => story.id)).not.toContain(caraStory.body.story.id);
+    expect(aliceStories.body.stories.map((story: { id: string }) => story.id)).not.toContain(bobStatus.body.status.id);
     expect((await request(app).post(`/api/stories/${caraStory.body.story.id}/view`).set('Cookie', getCookieHeader(aliceLogin))).status).toBe(404);
+
+    const aliceStatuses = await request(app).get('/api/statuses').set('Cookie', getCookieHeader(aliceLogin));
+    expect(aliceStatuses.body.statuses.map((status: { id: string }) => status.id)).toContain(bobStatus.body.status.id);
+    expect(aliceStatuses.body.statuses.map((status: { id: string }) => status.id)).toContain(bobVideoStatus.body.status.id);
+    expect(aliceStatuses.body.statuses.map((status: { id: string }) => status.id)).not.toContain(caraStatus.body.status.id);
+    expect((await request(app).post(`/api/statuses/${caraStatus.body.status.id}/view`).set('Cookie', getCookieHeader(aliceLogin))).status).toBe(404);
+    expect((await request(app).post(`/api/statuses/${bobVideoStatus.body.status.id}/view`).set('Cookie', getCookieHeader(aliceLogin))).body.viewCount).toBe(1);
 
     const firstView = await request(app).post(`/api/stories/${bobStory.body.story.id}/view`).set('Cookie', getCookieHeader(aliceLogin));
     const duplicateView = await request(app).post(`/api/stories/${bobStory.body.story.id}/view`).set('Cookie', getCookieHeader(aliceLogin));

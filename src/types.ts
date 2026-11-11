@@ -31,6 +31,14 @@ export type Post = {
   category?: string
   currentUserReaction?: string | null
   authorFollowing?: boolean
+  live?: {
+    id: string
+    title: string
+    description?: string | null
+    status: 'live' | 'paused' | 'ended'
+    recordingStatus?: 'UNAVAILABLE' | 'RECORDING' | 'PROCESSING' | 'READY'
+    viewerCount: number
+  }
 }
 
 export type NotificationItem = {

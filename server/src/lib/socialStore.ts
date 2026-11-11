@@ -12,13 +12,23 @@ export type SocialProfileRecord = {
   updatedAt: string;
 };
 
+export type SocialPrivateProfileRecord = {
+  userId: string;
+  dateOfBirth: string | null;
+  address: string | null;
+};
+
 export type SocialPostRecord = {
   id: string;
   authorId: string;
   content: string;
   imageUrl: string | null;
   visibility: 'PUBLIC' | 'FOLLOWERS' | 'PRIVATE';
+  moderationHiddenAt?: string | null;
+  moderationHiddenById?: string | null;
+  moderationReason?: string | null;
   communityId?: string | null;
+  sourceLiveBroadcastId?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -26,6 +36,7 @@ export type SocialPostRecord = {
 export type StoryRecord = {
   id: string;
   authorId: string;
+  kind?: string;
   text: string | null;
   mediaUrl: string | null;
   createdAt: string;
@@ -33,6 +44,23 @@ export type StoryRecord = {
 };
 
 export type StoryViewRecord = { id: string; storyId: string; viewerId: string; viewedAt: string };
+
+export type VideoMeasurementRecord = {
+  id: string;
+  postId: string;
+  viewerId: string;
+  sessionId: string;
+  source: string;
+  watchSeconds: number;
+  durationSeconds: number;
+  lastPositionSeconds: number;
+  lastHeartbeatAt: string | null;
+  active: boolean;
+  startedAt: string;
+  endedAt: string;
+  qualified: boolean;
+  createdAt: string;
+};
 
 export type CommunityRecord = {
   id: string;
@@ -61,6 +89,9 @@ export type SocialCommentRecord = {
   authorId: string;
   parentId?: string | null;
   content: string;
+  moderationHiddenAt?: string | null;
+  moderationHiddenById?: string | null;
+  moderationReason?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -86,6 +117,8 @@ export type SocialNotificationRecord = {
   actorId?: string | null;
   type: string;
   message: string;
+  link?: string | null;
+  dedupeKey?: string | null;
   readAt?: string | null;
   createdAt: string;
 };
@@ -93,11 +126,12 @@ export type SocialNotificationRecord = {
 export type SocialReportRecord = {
   id: string;
   reporterId: string;
-  targetType: 'post' | 'comment' | 'user';
+  targetType: 'post' | 'comment' | 'message' | 'user';
   targetId: string;
   category: 'SPAM' | 'HARASSMENT' | 'SEXUAL_CONTENT' | 'HATE' | 'VIOLENCE' | 'SCAM' | 'OTHER';
   reason: string;
   details?: string | null;
+  messageId?: string | null;
   status?: 'OPEN' | 'REVIEWING' | 'RESOLVED' | 'REJECTED';
   resolvedAt?: string | null;
   createdAt: string;
@@ -113,6 +147,9 @@ export type SocialBlockRecord = {
 export type ConversationRecord = {
   id: string;
   name: string | null;
+  description?: string | null;
+  imageUrl?: string | null;
+  ownerId?: string | null;
   createdAt: string;
   updatedAt: string;
   lastMessageAt: string | null;
@@ -146,13 +183,16 @@ export type MessageRecord = {
   readAt: string | null;
   deletedAt: string | null;
   status: 'SENT' | 'DELIVERED' | 'READ' | 'FAILED' | 'DELETED';
-  contentType?: 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT' | 'VOICE' | 'CONTACT' | 'LOCATION';
+  contentType?: 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT' | 'VOICE' | 'CONTACT' | 'LOCATION' | 'POLL' | 'EVENT';
   mediaUrl?: string | null;
   metadata?: Record<string, unknown> | null;
   replyToId?: string | null;
   forwardedFromId?: string | null;
   editedAt?: string | null;
   expiresAt?: string | null;
+  moderationHiddenAt?: string | null;
+  moderationHiddenById?: string | null;
+  moderationReason?: string | null;
 };
 
 export type MessageReactionRecord = {
@@ -212,9 +252,11 @@ export type EntitlementRecord = {
 const globalStore = globalThis as typeof globalThis & {
   __novaSocialStore?: {
     profiles: SocialProfileRecord[];
+    privateProfiles: SocialPrivateProfileRecord[];
     posts: SocialPostRecord[];
     stories: StoryRecord[];
     storyViews: StoryViewRecord[];
+    videoMeasurements: VideoMeasurementRecord[];
     comments: SocialCommentRecord[];
     postSaves: { id: string; postId: string; userId: string; createdAt: string }[];
     postShares: { id: string; postId: string; userId: string; createdAt: string }[];
@@ -239,9 +281,11 @@ const globalStore = globalThis as typeof globalThis & {
 if (!globalStore.__novaSocialStore) {
   globalStore.__novaSocialStore = {
     profiles: [],
+    privateProfiles: [],
     posts: [],
     stories: [],
     storyViews: [],
+    videoMeasurements: [],
     comments: [],
     postSaves: [],
     postShares: [],
@@ -276,9 +320,11 @@ export const socialStore = {
     }
     globalStore.__novaSocialStore = {
       profiles: [],
+      privateProfiles: [],
       posts: [],
       stories: [],
       storyViews: [],
+      videoMeasurements: [],
       comments: [],
       postSaves: [],
       postShares: [],

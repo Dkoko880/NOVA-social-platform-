@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDatabaseAvailable, prisma } from '../lib/prisma.js';
 import { socialStore } from './socialStore.js';
 
@@ -8,6 +8,8 @@ export interface MediaStorage {
   setOwner(key: string, ownerUserId: string): Promise<boolean>;
   delete(key: string): Promise<void>;
   get(key: string): Promise<{ bytes: Buffer; contentType: string; ownerUserId: string | null } | null>;
+  getMetadata(key: string): Promise<{ size: number; contentType: string; ownerUserId: string | null } | null>;
+  getRange(key: string, start: number, length: number): Promise<Buffer | null>;
 }
 
 export class MediaStorageUnavailableError extends Error {
@@ -27,9 +29,9 @@ class MemoryMediaStorage implements MediaStorage {
   }
 
   async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string, key?: string) {
-    const objectKey = key ?? `${randomUUID()}.${extension}`;
-    this.objects.set(objectKey, { bytes: Buffer.from(bytes), contentType, ownerUserId });
-    return { key: objectKey, publicUrl: `/api/media/files/${objectKey}` };
+    const storedKey = key ?? `${randomUUID()}.${extension}`;
+    this.objects.set(storedKey, { bytes: Buffer.from(bytes), contentType, ownerUserId });
+    return { key: storedKey, publicUrl: `/api/media/files/${storedKey}` };
   }
 
   async delete(key: string) {
@@ -52,16 +54,33 @@ class MemoryMediaStorage implements MediaStorage {
       ownerUserId: object.ownerUserId,
     };
   }
+
+  async getMetadata(key: string) {
+    const object = this.objects.get(key);
+    if (!object) return null;
+    return {
+      size: object.bytes.length,
+      contentType: object.contentType,
+      ownerUserId: object.ownerUserId,
+    };
+  }
+
+  async getRange(key: string, start: number, length: number) {
+    const object = this.objects.get(key);
+    if (!object) return null;
+    return Buffer.from(object.bytes.subarray(start, start + length));
+  }
 }
 
 class DatabaseMediaStorage implements MediaStorage {
   async put(bytes: Buffer, contentType: string, ownerUserId?: string) {
     const key = `${randomUUID()}.webp`;
+    const mediaBytes = new Uint8Array(bytes);
 
     await prisma.registrationMediaObject.create({
       data: {
         key,
-        bytes: Buffer.from(bytes),
+        bytes: mediaBytes,
         contentType,
         ownerUserId,
       },
@@ -74,16 +93,23 @@ class DatabaseMediaStorage implements MediaStorage {
   }
 
   async putAttachment(bytes: Buffer, contentType: string, extension: string, ownerUserId: string, key?: string) {
-    const objectKey = key ?? `${randomUUID()}.${extension}`;
-    await prisma.registrationMediaObject.create({
-      data: {
-        key: objectKey,
-        bytes: Buffer.from(bytes),
+    const storedKey = key ?? `${randomUUID()}.${extension}`;
+    const mediaBytes = new Uint8Array(bytes);
+    await prisma.registrationMediaObject.upsert({
+      where: { key: storedKey },
+      create: {
+        key: storedKey,
+        bytes: mediaBytes,
+        contentType,
+        ownerUserId,
+      },
+      update: {
+        bytes: mediaBytes,
         contentType,
         ownerUserId,
       },
     });
-    return { key: objectKey, publicUrl: `/api/media/files/${objectKey}` };
+    return { key: storedKey, publicUrl: `/api/media/files/${storedKey}` };
   }
 
   async delete(key: string) {
@@ -118,6 +144,29 @@ class DatabaseMediaStorage implements MediaStorage {
       ownerUserId: object.ownerUserId,
     };
   }
+
+  async getMetadata(key: string) {
+    const objects = await prisma.$queryRaw<Array<{
+      size: number;
+      contentType: string;
+      ownerUserId: string | null;
+    }>>`
+      SELECT octet_length("bytes")::integer AS "size", "contentType", "ownerUserId"
+      FROM "RegistrationMediaObject"
+      WHERE "key" = ${key}
+    `;
+    return objects[0] ?? null;
+  }
+
+  async getRange(key: string, start: number, length: number) {
+    const objects = await prisma.$queryRaw<Array<{ bytes: Uint8Array }>>`
+      SELECT substring("bytes" FROM ${start + 1}::integer FOR ${length}::integer) AS "bytes"
+      FROM "RegistrationMediaObject"
+      WHERE "key" = ${key}
+    `;
+    const object = objects[0];
+    return object ? Buffer.from(object.bytes) : null;
+  }
 }
 
 let installedStorage: MediaStorage | null = null;
@@ -145,9 +194,25 @@ export function attachmentMediaKeyFromUrl(url: string) {
   return match?.[1] ?? null;
 }
 
+export function imageFileMediaKeyFromUrl(url: string) {
+  const match = /^\/api\/media\/files\/([0-9a-f-]{36}\.(?:jpe?g|png|webp))$/.exec(url);
+  return match?.[1] ?? null;
+}
+
+export function videoMediaKeyFromUrl(url: string) {
+  const match = /^\/api\/media\/files\/([0-9a-f-]{36}\.(?:webm|mp4|ogg))$/.exec(url);
+  return match?.[1] ?? null;
+}
+
+export function liveReplayMediaKey(liveId: string, extension: string) {
+  const hash = createHash('sha256').update(`novachat-live-replay:${liveId}`).digest('hex').slice(0, 32);
+  const uuid = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20)}`;
+  return `${uuid}.${extension}`;
+}
+
 export async function uploadedMediaBelongsTo(url: string, userId: string, nodeEnv: string) {
   if (!url.startsWith('/api/media/')) return true;
-  const key = mediaKeyFromUrl(url) ?? attachmentMediaKeyFromUrl(url);
+  const key = mediaKeyFromUrl(url) ?? imageFileMediaKeyFromUrl(url) ?? attachmentMediaKeyFromUrl(url);
   if (!key) return false;
 
   const object = await getMediaStorage(nodeEnv).get(key);
@@ -182,4 +247,11 @@ export async function uploadedMediaBelongsTo(url: string, userId: string, nodeEn
   ]);
 
   return Boolean(object?.ownerUserId === userId || profile || posts.length || stories || message);
+}
+
+export async function uploadedVideoBelongsTo(url: string, userId: string, nodeEnv: string) {
+  const key = videoMediaKeyFromUrl(url);
+  if (!key) return false;
+  const object = await getMediaStorage(nodeEnv).get(key);
+  return object?.ownerUserId === userId && object.contentType.startsWith('video/');
 }

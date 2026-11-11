@@ -61,6 +61,12 @@ enum ReportStatus {
   REJECTED
 }
 
+enum AppealStatus {
+  OPEN
+  APPROVED
+  REJECTED
+}
+
 enum CommunityMemberRole {
   MEMBER
   MODERATOR
@@ -143,6 +149,8 @@ model User {
   blocksReceived           Block[]                   @relation("Blocked")
   reportsMade              Report[]                  @relation("Reporter")
   reportsAbout             Report[]                  @relation("ReportedUser")
+  appealsSubmitted         Appeal[]                  @relation("AppealSubject")
+  appealsReviewed          Appeal[]                  @relation("AppealReviewer")
   notifications            Notification[]            @relation("NotificationRecipient")
   notificationPreferences  NotificationPreference[]
   authoredStories          Story[]                    @relation("StoryAuthor")
@@ -158,6 +166,13 @@ model User {
   adminActions             AdminAction[]             @relation("AdminActionActor")
   actionTargets            AdminAction[]             @relation("AdminActionTarget")
   creatorProfile           CreatorProfile?
+  creatorApplications      CreatorApplication[]       @relation("CreatorApplicant")
+  reviewedCreatorApplications CreatorApplication[]    @relation("CreatorApplicationReviewer")
+  videoMeasurements        VideoMeasurement[]
+  adCampaigns              AdCampaign[]                @relation("AdCampaignAdvertiser")
+  reviewedAdCampaigns      AdCampaign[]                @relation("AdCampaignReviewer")
+  adEvents                 AdEvent[]
+  adConsent                AdConsent?
   creatorSubscriptions     CreatorSubscription[]     @relation("CreatorSubscriber")
   businessOwned            BusinessProfile?          @relation("BusinessOwner")
   businessMemberships      BusinessMember[]
@@ -169,6 +184,11 @@ model User {
   marketplaceDisputes      MarketplaceDispute[]      @relation("DisputeReporter")
   financialPaymentIntents  PaymentIntent[]           @relation("PaymentPayer")
   uploadedMedia            RegistrationMediaObject[]
+  liveBroadcasts           LiveBroadcast[]
+  liveReplays              LiveReplay[]
+  liveBroadcastComments    LiveBroadcastComment[]
+  liveBroadcastReactions   LiveBroadcastReaction[]
+  liveBroadcastViews       LiveBroadcastViewer[]
 
   @@index([email])
   @@index([phoneE164])
@@ -259,6 +279,11 @@ model Post {
   content     String
   imageUrl    String?
   visibility  PostVisibility @default(PUBLIC)
+  moderationHiddenAt DateTime?
+  moderationHiddenById String?
+  moderationReason String?
+  sourceLiveReplayId String? @unique
+  sourceLiveBroadcastId String? @unique
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
@@ -266,18 +291,48 @@ model Post {
   community Community?  @relation(fields: [communityId], references: [id], onDelete: SetNull)
   comments  Comment[]
   reactions Reaction[]
+  videoMeasurements VideoMeasurement[]
   reports   Report[]
   saves     PostSave[]
   shares    PostShare[]
+  liveReplay       LiveReplay? @relation("ReplaySource", fields: [sourceLiveReplayId], references: [id], onDelete: SetNull)
+  liveBroadcast    LiveBroadcast? @relation("LiveBroadcastPost", fields: [sourceLiveBroadcastId], references: [id], onDelete: SetNull)
+  publishedReplay  LiveReplay? @relation("ReplayPost")
 
   @@index([authorId])
   @@index([communityId])
   @@index([createdAt])
 }
 
+model VideoMeasurement {
+  id             String   @id @default(cuid())
+  postId         String
+  viewerId       String
+  sessionId      String
+  source         String   @default("unknown")
+  watchSeconds   Int
+  durationSeconds Int
+  lastPositionSeconds Int @default(0)
+  lastHeartbeatAt DateTime?
+  active         Boolean  @default(true)
+  startedAt      DateTime
+  endedAt        DateTime
+  qualified      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  post  Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  viewer User @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, viewerId, sessionId])
+  @@index([postId, createdAt])
+  @@index([viewerId, createdAt])
+  @@index([qualified, createdAt])
+}
+
 model Story {
   id        String   @id @default(cuid())
   authorId  String
+  kind      String   @default("STORY")
   text      String?
   mediaUrl  String?
   createdAt DateTime @default(now())
@@ -332,6 +387,8 @@ model PostShare {
 model Conversation {
   id                       String    @id @default(cuid())
   name                     String?
+  description              String?
+  imageUrl                 String?
   isChannel                Boolean   @default(false)
   isGroup                  Boolean   @default(false)
   disappearingAfterSeconds Int       @default(0)
@@ -387,10 +444,14 @@ model Message {
   forwardedFromId String?
   editedAt        DateTime?
   expiresAt       DateTime?
+  moderationHiddenAt DateTime?
+  moderationHiddenById String?
+  moderationReason String?
 
   conversation Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User              @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
   reactions    MessageReaction[]
+  reports      Report[]
 
   @@index([conversationId, createdAt])
   @@index([senderId])
@@ -419,6 +480,9 @@ model Comment {
   authorId  String
   parentId  String?
   content   String
+  moderationHiddenAt DateTime?
+  moderationHiddenById String?
+  moderationReason String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -485,6 +549,7 @@ model Report {
   reporterId   String
   postId       String?
   commentId    String?
+  messageId    String?
   targetUserId String?
   category     ReportCategory
   details      String?
@@ -495,11 +560,13 @@ model Report {
   reporter   User     @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
   post       Post?    @relation(fields: [postId], references: [id], onDelete: Cascade)
   comment    Comment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  message    Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
   targetUser User?    @relation("ReportedUser", fields: [targetUserId], references: [id], onDelete: SetNull)
 
   @@index([reporterId])
   @@index([postId])
   @@index([commentId])
+  @@index([messageId])
   @@index([targetUserId])
   @@index([status])
 }
@@ -524,6 +591,8 @@ model Notification {
   actorId     String?
   type        String
   message     String
+  link        String?
+  dedupeKey   String?   @unique
   readAt      DateTime?
   createdAt   DateTime  @default(now())
 
@@ -531,6 +600,90 @@ model Notification {
 
   @@index([recipientId, readAt])
   @@index([createdAt])
+}
+
+model LiveReplay {
+  id              String   @id
+  hostId          String
+  title           String
+  mediaUrl        String
+  contentType     String
+  durationSeconds Int
+  status          String   @default("READY")
+  publishedPostId String?  @unique
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  host          User  @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  sourcePost    Post? @relation("ReplaySource")
+  publishedPost Post? @relation("ReplayPost", fields: [publishedPostId], references: [id], onDelete: SetNull)
+
+  @@index([hostId, status, createdAt])
+}
+
+model LiveBroadcast {
+  id              String   @id
+  hostId          String
+  title           String
+  description     String?
+  visibility      String   @default("private")
+  status          String   @default("paused")
+  recordingStatus String   @default("UNAVAILABLE")
+  replayUrl       String?
+  moderators      String[] @default([])
+  blockedUserIds  String[] @default([])
+  mutedUserIds    String[] @default([])
+  guests          Json     @default("[]")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  endedAt         DateTime?
+
+  host User @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  feedPost Post? @relation("LiveBroadcastPost")
+  viewers  LiveBroadcastViewer[]
+
+  @@index([hostId, status, createdAt])
+  @@index([visibility, status, createdAt])
+}
+
+model LiveBroadcastComment {
+  id        String   @id @default(cuid())
+  liveId    String
+  userId    String
+  text      String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([liveId, createdAt])
+}
+
+model LiveBroadcastReaction {
+  id        String   @id @default(cuid())
+  liveId    String
+  userId    String
+  type      String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([liveId, userId, type])
+  @@index([liveId, createdAt])
+}
+
+model LiveBroadcastViewer {
+  liveId     String
+  userId     String
+  joinedAt   DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  connectedAt DateTime?
+
+  live LiveBroadcast @relation(fields: [liveId], references: [id], onDelete: Cascade)
+  user User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([liveId, userId])
+  @@index([liveId, lastSeenAt])
+  @@index([userId, lastSeenAt])
 }
 
 model SubscriptionPlan {
@@ -672,6 +825,25 @@ model AdminAction {
   @@index([actionType])
 }
 
+model Appeal {
+  id             String        @id @default(cuid())
+  userId         String
+  openAppealUserId String?     @unique
+  originalAction String
+  reason         String
+  status         AppealStatus  @default(OPEN)
+  reviewerId     String?
+  reviewerNote   String?
+  createdAt      DateTime      @default(now())
+  reviewedAt     DateTime?
+
+  user     User  @relation("AppealSubject", fields: [userId], references: [id], onDelete: Cascade)
+  reviewer User? @relation("AppealReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+}
+
 model CreatorProfile {
   id                     String   @id @default(cuid())
   userId                 String   @unique
@@ -689,6 +861,115 @@ model CreatorProfile {
   payouts       CreatorPayoutRequest[]
 
   @@index([isEnabled])
+}
+
+model MonetizationSettings {
+  id                      String   @id @default("default")
+  enabled                 Boolean  @default(false)
+  minimumFollowers        Int      @default(1000)
+  minimumQualifiedViews   Int      @default(0)
+  qualifiedViewWindowDays Int      @default(30)
+  minimumWatchTimeSeconds Int      @default(0)
+  minimumEngagementRate   Float    @default(0)
+  minimumAccountAgeDays   Int      @default(30)
+  minimumPublicPosts      Int      @default(0)
+  revenueSharePercent     Int      @default(90)
+  minimumPayoutCents      Int      @default(0)
+  updatedBy               String?
+  updatedAt               DateTime @updatedAt
+}
+
+model CreatorApplication {
+  id                String   @id @default(cuid())
+  creatorId         String
+  status            String   @default("PENDING")
+  reason            String?
+  reviewNote        String?
+  reviewedBy        String?
+  reviewedAt        DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  creator  User  @relation("CreatorApplicant", fields: [creatorId], references: [id], onDelete: Cascade)
+  reviewer User? @relation("CreatorApplicationReviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
+
+  @@index([creatorId, createdAt])
+  @@index([status, createdAt])
+}
+
+model AdNetworkSettings {
+  id        String   @id @default("default")
+  enabled   Boolean  @default(false)
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+}
+
+model AdConsent {
+  id          String    @id @default(cuid())
+  userId      String    @unique
+  consentedAt DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model AdPlacement {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  enabled     Boolean  @default(false)
+  dailyBudgetCents Int @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  campaigns AdCampaign[]
+}
+
+model AdCampaign {
+  id                       String   @id @default(cuid())
+  advertiserId             String
+  placementId              String
+  name                     String
+  creativeUrl              String
+  destinationUrl           String
+  status                   String   @default("DRAFT")
+  startsAt                 DateTime
+  endsAt                   DateTime
+  totalBudgetCents         Int
+  dailyBudgetCents         Int
+  costPerImpressionCents   Int      @default(0)
+  costPerClickCents        Int      @default(0)
+  spendCents               Int      @default(0)
+  reviewNote               String?
+  reviewedBy               String?
+  reviewedAt               DateTime?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  advertiser User         @relation("AdCampaignAdvertiser", fields: [advertiserId], references: [id], onDelete: Cascade)
+  reviewer   User?        @relation("AdCampaignReviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
+  placement  AdPlacement  @relation(fields: [placementId], references: [id], onDelete: Restrict)
+  events     AdEvent[]
+
+  @@index([status, startsAt, endsAt])
+  @@index([advertiserId, createdAt])
+  @@index([placementId, status])
+}
+
+model AdEvent {
+  id           String   @id @default(cuid())
+  campaignId   String
+  viewerId     String
+  eventType    String
+  dayKey       String
+  eventKey     String   @unique
+  amountCents  Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  campaign AdCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  viewer   User       @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, viewerId, eventType, dayKey])
+  @@index([campaignId, eventType, createdAt])
 }
 
 model CreatorSubscription {

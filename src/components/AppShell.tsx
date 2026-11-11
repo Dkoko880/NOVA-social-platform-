@@ -3,11 +3,13 @@ import type { ReactNode } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import {
   Bell,
+  CircleDot,
+  CircleDollarSign,
+  Megaphone,
   Compass,
   House,
   LogOut,
   MessageCircleMore,
-  PlusSquare,
   Settings,
   UserRound,
   BriefcaseBusiness,
@@ -15,6 +17,7 @@ import {
   Phone,
   Sparkles,
   UsersRound,
+  Video,
 } from 'lucide-react'
 import { Avatar } from './ui/Avatar'
 import { cn } from '../utils/cn'
@@ -29,20 +32,34 @@ export const sidebarItems = [
   { label: 'Home', path: '/', icon: House },
   { label: 'Explore', path: '/explore', icon: Compass },
   { label: 'Messages', path: '/messages', icon: MessageCircleMore },
+  { label: 'Videos', path: '/videos', icon: Video },
   { label: 'Calls', path: '/calls', icon: Phone },
   { label: 'Groups', path: '/communities', icon: UsersRound },
   { label: 'Live', path: '/live', icon: Radio },
-  { label: 'Create', path: '/create', icon: PlusSquare },
   { label: 'Notifications', path: '/notifications', icon: Bell },
   { label: 'Profile', path: '/profile', icon: UserRound },
+  { label: 'Creator earnings', path: '/creator/monetization', icon: CircleDollarSign },
+  { label: 'Advertise', path: '/advertise', icon: Megaphone },
   { label: 'Settings', path: '/settings', icon: Settings },
   { label: 'AI Studio', path: '/ai', icon: Sparkles },
 ]
+
+const messagesNavigationItems = [
+  { label: 'Chats', path: '/messages', icon: MessageCircleMore },
+  { label: 'Updates', path: '/updates', icon: CircleDot },
+  { label: 'Communities', path: '/communities', icon: UsersRound },
+  { label: 'Calls', path: '/calls', icon: Phone },
+]
+
+const messagesNavigationPaths = new Set(messagesNavigationItems.map(({ path }) => path))
 
 export function AppShell({ children }: AppShellProps) {
   const location = useLocation()
   const navigate = useNavigate()
   const { user, logout, isLoading } = useAuth()
+  const isMessagesExperience = messagesNavigationPaths.has(location.pathname)
+  const isMessagingSurface = location.pathname === '/messages' || location.pathname === '/updates'
+  const isVideoSurface = location.pathname === '/videos'
   const canAccessAdmin = ['ADMIN', 'SUPER_ADMIN', 'MODERATOR'].includes(user?.role ?? 'USER')
   const navItems = canAccessAdmin
     ? [...sidebarItems, { label: 'Admin', path: '/admin', icon: BriefcaseBusiness }]
@@ -57,20 +74,20 @@ export function AppShell({ children }: AppShellProps) {
     }
   }
 
-  const userName = user?.name ?? 'NOVAKOKO User'
-  const userHandle = user?.username ? `@${user.username}` : user?.email ?? 'NOVAKOKO member'
+  const userName = user?.name ?? 'novachat User'
+  const userHandle = user?.username ? `@${user.username}` : user?.email ?? 'novachat member'
   const userAvatar = ''
 
   return (
     <div className="min-h-screen text-slate-900">
-      <div className="mx-auto flex min-h-screen max-w-[1600px] gap-4 p-3 pb-32 sm:p-4 lg:gap-6 lg:pb-4">
+      <div className={cn('mx-auto flex min-h-screen max-w-[1600px] gap-4 p-3 pb-32 sm:p-4 lg:gap-6 lg:pb-4', isMessagingSurface && 'h-[100dvh] min-h-0 max-w-none gap-0 p-0 pb-0 lg:gap-4 lg:p-4', isVideoSurface && 'h-[100dvh] min-h-0 gap-0 p-0 pb-0 lg:gap-4 lg:p-4')}>
         <aside className="hidden w-[250px] shrink-0 rounded-[28px] border border-blue-950 bg-gradient-to-b from-[#101d46] via-[#15285d] to-[#1b2862] p-4 text-white shadow-[0_24px_70px_-32px_rgba(18,35,87,.65)] lg:flex lg:flex-col">
           <div className="mb-8 flex items-center gap-3 px-2">
             <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-400 via-blue-500 to-violet-500 text-lg font-black text-white shadow-lg shadow-blue-950/40">
               N
             </div>
             <div>
-              <p className="text-xs font-bold uppercase tracking-[0.2em] text-sky-200">NOVAKOKO</p>
+              <p className="text-xs font-bold uppercase tracking-[0.2em] text-sky-200">novachat</p>
               <p className="text-xs text-blue-100/65">Your world, closer</p>
             </div>
           </div>
@@ -116,17 +133,43 @@ export function AppShell({ children }: AppShellProps) {
           </div>
         </aside>
 
-        <main className="flex min-w-0 flex-1 flex-col">
-          <div className="min-h-[calc(100vh-2rem)] overflow-hidden rounded-[28px] border border-white/80 bg-white/95 shadow-[0_20px_70px_-42px_rgba(18,35,87,.38)] backdrop-blur">
-            <TopBar currentPath={location.pathname} />
-            <div>{children}</div>
+        <main className={cn('flex min-w-0 flex-1 flex-col', (isMessagingSurface || isVideoSurface) && 'h-full min-h-0')}>
+          <div className={cn('min-h-[calc(100vh-2rem)] overflow-hidden rounded-[28px] border border-white/80 bg-white/95 shadow-[0_20px_70px_-42px_rgba(18,35,87,.38)] backdrop-blur', (isMessagingSurface || isVideoSurface) && 'h-full min-h-0 rounded-none border-0 shadow-none')}>
+            {!isMessagingSurface && !isVideoSurface ? <TopBar currentPath={location.pathname} /> : null}
+            <div className={(isMessagingSurface || isVideoSurface) ? 'h-full min-h-0' : ''}>{children}</div>
           </div>
         </main>
 
       </div>
 
-      <MobileNavigation />
+      {isMessagesExperience ? <MessagesNavigation /> : <MobileNavigation />}
     </div>
+  )
+}
+
+export function MessagesNavigation() {
+  return (
+    <nav aria-label="Messages navigation" className="fixed inset-x-0 bottom-0 z-40 border-t border-indigo-100/80 bg-white/95 px-2 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur-xl">
+      <div className="mx-auto grid max-w-xl grid-cols-4 gap-1">
+        {messagesNavigationItems.map(({ label, path, icon: Icon }) => (
+          <NavLink
+            key={path}
+            to={path}
+            end
+            aria-label={label}
+            className={({ isActive }) => cn(
+              'flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-xl px-1 py-1 text-[10px] font-semibold transition-colors',
+              isActive
+                ? 'bg-gradient-to-br from-blue-50 to-violet-50 text-blue-700 ring-1 ring-inset ring-indigo-100'
+                : 'text-slate-500 hover:bg-indigo-50 hover:text-indigo-700',
+            )}
+          >
+            <Icon className="h-5 w-5" aria-hidden="true" />
+            <span>{label}</span>
+          </NavLink>
+        ))}
+      </div>
+    </nav>
   )
 }
 
@@ -138,7 +181,7 @@ function TopBar({ currentPath }: TopBarProps) {
   const labels: Record<string, string> = {
     '/': 'Home',
     '/explore': 'Explore',
-    '/create': 'Create',
+    '/videos': 'Videos',
     '/notifications': 'Notifications',
     '/messages': 'Messages',
     '/live': 'Live rooms',
@@ -147,6 +190,8 @@ function TopBar({ currentPath }: TopBarProps) {
     '/communities': 'Communities',
     '/profile': 'Profile',
     '/settings': 'Settings',
+    '/creator/monetization': 'Creator earnings',
+    '/advertise': 'Ad campaigns',
     '/admin': 'Admin Dashboard',
     '/login': 'Login',
     '/register': 'Register',
@@ -155,12 +200,12 @@ function TopBar({ currentPath }: TopBarProps) {
   return (
     <header className="sticky top-0 z-20 flex items-center justify-between border-b border-blue-100 bg-white/95 px-4 py-3 backdrop-blur sm:px-6">
       <div>
-        <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-blue-700">NOVAKOKO</p>
-        <h1 className="text-xl font-semibold text-slate-900">{labels[currentPath] ?? (currentPath.startsWith('/profile/') ? 'Profile' : 'NOVAKOKO')}</h1>
+        <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-blue-700">novachat</p>
+        <h1 className="text-xl font-semibold text-slate-900">{labels[currentPath] ?? (currentPath.startsWith('/profile/') ? 'Profile' : 'novachat')}</h1>
       </div>
       <div className="flex items-center gap-2">
         <Link to="/explore" className="hidden rounded-xl border border-blue-100 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-blue-50 sm:inline-flex">Find people</Link>
-        <Link to="/create" className="inline-flex items-center rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:from-blue-700 hover:to-indigo-700">+ Create</Link>
+        <Link to="/?create=1" className="inline-flex items-center rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:from-blue-700 hover:to-indigo-700">+ Create</Link>
       </div>
     </header>
   )
@@ -171,7 +216,7 @@ function MobileNavigation() {
   const navigate = useNavigate()
   const [menuOpen, setMenuOpen] = useState(false)
 
-  const mobilePaths = ['/', '/explore', '/create', '/messages', '/profile']
+  const mobilePaths = ['/', '/explore', '/messages', '/videos', '/profile']
   const mobileItems = sidebarItems.filter(({ path }) => mobilePaths.includes(path))
   const canAccessAdmin = ['ADMIN', 'SUPER_ADMIN', 'MODERATOR'].includes(user?.role ?? 'USER')
   const moreItems = sidebarItems.filter(({ path }) => !mobilePaths.includes(path))
@@ -233,7 +278,7 @@ function MobileNavigation() {
           <div className="absolute inset-x-3 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] mx-auto max-w-lg rounded-3xl border border-slate-200 bg-white p-4 shadow-2xl">
             <div className="mb-3 flex items-center justify-between px-2">
               <div>
-                <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-700">NOVAKOKO</p>
+                <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-700">novachat</p>
                 <p className="text-sm font-semibold text-slate-900">More to explore</p>
               </div>
               <button type="button" onClick={() => setMenuOpen(false)} aria-label="Close navigation" className="rounded-lg px-3 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100">Close</button>

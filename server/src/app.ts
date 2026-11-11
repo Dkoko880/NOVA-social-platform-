@@ -14,6 +14,7 @@ import { communitiesRouter } from './routes/communities.js';
 import { creatorBusinessMarketplaceRouter } from './routes/creatorBusinessMarketplace.js';
 import { healthRouter } from './routes/health.js';
 import { messagesRouter } from './routes/messages.js';
+import { monetizationAdsRouter } from './routes/monetizationAds.js';
 import { mediaRouter } from './routes/media.js';
 import { paymentsRouter } from './routes/payments.js';
 import { socialRouter } from './routes/social.js';
@@ -25,11 +26,16 @@ const testRuntime = env.NODE_ENV === 'test' || process.env.VITEST === 'true';
 const allowedOrigins = Array.from(
   new Set([
     ...env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean),
+    'https://localhost',
     'https://nova-social-platform-svx2.vercel.app',
     'https://nova-social-platform.vercel.app',
   ]),
 );
-const connectSources = ["'self'", ...allowedOrigins.filter((origin) => origin !== '*')];
+const connectSources = [
+  "'self'",
+  ...allowedOrigins.filter((origin) => origin !== '*'),
+  ...(env.LIVEKIT_URL ? [env.LIVEKIT_URL] : []),
+];
 
 app.use(cfRayDiagnostic);
 app.use(helmet({
@@ -54,7 +60,7 @@ app.use(cors({
     callback(new Error('Origin not allowed by CORS policy.'));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 }));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
@@ -102,6 +108,7 @@ app.use('/api', subscriptionRouter);
 app.use('/api', socialRouter);
 app.use('/api', command2aRouter);
 app.use('/api', creatorBusinessMarketplaceRouter);
+app.use('/api', monetizationAdsRouter);
 
 app.get('/', (_req, res) => {
   res.json({ name: 'NOVA Social Platform API', status: 'online' });

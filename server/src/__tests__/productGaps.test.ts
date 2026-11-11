@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
+import { TokenVerifier } from 'livekit-server-sdk';
 import { app } from '../app.js';
 import env from '../config/env.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { socialStore } from '../lib/socialStore.js';
-import { clearCommand2AStores } from '../lib/platform.js';
+import { clearCommand2AStores, updateLiveSession } from '../lib/platform.js';
+import { subscribeToUserEvents } from '../lib/realtime.js';
 
 function cookie(response: { headers: Record<string, string | string[] | undefined> }) {
   const value = response.headers['set-cookie'];
@@ -15,8 +17,8 @@ async function register(name: string) {
   const email = `${name.toLowerCase()}@example.com`;
   await request(app).post('/api/auth/register').send({ name, email, password: 'Password123', communityRulesAccepted: true });
   const login = await request(app).post('/api/auth/login').send({ email, password: 'Password123' });
-  const users = await request(app).get('/api/users');
-  return { auth: cookie(login), user: users.body.users.find((entry: { email: string }) => entry.email === email) };
+  const user = await request(app).get(`/api/users/${login.body.user.id}`);
+  return { auth: cookie(login), user: user.body.user };
 }
 
 describe('product area gaps', () => {
@@ -68,6 +70,8 @@ describe('product area gaps', () => {
     expect((await request(app).post(`/api/conversations/${channelId}/messages`).set('Cookie', moderator.auth).send({ text: 'Unauthorized update' })).status).toBe(403);
     expect((await request(app).post(`/api/conversations/${channelId}/participants`).set('Cookie', owner.auth).send({ participantIds: [guest.user.id] })).status).toBe(201);
     expect((await request(app).patch(`/api/conversations/${channelId}/participants/${moderator.user.id}`).set('Cookie', owner.auth).send({ role: 'MODERATOR' })).status).toBe(200);
+    expect((await request(app).patch(`/api/conversations/${channelId}/participants/${guest.user.id}`).set('Cookie', moderator.auth).send({ role: 'MODERATOR' })).status).toBe(403);
+    expect((await request(app).post(`/api/conversations/${channelId}/participants`).set('Cookie', moderator.auth).send({ participantIds: [guest.user.id] })).status).toBe(403);
     expect((await request(app).post(`/api/conversations/${channelId}/messages`).set('Cookie', moderator.auth).send({ text: 'Official update' })).status).toBe(201);
     expect((await request(app).delete(`/api/conversations/${channelId}/participants/${guest.user.id}`).set('Cookie', moderator.auth)).status).toBe(200);
   });
@@ -75,26 +79,76 @@ describe('product area gaps', () => {
   it('lets group owners and moderators add new members but prevents direct-chat expansion', async () => {
     const owner = await register('AddGroupOwner');
     const moderator = await register('AddGroupModerator');
+    const member = await register('AddGroupMember');
     const guest = await register('AddGroupGuest');
     const outsider = await register('AddGroupOutsider');
     const created = await request(app).post('/api/conversations').set('Cookie', owner.auth).send({
-      participantIds: [moderator.user.id],
+      participantIds: [moderator.user.id, member.user.id],
       name: 'Small group',
     });
     const groupId = created.body.conversation.id;
 
     expect((await request(app).get('/api/conversations').set('Cookie', owner.auth)).body.conversations.find((entry: { id: string }) => entry.id === groupId).isGroup).toBe(true);
+    expect((await request(app).get(`/api/conversations/${groupId}`).set('Cookie', owner.auth)).body.conversation.participants.find((entry: { userId: string }) => entry.userId === owner.user.id).role).toBe('OWNER');
+    expect((await request(app).patch(`/api/conversations/${groupId}/group`).set('Cookie', member.auth).send({ name: 'Unauthorized rename' })).status).toBe(403);
+    const updatedGroup = await request(app).patch(`/api/conversations/${groupId}/group`).set('Cookie', owner.auth).send({
+      name: 'Small group profile',
+      description: 'Group information managed by admins.',
+    });
+    expect(updatedGroup.status).toBe(200);
+    expect(updatedGroup.body.group).toMatchObject({ name: 'Small group profile', description: 'Group information managed by admins.', imageUrl: null });
     expect((await request(app).post(`/api/conversations/${groupId}/participants`).set('Cookie', outsider.auth).send({ participantIds: [guest.user.id] })).status).toBe(404);
+    expect((await request(app).post(`/api/conversations/${groupId}/participants`).set('Cookie', member.auth).send({ participantIds: [guest.user.id] })).status).toBe(403);
+    expect((await request(app).patch(`/api/conversations/${groupId}/participants/${moderator.user.id}`).set('Cookie', member.auth).send({ role: 'MODERATOR' })).status).toBe(403);
     expect((await request(app).post(`/api/conversations/${groupId}/participants`).set('Cookie', owner.auth).send({ participantIds: [guest.user.id, guest.user.id] })).status).toBe(400);
     expect((await request(app).post(`/api/conversations/${groupId}/participants`).set('Cookie', owner.auth).send({ participantIds: [guest.user.id] })).body.added).toEqual([guest.user.id]);
+    const duplicateAdd = await request(app).post(`/api/conversations/${groupId}/participants`).set('Cookie', owner.auth).send({ participantIds: [guest.user.id] });
+    expect(duplicateAdd.status).toBe(201);
+    expect(duplicateAdd.body.added).toEqual([]);
+    expect((await request(app).get(`/api/conversations/${groupId}`).set('Cookie', owner.auth)).body.conversation.participants.filter((participant: { userId: string }) => participant.userId === guest.user.id)).toHaveLength(1);
     expect((await request(app).get('/api/conversations').set('Cookie', guest.auth)).body.conversations.some((entry: { id: string }) => entry.id === groupId)).toBe(true);
 
     const promoted = await request(app).patch(`/api/conversations/${groupId}/participants/${moderator.user.id}`).set('Cookie', owner.auth).send({ role: 'MODERATOR' });
     expect(promoted.status).toBe(200);
+    expect((await request(app).patch(`/api/conversations/${groupId}/group`).set('Cookie', moderator.auth).send({ description: 'Admin-maintained description.' })).status).toBe(200);
+    expect((await request(app).patch(`/api/conversations/${groupId}/participants/${member.user.id}`).set('Cookie', moderator.auth).send({ role: 'MODERATOR' })).status).toBe(200);
     expect((await request(app).post(`/api/conversations/${groupId}/participants`).set('Cookie', moderator.auth).send({ participantIds: [outsider.user.id] })).body.added).toEqual([outsider.user.id]);
+    expect((await request(app).delete(`/api/conversations/${groupId}/participants/${member.user.id}`).set('Cookie', moderator.auth)).status).toBe(200);
+    expect((await request(app).patch(`/api/conversations/${groupId}/participants/${moderator.user.id}`).set('Cookie', moderator.auth).send({ role: 'MEMBER' })).status).toBe(200);
+    expect((await request(app).patch(`/api/conversations/${groupId}/participants/${moderator.user.id}`).set('Cookie', owner.auth).send({ role: 'MEMBER' })).status).toBe(200);
+    expect((await request(app).patch(`/api/conversations/${groupId}/participants/${owner.user.id}`).set('Cookie', owner.auth).send({ role: 'MEMBER' })).status).toBe(409);
+    expect((await request(app).delete(`/api/conversations/${groupId}/participants/${owner.user.id}`).set('Cookie', owner.auth)).status).toBe(409);
+    expect((await request(app).patch(`/api/conversations/${groupId}/participants/${moderator.user.id}`).set('Cookie', outsider.auth).send({ role: 'MEMBER' })).status).toBe(403);
+    expect((await request(app).patch(`/api/conversations/${groupId}/participants/missing-group-member`).set('Cookie', owner.auth).send({ role: 'MODERATOR' })).status).toBe(404);
 
     const direct = await request(app).post('/api/conversations').set('Cookie', owner.auth).send({ participantId: outsider.user.id });
     expect((await request(app).post(`/api/conversations/${direct.body.conversation.id}/participants`).set('Cookie', owner.auth).send({ participantIds: [guest.user.id] })).status).toBe(400);
+  });
+
+  it('persists poll votes and event responses for conversation members only', async () => {
+    const alice = await register('InteractiveAlice');
+    const bob = await register('InteractiveBob');
+    const outsider = await register('InteractiveOutsider');
+    const conversation = await request(app).post('/api/conversations').set('Cookie', alice.auth).send({ participantId: bob.user.id });
+    const conversationId = conversation.body.conversation.id;
+    const poll = await request(app).post(`/api/conversations/${conversationId}/messages`).set('Cookie', alice.auth).send({
+      contentType: 'POLL',
+      metadata: { question: 'Which day?', options: [{ id: 'sat', text: 'Saturday' }, { id: 'sun', text: 'Sunday' }], votes: {} },
+    });
+    expect(poll.status).toBe(201);
+    expect((await request(app).post(`/api/messages/${poll.body.message.id}/interactive-response`).set('Cookie', bob.auth).send({ optionId: 'missing' })).status).toBe(400);
+    expect((await request(app).post(`/api/messages/${poll.body.message.id}/interactive-response`).set('Cookie', outsider.auth).send({ optionId: 'sat' })).status).toBe(403);
+    const vote = await request(app).post(`/api/messages/${poll.body.message.id}/interactive-response`).set('Cookie', bob.auth).send({ optionId: 'sat' });
+    expect(vote.body.message.metadata.votes[bob.user.id]).toBe('sat');
+
+    const event = await request(app).post(`/api/conversations/${conversationId}/messages`).set('Cookie', alice.auth).send({
+      contentType: 'EVENT',
+      metadata: { title: 'Community meetup', startsAt: '2026-10-20T17:00:00.000Z', responses: {} },
+    });
+    const rsvp = await request(app).post(`/api/messages/${event.body.message.id}/interactive-response`).set('Cookie', bob.auth).send({ response: 'GOING' });
+    expect(rsvp.body.message.metadata.responses[bob.user.id]).toBe('GOING');
+    const history = await request(app).get(`/api/conversations/${conversationId}/messages`).set('Cookie', alice.auth);
+    expect(history.body.messages.map((message: { contentType: string }) => message.contentType)).toContain('EVENT');
   });
 
   it('supports private community channels through invitation-only membership', async () => {
@@ -111,126 +165,111 @@ describe('product area gaps', () => {
     expect((await request(app).delete(`/api/communities/${created.body.community.id}/members/${member.user.id}`).set('Cookie', owner.auth)).status).toBe(200);
   });
 
-  it('creates an authenticated WebRTC call and restricts its signaling to call participants', async () => {
+  it('issues LiveKit call tokens only to eligible participants and confirms real room membership', async () => {
     const caller = await register('CallCaller');
     const one = await register('CallOne');
     const outsider = await register('CallOutsider');
     const started = await request(app).post('/api/calls/start').set('Cookie', caller.auth).send({ targetUserId: one.user.id, type: 'video' });
     expect(started.status).toBe(201);
     expect(started.body.call.providerConfigured).toBe(true);
+    expect(started.body.call.provider).toBe('livekit');
     expect(started.body.call.status).toBe('ringing');
     expect(started.body.call.participants.map((participant: { userId: string }) => participant.userId)).toContain(one.user.id);
-    const signal = { type: 'offer', sdp: 'v=0\\r\\n' };
-    expect((await request(app).post(`/api/calls/${started.body.call.id}/signaling`).set('Cookie', outsider.auth).send({ to: one.user.id, signal })).status).toBe(403);
-    expect((await request(app).post(`/api/calls/${started.body.call.id}/signaling`).set('Cookie', caller.auth).send({ to: one.user.id, signal })).status).toBe(202);
+    const tokenPath = `/api/calls/${started.body.call.id}/token`;
+    expect((await request(app).post(tokenPath).set('Cookie', outsider.auth)).status).toBe(403);
+    expect((await request(app).post(tokenPath).set('Cookie', one.auth)).status).toBe(403);
+    const callerToken = await request(app).post(tokenPath).set('Cookie', caller.auth);
+    expect(callerToken.status).toBe(200);
+    expect(callerToken.headers['cache-control']).toBe('no-store');
+    const callerClaims = await new TokenVerifier('test-livekit-key', 'test-livekit-secret-that-is-only-used-in-tests').verify(callerToken.body.token);
+    expect(callerClaims.video).toMatchObject({
+      roomJoin: true,
+      room: `nova-call-${started.body.call.id}`,
+      canPublish: true,
+      canPublishSources: ['microphone', 'camera'],
+      canSubscribe: true,
+    });
+
     const accepted = await request(app).post(`/api/calls/${started.body.call.id}/accept`).set('Cookie', one.auth);
     expect(accepted.body.call.status).toBe('ringing');
-    expect((await request(app).post(`/api/calls/${started.body.call.id}/connected`).set('Cookie', one.auth)).body.call.status).toBe('ringing');
-    expect((await request(app).post(`/api/calls/${started.body.call.id}/connected`).set('Cookie', caller.auth)).body.call.status).toBe('connected');
+    const targetToken = await request(app).post(tokenPath).set('Cookie', one.auth);
+    expect(targetToken.status).toBe(200);
+    expect((await new TokenVerifier('test-livekit-key', 'test-livekit-secret-that-is-only-used-in-tests').verify(targetToken.body.token)).video)
+      .toMatchObject({ roomJoin: true, room: `nova-call-${started.body.call.id}`, canPublish: true, canSubscribe: true });
+    const falseConnection = await request(app).post(`/api/calls/${started.body.call.id}/connected`).set('Cookie', caller.auth);
+    expect(falseConnection.status).toBe(503);
+    expect((await request(app).get('/api/calls/history').set('Cookie', caller.auth)).body.calls[0].status).toBe('ringing');
   });
 
-  it('creates real browser-to-browser live sessions and authorizes viewer signaling', async () => {
+  it('grants publishers only to live hosts and subscribe-only access to joined viewers', async () => {
     const host = await register('LiveHost');
     const viewer = await register('LiveGuest');
     const outsider = await register('LiveOutsider');
     const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Community stream' });
     expect(created.status).toBe(201);
-    expect(created.body.live.providerConfigured).toBe(created.body.live.provider === 'livekit');
-    const started = await request(app).post(`/api/live/${created.body.live.id}/start`).set('Cookie', host.auth);
-    expect(started.status).toBe(200);
-    expect(started.body.live.recordingStatus).toBe('RECORDING');
-    const joined = await request(app).post(`/api/live/${created.body.live.id}/viewers/join`).set('Cookie', viewer.auth);
-    expect(joined.status).toBe(201);
-    const viewers = await request(app).get(`/api/live/${created.body.live.id}/viewers`).set('Cookie', viewer.auth);
-    expect(viewers.body).toMatchObject({ viewerCount: 1, viewers: [{ userId: viewer.user.id, name: 'LiveGuest' }] });
-    expect((await request(app).get(`/api/live/${created.body.live.id}/viewers`).set('Cookie', outsider.auth)).status).toBe(403);
-    expect((await request(app).post(`/api/live/${created.body.live.id}/viewers/heartbeat`).set('Cookie', viewer.auth)).status).toBe(200);
-    expect((await request(app).post(`/api/live/${created.body.live.id}/block/${outsider.user.id}`).set('Cookie', host.auth)).status).toBe(200);
-    expect((await request(app).post(`/api/live/${created.body.live.id}/viewers/join`).set('Cookie', outsider.auth)).status).toBe(403);
-
-    if (created.body.live.provider === 'livekit') {
-      const hostToken = await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', host.auth);
-      const viewerToken = await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', viewer.auth);
-      expect(hostToken.body).toMatchObject({ role: 'host' });
-      expect(viewerToken.body).toMatchObject({ role: 'viewer' });
-      expect(hostToken.body.token).toBeTruthy();
-      expect(viewerToken.body.token).toBeTruthy();
-      expect((await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', outsider.auth)).status).toBe(403);
-    } else {
-      expect((await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', host.auth)).status).toBe(503);
-      expect((await request(app).post(`/api/live/${created.body.live.id}/signaling`).set('Cookie', viewer.auth).send({ to: host.user.id, signal: { type: 'join' } })).status).toBe(202);
-      expect((await request(app).post(`/api/live/${created.body.live.id}/signaling`).set('Cookie', viewer.auth).send({ to: host.user.id, signal: { type: 'offer', sdp: 'v=0\\r\\n' } })).status).toBe(403);
-      expect((await request(app).post(`/api/live/${created.body.live.id}/signaling`).set('Cookie', host.auth).send({ to: viewer.user.id, signal: { type: 'offer', sdp: 'v=0\\r\\n' } })).status).toBe(202);
-    }
-
-    const ended = await request(app).post(`/api/live/${created.body.live.id}/end`).set('Cookie', host.auth);
-    expect(ended.body.live).toMatchObject({ status: 'ended', recordingStatus: 'RECORDING' });
-    const recordingId = 'c0cce6c0-0000-4000-8000-000000000001';
-    const recording = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x01, 0x02]);
-    const publishPath = `/api/live/${created.body.live.id}/recording/replay/${recordingId}`;
-    const firstPublish = await request(app).post(publishPath).set('Cookie', host.auth).attach('file', recording, { filename: 'replay.webm', contentType: 'video/webm' });
-    const retriedPublish = await request(app).post(publishPath).set('Cookie', host.auth).attach('file', recording, { filename: 'replay.webm', contentType: 'video/webm' });
-    expect(firstPublish.status).toBe(201);
-    expect(retriedPublish.status).toBe(200);
-    expect(retriedPublish.body.postId).toBe(firstPublish.body.postId);
-    expect(retriedPublish.body.live.recordingStatus).toBe('READY');
-    expect(socialStore.state.posts.filter((post) => post.id === firstPublish.body.postId)).toHaveLength(1);
-    expect((await request(app).get(firstPublish.body.mediaUrl).set('Cookie', viewer.auth)).status).toBe(200);
-    expect((await request(app).get(firstPublish.body.mediaUrl).set('Cookie', outsider.auth)).status).toBe(404);
-    expect((await request(app).post(publishPath).set('Cookie', outsider.auth).attach('file', recording, { filename: 'replay.webm', contentType: 'video/webm' })).status).toBe(403);
-
-    const privateLive = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Private replay', visibility: 'private' });
-    const privateReplayId = 'c0cce6c0-0000-4000-8000-000000000002';
-    const privateReplay = await request(app).post(`/api/live/${privateLive.body.live.id}/recording/replay/${privateReplayId}`).set('Cookie', host.auth).attach('file', recording, { filename: 'replay.webm', contentType: 'video/webm' });
-    expect(privateReplay.status).toBe(201);
-    expect((await request(app).get(privateReplay.body.mediaUrl).set('Cookie', outsider.auth)).status).toBe(404);
-    expect((await request(app).get(privateReplay.body.mediaUrl).set('Cookie', host.auth)).status).toBe(200);
-  });
-
-  it('issues LiveKit tokens with publish access limited to the host', async () => {
-    const previousConfig = {
-      url: env.LIVEKIT_URL,
-      apiKey: env.LIVEKIT_API_KEY,
-      apiSecret: env.LIVEKIT_API_SECRET,
-    };
-    Object.assign(env, {
-      LIVEKIT_URL: 'wss://livekit.example.test',
-      LIVEKIT_API_KEY: 'test-livekit-key',
-      LIVEKIT_API_SECRET: 'test-livekit-secret-not-a-credential',
-    });
-
-    try {
-      const host = await register('LiveKitHost');
-      const viewer = await register('LiveKitViewer');
-      const outsider = await register('LiveKitOutsider');
-      const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Token-scoped stream' });
-      expect(created.body.live).toMatchObject({ provider: 'livekit', providerConfigured: true });
-      await request(app).post(`/api/live/${created.body.live.id}/start`).set('Cookie', host.auth);
-      await request(app).post(`/api/live/${created.body.live.id}/viewers/join`).set('Cookie', viewer.auth);
-
-      const hostToken = await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', host.auth);
-      const viewerToken = await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', viewer.auth);
-      expect(hostToken.body).toMatchObject({ serverUrl: 'wss://livekit.example.test', role: 'host' });
-      expect(viewerToken.body).toMatchObject({ serverUrl: 'wss://livekit.example.test', role: 'viewer' });
-      expect(hostToken.body.token).toBeTruthy();
-      expect(viewerToken.body.token).toBeTruthy();
-
-      const viewerClaims = JSON.parse(Buffer.from(viewerToken.body.token.split('.')[1], 'base64url').toString()) as {
-        video?: { roomJoin?: boolean; room?: string; canPublish?: boolean; canSubscribe?: boolean };
-      };
-      expect(viewerClaims.video).toMatchObject({
+    expect(created.body.live.providerConfigured).toBe(true);
+    expect(created.body.live.provider).toBe('livekit');
+    const liveId = created.body.live.id;
+    const tokenPath = `/api/live/${liveId}/token`;
+    const hostToken = await request(app).post(tokenPath).set('Cookie', host.auth);
+    expect(hostToken.status).toBe(200);
+    expect((await new TokenVerifier('test-livekit-key', 'test-livekit-secret-that-is-only-used-in-tests').verify(hostToken.body.token)).video)
+      .toMatchObject({
         roomJoin: true,
-        room: created.body.live.id,
-        canPublish: false,
+        room: `nova-live-${liveId}`,
+        canPublish: true,
+        canPublishSources: ['microphone', 'camera'],
         canSubscribe: true,
       });
-      expect((await request(app).post(`/api/live/${created.body.live.id}/livekit-token`).set('Cookie', outsider.auth)).status).toBe(403);
-    } finally {
-      Object.assign(env, {
-        LIVEKIT_URL: previousConfig.url,
-        LIVEKIT_API_KEY: previousConfig.apiKey,
-        LIVEKIT_API_SECRET: previousConfig.apiSecret,
-      });
-    }
+    expect((await request(app).post(tokenPath).set('Cookie', viewer.auth)).status).toBe(403);
+
+    const failedStart = await request(app).post(`/api/live/${liveId}/start`).set('Cookie', host.auth);
+    expect(failedStart.status).toBe(503);
+    expect((await request(app).get('/api/live').set('Cookie', host.auth)).body.lives[0].status).toBe('paused');
+
+    updateLiveSession(liveId, (current) => ({
+      ...current,
+      status: 'live',
+      viewers: [{ userId: viewer.user.id, isMuted: false, isBlocked: false, joinedAt: new Date().toISOString() }],
+      viewerCount: 1,
+    }));
+    const viewerToken = await request(app).post(tokenPath).set('Cookie', viewer.auth);
+    expect(viewerToken.status).toBe(200);
+    expect((await new TokenVerifier('test-livekit-key', 'test-livekit-secret-that-is-only-used-in-tests').verify(viewerToken.body.token)).video)
+      .toMatchObject({ roomJoin: true, room: `nova-live-${liveId}`, canPublish: false, canSubscribe: true });
+    expect((await request(app).post(tokenPath).set('Cookie', outsider.auth)).status).toBe(403);
+  });
+
+  it('requires an authorized live viewer for comments and deduplicates likes', async () => {
+    const host = await register('InteractionHost');
+    const viewer = await register('InteractionViewer');
+    const outsider = await register('InteractionOutsider');
+    const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Audience test' });
+    const liveId = created.body.live.id;
+    updateLiveSession(liveId, (live) => ({ ...live, status: 'live' }));
+    const viewerEvents: Array<{ event?: string; live?: { viewerCount: number; comments: Array<{ text: string }>; reactions: Array<{ type: string }> } }> = [];
+    const outsiderEvents: unknown[] = [];
+    const unsubscribeViewer = subscribeToUserEvents(viewer.user.id, (event) => { viewerEvents.push(event as typeof viewerEvents[number]); });
+    const unsubscribeOutsider = subscribeToUserEvents(outsider.user.id, (event) => { outsiderEvents.push(event); });
+
+    const blockedComment = await request(app).post(`/api/live/${liveId}/comment`).set('Cookie', outsider.auth).send({ text: 'I am not in the room.' });
+    expect(blockedComment.status).toBe(403);
+    const joined = await request(app).post(`/api/live/${liveId}/viewers/join`).set('Cookie', viewer.auth);
+    expect(joined.status).toBe(201);
+    const comment = await request(app).post(`/api/live/${liveId}/comment`).set('Cookie', viewer.auth).send({ text: 'Hello everyone.' });
+    expect(comment.status).toBe(201);
+    const firstLike = await request(app).post(`/api/live/${liveId}/react`).set('Cookie', viewer.auth).send({ type: 'LIKE' });
+    const duplicateLike = await request(app).post(`/api/live/${liveId}/react`).set('Cookie', viewer.auth).send({ type: 'LIKE' });
+    expect(firstLike.status).toBe(201);
+    expect(duplicateLike.status).toBe(200);
+    expect(duplicateLike.body.duplicate).toBe(true);
+    expect(viewerEvents.some((event) => event.event === 'live:update' && event.live?.viewerCount === 1)).toBe(true);
+    expect(viewerEvents.some((event) => event.event === 'live:update' && event.live?.comments.some((entry) => entry.text === 'Hello everyone.'))).toBe(true);
+    expect(viewerEvents.some((event) => event.event === 'live:update' && event.live?.reactions.some((entry) => entry.type === 'LIKE'))).toBe(true);
+    expect(outsiderEvents).toHaveLength(0);
+    unsubscribeViewer();
+    unsubscribeOutsider();
+    expect((await request(app).get(`/api/live/${liveId}`).set('Cookie', viewer.auth)).body.live.comments).toHaveLength(1);
+    expect((await request(app).post(`/api/live/${liveId}/viewers/leave`).set('Cookie', viewer.auth)).body.left).toBe(true);
   });
 });

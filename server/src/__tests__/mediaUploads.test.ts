@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import sharp from 'sharp';
 import { app } from '../app.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { getMediaStorage, uploadedMediaBelongsTo } from '../lib/mediaStorage.js';
 import { socialStore } from '../lib/socialStore.js';
+import { clearCommand2AStores, updateLiveSession } from '../lib/platform.js';
 
 function cookie(response: { headers: Record<string, string | string[] | undefined> }) {
   const value = response.headers['set-cookie'];
@@ -15,14 +16,15 @@ async function register(name: string) {
   const email = `${name.toLowerCase()}@example.com`;
   await request(app).post('/api/auth/register').send({ name, email, password: 'Password123', communityRulesAccepted: true });
   const login = await request(app).post('/api/auth/login').send({ email, password: 'Password123' });
-  const users = await request(app).get('/api/users');
-  return { auth: cookie(login), user: users.body.users.find((entry: { email: string }) => entry.email === email) };
+  const user = await request(app).get(`/api/users/${login.body.user.id}`);
+  return { auth: cookie(login), user: user.body.user };
 }
 
 describe('authenticated media uploads', () => {
   beforeEach(() => {
     fallbackStore.clear();
     socialStore.clear();
+    clearCommand2AStores();
   });
 
   it('accepts media ownership when the owner is inferred from a profile reference even before metadata is assigned', async () => {
@@ -96,6 +98,247 @@ describe('authenticated media uploads', () => {
     expect((await request(app).get(messageUpload.body.mediaUrl).set('Cookie', bob.auth)).status).toBe(404);
   });
 
+  it('serves authorized media to a freshly registered account without exposing private posts', async () => {
+    const owner = await register('FreshMediaOwner');
+    const registration = await request(app).post('/api/auth/register').send({
+      name: 'Fresh Media Viewer',
+      email: 'fresh-media-viewer@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+
+    expect(registration.status).toBe(201);
+    const viewerAuthorization = `Bearer ${registration.body.token}`;
+    const imageBytes = await sharp({
+      create: { width: 4, height: 4, channels: 3, background: '#3756a8' },
+    }).png().toBuffer();
+    const videoBytes = Buffer.from('0000ftypisom');
+
+    const publicImage = await request(app)
+      .post('/api/media/uploads')
+      .set('Cookie', owner.auth)
+      .attach('file', imageBytes, { filename: 'public.png', contentType: 'image/png' });
+    const publicVideo = await request(app)
+      .post('/api/media/videos')
+      .set('Cookie', owner.auth)
+      .attach('file', videoBytes, { filename: 'public.mp4', contentType: 'video/mp4' });
+    expect(publicImage.status).toBe(201);
+    expect(publicVideo.status).toBe(201);
+
+    expect((await request(app).post('/api/posts').set('Cookie', owner.auth).send({
+      content: 'Public photo',
+      imageUrl: publicImage.body.mediaUrl,
+    })).status).toBe(201);
+    expect((await request(app).post('/api/posts').set('Cookie', owner.auth).send({
+      content: 'Public video',
+      imageUrl: publicVideo.body.mediaUrl,
+    })).status).toBe(201);
+    expect((await request(app).get(publicImage.body.mediaUrl).set('Authorization', viewerAuthorization)).status).toBe(200);
+    expect((await request(app).get(publicVideo.body.mediaUrl).set('Authorization', viewerAuthorization)).status).toBe(200);
+
+    const privateImage = await request(app)
+      .post('/api/media/uploads')
+      .set('Cookie', owner.auth)
+      .attach('file', imageBytes, { filename: 'private.png', contentType: 'image/png' });
+    const privateVideo = await request(app)
+      .post('/api/media/videos')
+      .set('Cookie', owner.auth)
+      .attach('file', videoBytes, { filename: 'private.mp4', contentType: 'video/mp4' });
+    expect(privateImage.status).toBe(201);
+    expect(privateVideo.status).toBe(201);
+    expect((await request(app).post('/api/posts').set('Cookie', owner.auth).send({
+      content: 'Private photo',
+      imageUrl: privateImage.body.mediaUrl,
+      visibility: 'PRIVATE',
+    })).status).toBe(201);
+    expect((await request(app).post('/api/posts').set('Cookie', owner.auth).send({
+      content: 'Private video',
+      imageUrl: privateVideo.body.mediaUrl,
+      visibility: 'PRIVATE',
+    })).status).toBe(201);
+    expect((await request(app).get(privateImage.body.mediaUrl).set('Authorization', viewerAuthorization)).status).toBe(404);
+    expect((await request(app).get(privateVideo.body.mediaUrl).set('Authorization', viewerAuthorization)).status).toBe(404);
+  });
+
+  it('applies live audience restrictions to replay Feed posts and their media URLs', async () => {
+    const host = await register('RestrictedReplayHost');
+    const blockedViewer = await register('RestrictedReplayViewer');
+    const liveResponse = await request(app).post('/api/live/create').set('Cookie', host.auth).send({
+      title: 'Restricted replay',
+      visibility: 'public',
+    });
+    const liveId = liveResponse.body.live.id as string;
+    const replay = await getMediaStorage('test').putAttachment(Buffer.from('webm replay'), 'video/webm', 'webm', host.user.id);
+    updateLiveSession(liveId, (live) => ({
+      ...live,
+      status: 'ended',
+      recordingStatus: 'READY',
+      replayUrl: replay.publicUrl,
+      blockedUserIds: [blockedViewer.user.id],
+    }));
+    socialStore.state.posts.push({
+      id: 'restricted-replay-post',
+      authorId: host.user.id,
+      content: 'Restricted replay',
+      imageUrl: replay.publicUrl,
+      visibility: 'PUBLIC',
+      sourceLiveBroadcastId: liveId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    expect((await request(app).get('/api/posts').set('Cookie', host.auth)).body.posts).toHaveLength(1);
+    expect((await request(app).get('/api/posts').set('Cookie', blockedViewer.auth)).body.posts).toHaveLength(0);
+    expect((await request(app).get(replay.publicUrl).set('Cookie', blockedViewer.auth)).status).toBe(404);
+    expect((await request(app).get(replay.publicUrl).set('Cookie', host.auth)).status).toBe(200);
+  });
+
+  it('reuses one host-owned media object when a live replay upload is retried', async () => {
+    const host = await register('IdempotentReplayHost');
+    const other = await register('IdempotentReplayOther');
+    const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({
+      title: 'Retryable recording',
+    });
+    const liveId = created.body.live.id as string;
+    updateLiveSession(liveId, (live) => ({ ...live, status: 'live', recordingStatus: 'RECORDING' }));
+
+    const firstUpload = await request(app)
+      .post('/api/media/videos')
+      .query({ liveId })
+      .set('Cookie', host.auth)
+      .attach('file', Buffer.from('0000ftypisom'), { filename: 'recording.mp4', contentType: 'video/mp4' });
+    const retryUpload = await request(app)
+      .post('/api/media/videos')
+      .query({ liveId })
+      .set('Cookie', host.auth)
+      .attach('file', Buffer.from('0000ftypmp42'), { filename: 'recording.mp4', contentType: 'video/mp4' });
+
+    expect(firstUpload.status).toBe(201);
+    expect(retryUpload.status).toBe(201);
+    expect(firstUpload.body.uploadMetrics).toMatchObject({ sizeBytes: 12 });
+    expect(firstUpload.body.uploadMetrics.receiveDurationMs).toBeGreaterThanOrEqual(0);
+    expect(firstUpload.body.uploadMetrics.serverProcessingMs).toBeGreaterThanOrEqual(0);
+    expect(retryUpload.body.mediaUrl).toBe(firstUpload.body.mediaUrl);
+    expect((await request(app).get(firstUpload.body.mediaUrl).set('Cookie', host.auth)).body).toEqual(Buffer.from('0000ftypisom'));
+    expect((await request(app)
+      .post('/api/media/videos')
+      .query({ liveId })
+      .set('Cookie', other.auth)
+      .attach('file', Buffer.from('0000ftypisom'), { filename: 'recording.mp4', contentType: 'video/mp4' })).status).toBe(403);
+  });
+
+  it('records local throughput and memory observations across replay upload sizes', async () => {
+    const host = await register('ReplayPerfHost');
+    const sizes = [256 * 1024, 2 * 1024 * 1024, 10 * 1024 * 1024];
+    const measurements: Array<Record<string, number>> = [];
+    let observedPeakRssBytes = process.memoryUsage().rss;
+
+    for (const sizeBytes of sizes) {
+      const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: `Replay ${sizeBytes}` });
+      const liveId = created.body.live.id as string;
+      updateLiveSession(liveId, (live) => ({ ...live, status: 'live', recordingStatus: 'RECORDING' }));
+      const videoBytes = Buffer.alloc(sizeBytes);
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]).copy(videoBytes);
+      const rssBeforeBytes = process.memoryUsage().rss;
+      let peakRssBytes = rssBeforeBytes;
+      const memorySampler = setInterval(() => {
+        peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
+      }, 1);
+      const startedAt = performance.now();
+      let upload;
+      try {
+        upload = await request(app)
+          .post('/api/media/videos')
+          .query({ liveId })
+          .set('Cookie', host.auth)
+          .attach('file', videoBytes, { filename: 'recording.webm', contentType: 'video/webm' });
+      } finally {
+        clearInterval(memorySampler);
+      }
+      const uploadDurationMs = performance.now() - startedAt;
+      observedPeakRssBytes = Math.max(observedPeakRssBytes, peakRssBytes);
+      expect(upload.status).toBe(201);
+      expect(upload.body.uploadMetrics).toMatchObject({ sizeBytes });
+      measurements.push({
+        sizeBytes,
+        uploadDurationMs: Math.round(uploadDurationMs),
+        throughputBytesPerSecond: Math.round(sizeBytes / (uploadDurationMs / 1000)),
+        serverReceiveDurationMs: upload.body.uploadMetrics.receiveDurationMs,
+        serverProcessingMs: upload.body.uploadMetrics.serverProcessingMs,
+        rssBeforeBytes,
+        observedPeakRssBytes: peakRssBytes,
+        observedPeakRssDeltaBytes: Math.max(0, peakRssBytes - rssBeforeBytes),
+      });
+      const mediaKey = String(upload.body.mediaUrl).split('/').at(-1);
+      if (mediaKey) await getMediaStorage('test').delete(mediaKey);
+    }
+
+    expect(observedPeakRssBytes).toBeGreaterThan(0);
+    console.info('LIVE_REPLAY_UPLOAD_BENCHMARK', JSON.stringify({
+      network: 'in-process Supertest; no external network shaping',
+      payload: 'synthetic WebM signature plus zero-filled bytes',
+      measurements,
+    }));
+  });
+
+  it('accepts browser MediaRecorder MIME types with codec parameters', async () => {
+    const host = await register('CodecReplayHost');
+    const created = await request(app).post('/api/live/create').set('Cookie', host.auth).send({ title: 'Codec recording' });
+    const liveId = created.body.live.id as string;
+    updateLiveSession(liveId, (live) => ({ ...live, status: 'live', recordingStatus: 'RECORDING' }));
+
+    const upload = await request(app)
+      .post('/api/media/videos')
+      .query({ liveId })
+      .set('Cookie', host.auth)
+      .attach('file', Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x01]), {
+        filename: 'recording.webm',
+        contentType: 'video/webm;codecs=vp9,opus',
+      });
+
+    expect(upload.status, JSON.stringify(upload.body)).toBe(201);
+    expect(upload.body.contentType).toBe('video/webm');
+  });
+
+  it('serves legacy feed images from the files endpoint with cookie or bearer auth while protecting private posts', async () => {
+    const owner = await register('LegacyFileImageOwner');
+    const registration = await request(app).post('/api/auth/register').send({
+      name: 'New File Image Viewer',
+      email: 'new-file-image-viewer@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+    expect(registration.status).toBe(201);
+    const viewerAuthorization = `Bearer ${registration.body.token}`;
+    const imageBytes = await sharp({
+      create: { width: 4, height: 4, channels: 3, background: '#3756a8' },
+    }).webp().toBuffer();
+    const image = await getMediaStorage('test').putAttachment(imageBytes, 'image/webp', 'webp', owner.user.id);
+
+    const publicPost = await request(app).post('/api/posts').set('Cookie', owner.auth).send({
+      content: 'Legacy files image',
+      imageUrl: image.publicUrl,
+    });
+    expect(publicPost.status).toBe(201);
+
+    const feed = await request(app).get('/api/posts');
+    const feedPost = feed.body.posts.find((post: { id: string }) => post.id === publicPost.body.post.id);
+    expect(feedPost.imageUrl).toBe(image.publicUrl);
+    expect((await request(app).get(feedPost.imageUrl).set('Authorization', viewerAuthorization)).status).toBe(200);
+    expect((await request(app).get(feedPost.imageUrl).set('Cookie', cookie(registration))).status).toBe(200);
+
+    const privateImage = await getMediaStorage('test').putAttachment(imageBytes, 'image/webp', 'webp', owner.user.id);
+    const privatePost = await request(app).post('/api/posts').set('Cookie', owner.auth).send({
+      content: 'Private legacy files image',
+      imageUrl: privateImage.publicUrl,
+      visibility: 'PRIVATE',
+    });
+    expect(privatePost.status).toBe(201);
+    expect((await request(app).get(privateImage.publicUrl).set('Authorization', viewerAuthorization)).status).toBe(404);
+    expect((await request(app).get(privateImage.publicUrl).set('Cookie', owner.auth)).status).toBe(200);
+    expect((await request(app).get(privateImage.publicUrl)).status).toBe(401);
+  });
+
   it('uploads voice, video, PDF, and DOCX attachments and serves them only to message participants', async () => {
     const alice = await register('AttachmentAlice');
     const bob = await register('AttachmentBob');
@@ -145,6 +388,185 @@ describe('authenticated media uploads', () => {
     expect(voice).toBeDefined();
     await request(app).delete(`/api/messages/${voice!.id}`).set('Cookie', alice.auth);
     expect((await request(app).get(voice!.mediaUrl!).set('Cookie', bob.auth)).status).toBe(404);
+  });
+
+  it('uploads videos for posts, validates their type and signature, and serves them by post visibility', async () => {
+    const owner = await register('VideoPostOwner');
+    const follower = await register('VideoPostFollower');
+    const outsider = await register('VideoPostOutsider');
+    const videoBytes = Buffer.from('0000ftypisom');
+    const largeVideoBytes = Buffer.alloc(11 * 1024 * 1024);
+    Buffer.from('0000ftypisom').copy(largeVideoBytes);
+    const acceptedLargeVideo = await request(app)
+      .post('/api/media/videos')
+      .set('Cookie', owner.auth)
+      .attach('file', largeVideoBytes, { filename: 'large-clip.mp4', contentType: 'video/mp4' });
+    expect(acceptedLargeVideo.status).toBe(201);
+    const storage = getMediaStorage('test');
+    const getWholeObject = vi.spyOn(storage, 'get');
+    const getChunk = vi.spyOn(storage, 'getRange');
+    const largePartial = await request(app)
+      .get(acceptedLargeVideo.body.mediaUrl)
+      .set('Cookie', owner.auth)
+      .set('Range', 'bytes=0-1048575');
+    expect(largePartial.status).toBe(206);
+    expect(largePartial.headers['content-length']).toBe('1048576');
+    expect(Buffer.from(largePartial.body)).toEqual(largeVideoBytes.subarray(0, 1024 * 1024));
+    expect(getWholeObject).not.toHaveBeenCalled();
+    expect(getChunk).toHaveBeenCalledTimes(1);
+    expect(getChunk.mock.calls.every(([, , length]) => length <= 1024 * 1024)).toBe(true);
+    getWholeObject.mockRestore();
+    getChunk.mockRestore();
+    expect((await request(app)
+      .post('/api/media/attachments')
+      .set('Cookie', owner.auth)
+      .attach('file', largeVideoBytes, { filename: 'large-attachment.mp4', contentType: 'video/mp4' })).status).toBe(413);
+
+    const oversizedVideo = Buffer.alloc(100 * 1024 * 1024 + 1);
+    Buffer.from('0000ftypisom').copy(oversizedVideo);
+    const rejectedLargeVideo = await request(app)
+      .post('/api/media/videos')
+      .set('Cookie', owner.auth)
+      .attach('file', oversizedVideo, { filename: 'too-large.mp4', contentType: 'video/mp4' });
+    expect(rejectedLargeVideo.status).toBe(413);
+    expect(rejectedLargeVideo.body.message).toMatch(/100 MB or smaller/);
+    const videoUpload = await request(app)
+      .post('/api/media/videos')
+      .set('Cookie', owner.auth)
+      .attach('file', videoBytes, { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+    expect(videoUpload.status).toBe(201);
+    expect(videoUpload.body).toMatchObject({ contentType: 'video/mp4' });
+    const partialVideo = await request(app)
+      .get(videoUpload.body.mediaUrl)
+      .set('Cookie', owner.auth)
+      .set('Range', 'bytes=0-3');
+    expect(partialVideo.status).toBe(206);
+    expect(partialVideo.headers['accept-ranges']).toBe('bytes');
+    expect(partialVideo.headers['content-range']).toBe(`bytes 0-3/${videoBytes.length}`);
+    expect(partialVideo.headers['content-length']).toBe('4');
+    expect(Buffer.from(partialVideo.body)).toEqual(videoBytes.subarray(0, 4));
+    const fullVideo = await request(app).get(videoUpload.body.mediaUrl).set('Cookie', owner.auth);
+    expect(fullVideo.status).toBe(200);
+    expect(fullVideo.headers['content-type']).toContain('video/mp4');
+    expect(fullVideo.headers['content-length']).toBe(String(videoBytes.length));
+    expect(Buffer.from(fullVideo.body)).toEqual(videoBytes);
+    const headVideo = await request(app).head(videoUpload.body.mediaUrl).set('Cookie', owner.auth).set('Range', 'bytes=0-3');
+    expect(headVideo.status).toBe(206);
+    expect(headVideo.headers['content-range']).toBe(`bytes 0-3/${videoBytes.length}`);
+    expect(headVideo.headers['content-length']).toBe('4');
+    expect(headVideo.body).toEqual({});
+    expect((await request(app).get(videoUpload.body.mediaUrl).set('Range', 'bytes=0-3')).status).toBe(401);
+    const malformedRange = await request(app)
+      .get(videoUpload.body.mediaUrl)
+      .set('Cookie', owner.auth)
+      .set('Range', 'bytes=0-3,5-8');
+    expect(malformedRange.status).toBe(416);
+    expect(malformedRange.headers['content-range']).toBe(`bytes */${videoBytes.length}`);
+    const unsatisfiableRange = await request(app)
+      .get(videoUpload.body.mediaUrl)
+      .set('Cookie', owner.auth)
+      .set('Range', 'bytes=20-30');
+    expect(unsatisfiableRange.status).toBe(416);
+    const missingVideo = await request(app)
+      .get('/api/media/files/00000000-0000-4000-8000-000000000000.mp4')
+      .set('Cookie', owner.auth);
+    expect(missingVideo.status).toBe(404);
+    expect((await request(app).post('/api/posts').set('Cookie', outsider.auth).send({
+      content: 'Attempt to use another member video',
+      imageUrl: videoUpload.body.mediaUrl,
+    })).status).toBe(403);
+
+    const post = await request(app).post('/api/posts').set('Cookie', owner.auth).send({
+      content: 'A community video',
+      imageUrl: videoUpload.body.mediaUrl,
+    });
+    expect(post.status).toBe(201);
+    expect((await request(app).get(videoUpload.body.mediaUrl).set('Cookie', outsider.auth)).status).toBe(200);
+
+    await request(app).post(`/api/users/${owner.user.id}/follow`).set('Cookie', follower.auth);
+    const followerOnlyUpload = await request(app)
+      .post('/api/media/videos')
+      .set('Cookie', owner.auth)
+      .attach('file', Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 1]), { filename: 'followers.webm', contentType: 'video/webm' });
+    expect(followerOnlyUpload.status).toBe(201);
+    const followerPost = await request(app).post('/api/posts').set('Cookie', owner.auth).send({
+      content: 'A followers-only clip',
+      imageUrl: followerOnlyUpload.body.mediaUrl,
+      visibility: 'FOLLOWERS',
+    });
+    expect(followerPost.status).toBe(201);
+    expect((await request(app).get(followerOnlyUpload.body.mediaUrl).set('Cookie', follower.auth)).status).toBe(200);
+    expect((await request(app).get(followerOnlyUpload.body.mediaUrl).set('Cookie', outsider.auth)).status).toBe(404);
+
+    const invalidSignature = await request(app)
+      .post('/api/media/videos')
+      .set('Cookie', owner.auth)
+      .attach('file', Buffer.from('not a video'), { filename: 'broken.mp4', contentType: 'video/mp4' });
+    expect(invalidSignature.status).toBe(400);
+    const wrongType = await request(app)
+      .post('/api/media/videos')
+      .set('Cookie', owner.auth)
+      .attach('file', videoBytes, { filename: 'clip.mov', contentType: 'video/quicktime' });
+    expect(wrongType.status).toBe(400);
+    expect((await request(app).post('/api/media/videos').attach('file', videoBytes, { filename: 'clip.mp4', contentType: 'video/mp4' })).status).toBe(401);
+  }, 30_000);
+
+  it('allows cross-origin HEAD requests needed by authenticated video playback', async () => {
+    const response = await request(app)
+      .options('/api/media/files/example.mp4')
+      .set('Origin', 'https://nova-social-platform.vercel.app')
+      .set('Access-Control-Request-Method', 'HEAD');
+
+    expect(response.status).toBe(204);
+    expect(response.headers['access-control-allow-methods']).toContain('HEAD');
+  });
+
+  it('serves empty video objects and rejects byte ranges for them', async () => {
+    const owner = await register('EmptyVideoOwner');
+    const stored = await getMediaStorage('test').putAttachment(Buffer.alloc(0), 'video/mp4', 'mp4', owner.user.id);
+
+    const fullResponse = await request(app).get(stored.publicUrl).set('Cookie', owner.auth);
+    expect(fullResponse.status).toBe(200);
+    expect(fullResponse.headers['content-length']).toBe('0');
+    expect(Buffer.from(fullResponse.body).length).toBe(0);
+
+    const rangeResponse = await request(app)
+      .get(stored.publicUrl)
+      .set('Cookie', owner.auth)
+      .set('Range', 'bytes=0-0');
+    expect(rangeResponse.status).toBe(416);
+    expect(rangeResponse.headers['content-range']).toBe('bytes */0');
+  });
+
+  it('lets group members view the saved group image and restricts group settings to admins', async () => {
+    const owner = await register('GroupImageOwner');
+    const member = await register('GroupImageMember');
+    const outsider = await register('GroupImageOutsider');
+    const created = await request(app).post('/api/conversations').set('Cookie', owner.auth).send({
+      participantIds: [member.user.id],
+      name: 'Photo group',
+    });
+    const image = await sharp({
+      create: { width: 4, height: 4, channels: 3, background: '#3756a8' },
+    }).png().toBuffer();
+    const upload = await request(app)
+      .post('/api/media/uploads')
+      .set('Cookie', owner.auth)
+      .attach('file', image, { filename: 'group.png', contentType: 'image/png' });
+    expect(upload.status).toBe(201);
+
+    const imageSave = await request(app)
+      .patch(`/api/conversations/${created.body.conversation.id}/group`)
+      .set('Cookie', owner.auth)
+      .send({ imageUrl: upload.body.mediaUrl });
+    expect(imageSave.status).toBe(200);
+    expect((await request(app).get(upload.body.mediaUrl).set('Cookie', member.auth)).status).toBe(200);
+    expect((await request(app).get(upload.body.mediaUrl).set('Cookie', outsider.auth)).status).toBe(404);
+    expect((await request(app)
+      .patch(`/api/conversations/${created.body.conversation.id}/group`)
+      .set('Cookie', outsider.auth)
+      .send({ name: 'Unauthorized' })).status).toBe(404);
   });
 
   it('rejects attachment uploads without authentication and enforces the media size cap', async () => {

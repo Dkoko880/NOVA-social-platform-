@@ -1,6 +1,7 @@
 import { prisma, isDatabaseAvailable } from './prisma.js';
 import { socialStore } from './socialStore.js';
 import { realtimeHub } from './realtime.js';
+import { isLiveKitConfigured } from './livekit.js';
 
 export type NotificationPreference = {
   key: 'social' | 'messages' | 'security' | 'live' | 'calls' | 'mentions';
@@ -41,13 +42,15 @@ export type CallSession = {
   type: CallType;
   status: CallStatus;
   participants: CallParticipantState[];
-  provider: 'livekit' | 'webrtc-peer';
+  provider: 'livekit';
   providerConfigured: boolean;
+  conversationId?: string | null;
+  connectedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 };
 
-export type LiveVisibility = 'public' | 'private';
+export type LiveVisibility = 'public' | 'followers' | 'private';
 export type LiveStatus = 'live' | 'paused' | 'ended';
 
 export type LiveViewer = {
@@ -77,6 +80,7 @@ export type LiveGuest = {
   role: 'GUEST' | 'COHOST';
   status: 'REQUESTED' | 'LIVE' | 'REMOVED';
   requestedAt: string;
+  admittedAt?: string;
 };
 
 export type LiveSession = {
@@ -88,15 +92,17 @@ export type LiveSession = {
   status: LiveStatus;
   viewerCount: number;
   moderators: string[];
+  blockedUserIds: string[];
+  mutedUserIds: string[];
   viewers: LiveViewer[];
   guests: LiveGuest[];
   comments: LiveComment[];
   reactions: LiveReaction[];
   replayUrl?: string | null;
   recordingUrl?: string | null;
-  recordingStatus: 'UNAVAILABLE' | 'RECORDING' | 'READY';
+  recordingStatus: 'UNAVAILABLE' | 'RECORDING' | 'PROCESSING' | 'READY';
   analyticsHook: string | null;
-  provider: 'livekit' | 'webrtc-peer';
+  provider: 'livekit';
   providerConfigured: boolean;
   createdAt: string;
   updatedAt: string;
@@ -195,8 +201,18 @@ export async function isNotificationEnabled(userId: string, type: string) {
   return (await getNotificationPreferences(userId)).find((preference) => preference.key === key)?.enabled ?? true;
 }
 
-export async function createNotification(recipientId: string, actorId: string | null, type: string, message: string) {
+export async function createNotification(
+  recipientId: string,
+  actorId: string | null,
+  type: string,
+  message: string,
+  options: { link?: string; dedupeKey?: string } = {},
+) {
   if (!(await isNotificationEnabled(recipientId, type))) return null;
+  if (options.dedupeKey) {
+    const livePreference = (await getNotificationPreferences(recipientId)).find((preference) => preference.key === 'live');
+    if (livePreference?.channel !== 'in_app') return null;
+  }
   const dbAvailable = await isDatabaseAvailable();
   const base = {
     id: buildNotificationId(),
@@ -204,24 +220,38 @@ export async function createNotification(recipientId: string, actorId: string | 
     actorId,
     type,
     message,
+    ...(options.link ? { link: options.link } : {}),
+    ...(options.dedupeKey ? { dedupeKey: options.dedupeKey } : {}),
     createdAt: new Date().toISOString(),
     readAt: null,
   };
 
   if (dbAvailable) {
-    const record = await prisma.notification.create({
-      data: {
-        recipientId,
-        actorId,
-        type,
-        message,
-      },
-    });
+    let record;
+    try {
+      record = await prisma.notification.create({
+        data: {
+          recipientId,
+          actorId,
+          type,
+          message,
+          ...options,
+        },
+      });
+    } catch (error) {
+      if (options.dedupeKey && typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002') {
+        return prisma.notification.findUnique({ where: { dedupeKey: options.dedupeKey } });
+      }
+      throw error;
+    }
 
     realtimeHub.emit('notification:new', { notification: record, allowedUserIds: [recipientId] });
     return record;
   }
 
+  if (options.dedupeKey && socialStore.state.notifications.some((notification) => notification.dedupeKey === options.dedupeKey)) {
+    return socialStore.state.notifications.find((notification) => notification.dedupeKey === options.dedupeKey) ?? null;
+  }
   socialStore.state.notifications.push(base);
   realtimeHub.emit('notification:new', { notification: base, allowedUserIds: [recipientId] });
   return base;
@@ -347,20 +377,21 @@ export function listCallHistory(userId: string) {
   return getStore().callSessions.filter((call) => call.participants.some((participant) => participant.userId === userId) && call.status !== 'cancelled');
 }
 
-export function createCallSession(callerId: string, targetUserIds: string[], type: CallType) {
+export function createCallSession(callerId: string, targetUserIds: string[], type: CallType, conversationId?: string) {
   const now = new Date().toISOString();
   const call: CallSession = {
     id: `call_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
     callerId,
     targetUserId: targetUserIds.length === 1 ? targetUserIds[0] : null,
+    conversationId: conversationId ?? null,
     type,
     status: 'ringing',
     participants: [
       { userId: callerId, status: 'pending', muted: false, cameraOn: type === 'video', speakerOn: true },
       ...targetUserIds.map((userId) => ({ userId, status: 'pending' as const, muted: false, cameraOn: type === 'video', speakerOn: true })),
     ],
-    provider: 'webrtc-peer',
-    providerConfigured: true,
+    provider: 'livekit',
+    providerConfigured: isLiveKitConfigured(),
     createdAt: now,
     updatedAt: now,
   };
@@ -379,7 +410,10 @@ export function updateCallSession(callId: string, changes: Partial<Pick<CallSess
     return null;
   }
 
-  if (changes.status) session.status = changes.status;
+  if (changes.status) {
+    session.status = changes.status;
+    if (changes.status === 'connected') session.connectedAt ??= new Date().toISOString();
+  }
   if (changes.targetUserId !== undefined) session.targetUserId = changes.targetUserId;
   if (changes.type) session.type = changes.type;
 
@@ -405,6 +439,14 @@ export function getLiveSession(liveId: string) {
   return getStore().liveSessions.find((session) => session.id === liveId) ?? null;
 }
 
+export function restoreLiveSession(session: LiveSession) {
+  const liveSessions = getStore().liveSessions;
+  const index = liveSessions.findIndex((entry) => entry.id === session.id);
+  if (index === -1) liveSessions.unshift(session);
+  else liveSessions[index] = session;
+  return session;
+}
+
 export function listLiveSessions() {
   return [...getStore().liveSessions].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 }
@@ -420,6 +462,8 @@ export function createLiveSession(hostId: string, input: { title: string; descri
     status: 'paused',
     viewerCount: 0,
     moderators: [],
+    blockedUserIds: [],
+    mutedUserIds: [],
     viewers: [],
     guests: [],
     comments: [],
@@ -428,8 +472,8 @@ export function createLiveSession(hostId: string, input: { title: string; descri
     recordingUrl: null,
     recordingStatus: 'UNAVAILABLE',
     analyticsHook: null,
-    provider: input.providerConfigured ? 'livekit' : 'webrtc-peer',
-    providerConfigured: input.providerConfigured ?? false,
+    provider: 'livekit',
+    providerConfigured: isLiveKitConfigured(),
     createdAt: now,
     updatedAt: now,
   };

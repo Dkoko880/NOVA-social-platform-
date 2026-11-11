@@ -3,8 +3,11 @@ import { Link } from 'react-router-dom'
 import { Bookmark, MessageCircle, PencilLine, Share2, ShieldAlert, ThumbsUp, Trash2 } from 'lucide-react'
 import { Avatar } from './ui/Avatar'
 import { Button } from './ui/Button'
+import { PostMedia } from './PostMedia'
+import { LiveFeedPlayer } from './LiveFeedPlayer'
 import { useAuth } from '../context/AuthContext'
-import { apiRequest, resolveMediaUrl } from '../lib/api'
+import { apiRequest } from '../lib/api'
+import { canonicalPostUrl, sendPostToConversation, sharePostLink } from '../lib/postSharing'
 import type { Post } from '../types'
 
 type CommentRecord = {
@@ -33,6 +36,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
   const [authorFollowing, setAuthorFollowing] = useState(post.authorFollowing ?? false)
   const [comments, setComments] = useState<CommentRecord[]>([])
   const [commentCount, setCommentCount] = useState(post.comments)
+  const [liveViewerCount, setLiveViewerCount] = useState(post.live?.viewerCount ?? 0)
   const [commentDraft, setCommentDraft] = useState('')
   const [replyDraft, setReplyDraft] = useState('')
   const [replyToId, setReplyToId] = useState<string | null>(null)
@@ -46,6 +50,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
   const [saveCount, setSaveCount] = useState(post.saved)
   const [shareCount, setShareCount] = useState(post.shares)
   const [shareOpen, setShareOpen] = useState(false)
+  const [shareMode, setShareMode] = useState<'choose' | 'internal'>('choose')
   const [shareLoading, setShareLoading] = useState(false)
   const [shareBusy, setShareBusy] = useState(false)
   const [shareConversations, setShareConversations] = useState<ShareConversation[]>([])
@@ -58,6 +63,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     setLikes(post.likes)
     setLiked(post.currentUserReaction === 'LIKE')
     setCommentCount(post.comments)
+    setLiveViewerCount(post.live?.viewerCount ?? 0)
     setAuthorFollowing(post.authorFollowing ?? false)
     setContent(post.content)
     setImageUrl(post.image ?? '')
@@ -65,7 +71,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     setSaved(post.savedByCurrentUser ?? false)
     setSaveCount(post.saved)
     setShareCount(post.shares)
-  }, [post.authorFollowing, post.comments, post.content, post.currentUserReaction, post.image, post.likes, post.saved, post.savedByCurrentUser, post.shares, post.visibility])
+  }, [post.authorFollowing, post.comments, post.content, post.currentUserReaction, post.image, post.likes, post.live?.viewerCount, post.saved, post.savedByCurrentUser, post.shares, post.visibility])
 
   const toggleLike = async () => {
     if (busy) return
@@ -140,7 +146,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     await publishComment(replyDraft, parentId)
   }
 
-  const postUrl = `${window.location.origin}/#post-${encodeURIComponent(post.id)}`
+  const postUrl = canonicalPostUrl(window.location.origin, post.id)
 
   const recordPostShare = async () => {
     const response = await apiRequest<{ shares: number }>(`/api/posts/${encodeURIComponent(post.id)}/share`, { method: 'POST' })
@@ -153,6 +159,11 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
       return
     }
     setShareOpen(true)
+    setShareMode('choose')
+  }
+
+  const loadShareConversations = async () => {
+    setShareMode('internal')
     if (shareConversations.length) return
     setShareLoading(true)
     setError('')
@@ -166,47 +177,14 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     }
   }
 
-  const copyPostLink = async () => {
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(postUrl)
-      } else {
-        const input = document.createElement('textarea')
-        input.value = postUrl
-        input.setAttribute('readonly', '')
-        input.style.position = 'fixed'
-        input.style.opacity = '0'
-        document.body.append(input)
-        input.select()
-        const copied = document.execCommand('copy')
-        input.remove()
-        if (!copied) throw new Error('Clipboard access is unavailable in this browser.')
-      }
-      await recordPostShare()
-      setNotice('Post link copied.')
-      setShareOpen(false)
-    } catch (copyError) {
-      setError(copyError instanceof Error ? copyError.message : 'Unable to copy this post link.')
-    }
-  }
-
   const shareFromDevice = async () => {
     setShareBusy(true)
     setError('')
     try {
-      if (!navigator.share) {
-        await copyPostLink()
-        return
-      }
-      try {
-        await navigator.share({ title: `Post by ${post.author.name}`, text: post.content, url: postUrl })
-      } catch (shareError) {
-        if (shareError instanceof Error && shareError.name === 'AbortError') return
-        await copyPostLink()
-        return
-      }
+      const result = await sharePostLink({ title: `Post by ${post.author.name}`, text: post.content, url: postUrl })
+      if (result === 'cancelled') return
       await recordPostShare()
-      setNotice('Post shared.')
+      setNotice(result === 'copied' ? 'Post link copied.' : 'Post shared.')
       setShareOpen(false)
     } catch (shareError) {
       setError(shareError instanceof Error ? shareError.message : 'Unable to share this post.')
@@ -219,10 +197,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     setShareBusy(true)
     setError('')
     try {
-      await apiRequest(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, {
-        method: 'POST',
-        body: JSON.stringify({ text: `Check out this post by ${post.author.name}: ${postUrl}` }),
-      })
+      await sendPostToConversation(conversationId, post.author.name, postUrl, apiRequest)
       await recordPostShare()
       setNotice('Post shared in your conversation.')
       setShareOpen(false)
@@ -331,9 +306,6 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
         </Link>
         <div className="flex items-center gap-1">
           {!isOwnPost ? <button type="button" onClick={() => void toggleFollowAuthor()} disabled={busy} aria-label={authorFollowing ? `Unfollow ${post.author.name}` : `Follow ${post.author.name}`} className="rounded-xl px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-50 disabled:opacity-50">{authorFollowing ? 'Following' : 'Follow'}</button> : null}
-          <button type="button" onClick={() => void openShareOptions()} aria-label="Share post" title="Share post" className="rounded-full p-2 text-slate-500 hover:bg-slate-100">
-            <Share2 className="h-4 w-4" aria-hidden="true" />
-          </button>
           <button type="button" onClick={() => void (isOwnPost ? deletePost() : reportPost())} aria-label={isOwnPost ? 'Delete post' : 'Report post'} title={isOwnPost ? 'Delete post' : 'Report post'} className="rounded-full p-2 text-slate-500 hover:bg-slate-100">
             {isOwnPost ? <Trash2 className="h-4 w-4" aria-hidden="true" /> : <ShieldAlert className="h-4 w-4" aria-hidden="true" />}
           </button>
@@ -361,7 +333,24 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
       ) : (
         <>
           {content ? <p className="mt-4 whitespace-pre-wrap text-[15px] leading-7 text-slate-700">{content}</p> : null}
-          {imageUrl && /\.(?:webm|mp4)(?:$|\?)/i.test(imageUrl) ? <video src={resolveMediaUrl(imageUrl)} crossOrigin={imageUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} controls playsInline preload="metadata" aria-label="Post video" className="mt-4 max-h-[32rem] w-full rounded-xl bg-slate-950 object-contain" /> : imageUrl ? <img src={resolveMediaUrl(imageUrl)} crossOrigin={imageUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="Post attachment" className="mt-4 max-h-[32rem] w-full rounded-xl object-cover" /> : null}
+          {post.live ? <section className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3" aria-label="Live broadcast">
+            <p className="flex items-center gap-2 text-sm font-semibold text-rose-800">
+              <span className="rounded-full bg-rose-600 px-2 py-1 text-[10px] tracking-normal text-white">{post.live.status === 'live' ? 'LIVE' : 'ENDED'}</span>
+              <span>{post.live.title}</span>
+              {post.live.status === 'live' ? <span className="ml-auto text-xs font-medium">{liveViewerCount} watching</span> : null}
+            </p>
+            {post.live.description ? <p className="mt-2 text-sm text-slate-700">{post.live.description}</p> : null}
+            {post.live.status === 'live'
+              ? <LiveFeedPlayer liveId={post.live.id} title={post.live.title} viewerCount={liveViewerCount} onViewerCountChange={setLiveViewerCount} />
+              : <p className="mt-2 text-xs text-slate-600">
+                {imageUrl
+                  ? 'Watch the saved replay below.'
+                  : post.live.recordingStatus === 'PROCESSING' || post.live.recordingStatus === 'RECORDING'
+                    ? 'The replay is still being finalized. Check back soon.'
+                    : 'This broadcast ended without an available recording.'}
+              </p>}
+          </section> : null}
+          {imageUrl ? <PostMedia url={imageUrl} postId={post.id} measurementSource="feed" alt="Post attachment" className="mt-4 max-h-[32rem] w-full rounded-[24px] object-cover" /> : null}
           <p className="mt-2 text-xs text-slate-500">{visibility === 'PUBLIC' ? 'Everyone' : visibility === 'FOLLOWERS' ? 'Followers' : 'Only me'}</p>
         </>
       )}
@@ -376,26 +365,43 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
         <Button variant="ghost" size="sm" className={`px-2 ${saved ? 'text-indigo-700' : 'text-slate-600'}`} onClick={() => void toggleSave()} disabled={busy} icon={<Bookmark className="h-4 w-4" aria-hidden="true" />}>
           {saveCount}
         </Button>
-        <span className="px-2 text-xs text-slate-500" aria-label={`${shareCount} shares`}>{shareCount} shares</span>
+        <Button variant="ghost" size="sm" className="px-2 text-slate-600" onClick={() => void openShareOptions()} aria-label={`Share post (${shareCount} shares)`} icon={<Share2 className="h-4 w-4" aria-hidden="true" />}>
+          Share
+        </Button>
         {isOwnPost ? <Button variant="ghost" size="sm" className="px-2 text-slate-600" onClick={() => setEditing((value) => !value)} icon={<PencilLine className="h-4 w-4" aria-hidden="true" />}>Edit</Button> : null}
       </div>
 
       {notice ? <p className="mt-2 text-sm text-emerald-700" role="status">{notice}</p> : null}
       {error ? <p className="mt-2 text-sm text-rose-700" role="alert">{error}</p> : null}
-      {shareOpen ? <section aria-label="Share post options" className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-        <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" size="sm" onClick={() => void shareFromDevice()} disabled={shareBusy}>{shareBusy ? 'Sharing…' : 'Share from device'}</Button>
-          <Button variant="secondary" size="sm" onClick={() => void copyPostLink()} disabled={shareBusy}>Copy link</Button>
-        </div>
-        <h3 className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Send through NOVAKOKO</h3>
-        {shareLoading ? <p className="mt-2 text-sm text-slate-500">Loading conversations…</p> : shareConversations.length ? <ul className="mt-1 max-h-40 divide-y divide-slate-200 overflow-y-auto">{shareConversations.map((conversation) => {
+      {shareOpen ? <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/55 p-0 sm:items-center sm:p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !shareBusy) setShareOpen(false) }}>
+        <section aria-label="Share post options" role="dialog" aria-modal="true" aria-labelledby={`share-post-title-${post.id}`} className="w-full max-w-lg rounded-t-3xl bg-white p-5 text-slate-900 shadow-2xl sm:rounded-3xl">
+          <header className="flex items-center justify-between gap-3">
+            <div><h3 id={`share-post-title-${post.id}`} className="text-lg font-semibold">Share this post</h3><p className="text-sm text-slate-500">Choose how you want to share it.</p></div>
+            <button type="button" onClick={() => setShareOpen(false)} disabled={shareBusy} aria-label="Close share options" className="rounded-full px-3 py-2 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-50">Close</button>
+          </header>
+          {shareMode === 'choose' ? <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <button type="button" onClick={() => void loadShareConversations()} disabled={shareBusy} className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-left hover:bg-indigo-100 disabled:opacity-50">
+              <span className="block font-semibold text-indigo-900">Share inside novachat</span><span className="mt-1 block text-sm text-indigo-800">Send the post link to a friend or conversation.</span>
+            </button>
+            <button type="button" onClick={() => void shareFromDevice()} disabled={shareBusy} className="rounded-2xl border border-slate-200 p-4 text-left hover:bg-slate-50 disabled:opacity-50">
+              <span className="block font-semibold text-slate-900">{shareBusy ? 'Sharing…' : 'Share externally'}</span><span className="mt-1 block text-sm text-slate-600">Use your device share sheet or copy the post link.</span>
+            </button>
+          </div> : <>
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <h4 className="font-semibold">Choose a conversation</h4>
+              <button type="button" onClick={() => setShareMode('choose')} disabled={shareBusy} className="text-sm font-medium text-indigo-700 hover:underline">Back</button>
+            </div>
+            {shareLoading ? <p className="mt-3 text-sm text-slate-500">Loading conversations…</p> : shareConversations.length ? <ul className="mt-2 max-h-64 divide-y divide-slate-200 overflow-y-auto">{shareConversations.map((conversation) => {
           const peer = conversation.participants.find((participant) => participant.userId !== user?.id)?.user?.name
           return <li key={conversation.id} className="flex items-center gap-2 py-2">
             <span className="min-w-0 flex-1 truncate text-sm text-slate-800">{conversation.name ?? peer ?? 'Group conversation'}</span>
-            <Button variant="ghost" size="sm" onClick={() => void shareToConversation(conversation.id)} disabled={shareBusy}>Send</Button>
+            <Button variant="primary" size="sm" onClick={() => void shareToConversation(conversation.id)} disabled={shareBusy}>{shareBusy ? 'Sending…' : 'Send'}</Button>
           </li>
-        })}</ul> : <p className="mt-2 text-sm text-slate-500">Start a conversation to share this post with NOVAKOKO messaging.</p>}
-      </section> : null}
+        })}</ul> : <p className="mt-3 text-sm text-slate-500">Start a conversation to share this post with novachat messaging.</p>}
+          </>}
+          {error ? <p className="mt-3 text-sm text-rose-700" role="alert">{error}</p> : null}
+        </section>
+      </div> : null}
 
       {commentsOpen ? (
         <section className="mt-4 border-t border-slate-100 pt-4" aria-label="Post comments">

@@ -1,24 +1,176 @@
 import { clearStoredAccessToken, getStoredAccessToken } from './session'
+import { Capacitor } from '@capacitor/core'
 
 const productionApiBaseUrl = 'https://nova-social-platform-api.onrender.com'
-const configuredApiBaseUrl = import.meta.env.PROD
-  ? ''
-  : import.meta.env.VITE_API_BASE_URL?.trim() || productionApiBaseUrl
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim()
+  || (Capacitor.getPlatform() === 'android'
+    ? productionApiBaseUrl
+    : import.meta.env.PROD ? '' : productionApiBaseUrl)
 
 export const API_BASE_URL = configuredApiBaseUrl.replace(/\/$/, '')
+
+const API_READ_CACHE_TTL_MS = 30_000
+const API_READ_CACHE_LIMIT = 40
+const apiReadCache = new Map<string, { value: unknown; expiresAt: number }>()
+let apiReadCacheToken: string | null | undefined
+let apiReadCacheGeneration = 0
+
+export type VideoUploadProgress = {
+  phase: 'UPLOADING' | 'SAVING'
+  uploadedBytes: number
+  totalBytes: number
+  recordingBytes: number
+  bytesPerSecond: number | null
+  estimatedSecondsRemaining: number | null
+  serverProcessingMs?: number
+}
+
+function invalidateApiReadCache() {
+  apiReadCache.clear()
+  apiReadCacheGeneration += 1
+}
+
+function setCachedApiRead(key: string, value: unknown) {
+  apiReadCache.delete(key)
+  apiReadCache.set(key, { value, expiresAt: Date.now() + API_READ_CACHE_TTL_MS })
+  if (apiReadCache.size > API_READ_CACHE_LIMIT) {
+    const oldestKey = apiReadCache.keys().next().value
+    if (oldestKey !== undefined) apiReadCache.delete(oldestKey)
+  }
+}
 
 export function resolveMediaUrl(url: string | null | undefined) {
   if (!url) return '';
   return url.startsWith('/api/media/') ? `${API_BASE_URL}${url}` : url;
 }
 
-export async function uploadMedia(file: File) {
+async function uploadFile(
+  path: string,
+  file: File,
+  onProgress?: (progress: number) => void,
+  onDetails?: (progress: VideoUploadProgress) => void,
+) {
   const body = new FormData();
   body.append('file', file);
-  return apiRequest<{ mediaUrl: string; contentType: string }>('/api/media/uploads', {
-    method: 'POST',
-    body,
-  });
+  const headers = new Headers()
+  const accessToken = getStoredAccessToken()
+  if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
+
+  return new Promise<{ mediaUrl: string; contentType: string }>((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    let inactivityTimer: ReturnType<typeof setTimeout> | null = null
+    const clearInactivityTimer = () => {
+      if (inactivityTimer !== null) clearTimeout(inactivityTimer)
+      inactivityTimer = null
+    }
+    const armInactivityTimer = () => {
+      clearInactivityTimer()
+      inactivityTimer = setTimeout(() => {
+        reject(new ApiError(null, 'Replay upload stalled for 2 minutes. Your saved recording is still available; check your connection and retry.', undefined, 'TIMEOUT'))
+        request.abort()
+      }, 2 * 60 * 1000)
+    }
+    request.open('POST', `${API_BASE_URL}${path}`)
+    request.withCredentials = true
+    request.timeout = path.startsWith('/api/media/videos')
+      ? Math.min(45 * 60 * 1000, 3 * 60 * 1000 + Math.ceil(file.size / (1024 * 1024)) * 15 * 1000)
+      : 30000
+    headers.forEach((value, key) => request.setRequestHeader(key, value))
+    let transferLoadedBytes = 0
+    let transferTotalBytes = file.size
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable || event.total <= 0) return
+      const fraction = Math.min(1, event.loaded / event.total)
+      const elapsedSeconds = (performance.now() - startedAt) / 1000
+      transferLoadedBytes = event.loaded
+      transferTotalBytes = event.total
+      const bytesPerSecond = elapsedSeconds > 0 ? event.loaded / elapsedSeconds : null
+      onProgress?.(Math.min(99, Math.floor(fraction * 100)))
+      if (fraction >= 1) clearInactivityTimer()
+      else armInactivityTimer()
+      onDetails?.({
+        phase: fraction >= 1 ? 'SAVING' : 'UPLOADING',
+        uploadedBytes: event.loaded,
+        totalBytes: event.total,
+        recordingBytes: file.size,
+        bytesPerSecond,
+        estimatedSecondsRemaining: bytesPerSecond && fraction < 1
+          ? Math.ceil((event.total - event.loaded) / bytesPerSecond)
+          : null,
+      })
+    }
+    request.onerror = () => {
+      clearInactivityTimer()
+      reject(new ApiError(null, 'Unable to reach the novachat API. Your saved replay is available to retry; check your connection.', undefined, 'NETWORK_ERROR'))
+    }
+    request.ontimeout = () => {
+      clearInactivityTimer()
+      reject(new ApiError(null, 'The replay upload timed out. Your saved recording is still available; check your connection and retry.', undefined, 'TIMEOUT'))
+    }
+    request.onabort = () => {
+      clearInactivityTimer()
+      reject(new DOMException('The upload was cancelled.', 'AbortError'))
+    }
+    request.onload = () => {
+      clearInactivityTimer()
+      const contentType = request.getResponseHeader('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? ''
+      let payload: unknown
+      try {
+        payload = JSON.parse(request.responseText)
+      } catch {
+        if (request.status >= 200 && request.status < 300) {
+          reject(new ApiError(request.status, 'The novachat API returned an invalid upload response.'))
+        } else {
+          reject(new ApiError(request.status, `The novachat API returned HTTP ${request.status} while uploading.`))
+        }
+        return
+      }
+      if (request.status < 200 || request.status >= 300) {
+        if (request.status === 401) clearStoredAccessToken()
+        reject(new ApiError(request.status, extractErrorMessage(payload, `Unable to upload media (HTTP ${request.status}).`), payload))
+        return
+      }
+      if (contentType !== 'application/json' || typeof payload !== 'object' || payload === null
+        || typeof (payload as { mediaUrl?: unknown }).mediaUrl !== 'string'
+        || typeof (payload as { contentType?: unknown }).contentType !== 'string') {
+        reject(new ApiError(request.status, 'The novachat API returned an invalid upload response.'))
+        return
+      }
+      const uploadMetrics = (payload as { uploadMetrics?: { serverProcessingMs?: unknown } }).uploadMetrics
+      onDetails?.({
+        phase: 'SAVING',
+        uploadedBytes: transferLoadedBytes,
+        totalBytes: transferTotalBytes,
+        recordingBytes: file.size,
+        bytesPerSecond: null,
+        estimatedSecondsRemaining: null,
+        ...(typeof uploadMetrics?.serverProcessingMs === 'number'
+          ? { serverProcessingMs: uploadMetrics.serverProcessingMs }
+          : {}),
+      })
+      onProgress?.(100)
+      resolve(payload as { mediaUrl: string; contentType: string })
+    }
+    const startedAt = performance.now()
+    armInactivityTimer()
+    request.send(body)
+  })
+}
+
+export function uploadMedia(file: File, onProgress?: (progress: number) => void) {
+  return uploadFile('/api/media/uploads', file, onProgress)
+}
+
+export function uploadVideo(
+  file: File,
+  onProgress?: (progress: number) => void,
+  liveId?: string,
+  onDetails?: (progress: VideoUploadProgress) => void,
+) {
+  const path = liveId
+    ? `/api/media/videos?liveId=${encodeURIComponent(liveId)}`
+    : '/api/media/videos'
+  return uploadFile(path, file, onProgress, onDetails)
 }
 
 export async function uploadMessageAttachment(file: File) {
@@ -83,8 +235,8 @@ function isAbortError(error: unknown) {
 
 function createTransportError(code: 'NETWORK_ERROR' | 'TIMEOUT') {
   const message = code === 'TIMEOUT'
-    ? 'The NOVAKOKO API request timed out. Please try again shortly.'
-    : 'Unable to reach the NOVAKOKO API. Check your connection and try again shortly.'
+    ? 'The novachat API request timed out. Please try again shortly.'
+    : 'Unable to reach the novachat API. Check your connection and try again shortly.'
   return new ApiError(null, message, undefined, code)
 }
 
@@ -132,6 +284,27 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   const maxAttempts = isSafeRead ? 3 : 1
   const isCredentialSubmission = path === '/api/auth/login' || path === '/api/auth/register'
   const accessToken = isCredentialSubmission ? null : getStoredAccessToken()
+  const routeScope = typeof window === 'undefined' ? '' : window.location.pathname
+  if (apiReadCacheToken !== accessToken) {
+    invalidateApiReadCache()
+    apiReadCacheToken = accessToken
+  }
+  const cacheableRead = isSafeRead
+    && !options.signal
+    && !path.startsWith('/api/auth/')
+    && routeScope !== '/'
+  const cacheKey = `${routeScope}:${path}`
+  if (!isSafeRead) invalidateApiReadCache()
+  if (cacheableRead) {
+    const cached = apiReadCache.get(cacheKey)
+    if (cached && cached.expiresAt > Date.now()) {
+      apiReadCache.delete(cacheKey)
+      apiReadCache.set(cacheKey, cached)
+      return cached.value as T
+    }
+    if (cached) apiReadCache.delete(cacheKey)
+  }
+  const cacheGeneration = apiReadCacheGeneration
 
   if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
@@ -224,6 +397,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   if (!response.ok && !hasJsonContentType) {
     if (response.status === 401) {
       clearStoredAccessToken()
+      invalidateApiReadCache()
     }
 
     const isHtmlResponse = contentType === 'text/html'
@@ -253,7 +427,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
 
     throw new ApiError(
       response.status,
-      `The NOVAKOKO API gateway returned HTTP ${response.status} with ${contentType || 'an unlabelled'} content instead of JSON.`,
+      `The novachat API gateway returned HTTP ${response.status} with ${contentType || 'an unlabelled'} content instead of JSON.`,
       details,
       'GATEWAY_ERROR',
     )
@@ -264,7 +438,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
     payload = rawText ? JSON.parse(rawText) : undefined
   } catch {
     if (response.ok) {
-      throw new ApiError(response.status, 'The NOVAKOKO API returned an invalid response.')
+      throw new ApiError(response.status, 'The novachat API returned an invalid response.')
     }
     payload = { contentType: contentType || null, body: rawText }
   }
@@ -272,13 +446,20 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   if (!response.ok) {
     if (response.status === 401) {
       clearStoredAccessToken()
+      invalidateApiReadCache()
     }
     const fallback = response.status === 429
-      ? 'The NOVAKOKO API is rate limiting requests (HTTP 429). Please wait and try again.'
+      ? 'The novachat API is rate limiting requests (HTTP 429). Please wait and try again.'
       : response.status >= 500
-        ? `The NOVAKOKO API is temporarily unavailable (HTTP ${response.status}). Please try again shortly.`
-        : `The NOVAKOKO API request failed with HTTP ${response.status}.`
+        ? `The novachat API is temporarily unavailable (HTTP ${response.status}). Please try again shortly.`
+        : `The novachat API request failed with HTTP ${response.status}.`
     throw new ApiError(response.status, extractErrorMessage(payload, fallback), payload)
+  }
+
+  if (cacheableRead
+    && cacheGeneration === apiReadCacheGeneration
+    && !/(?:^|,)\s*(?:no-store|no-cache)\b/i.test(response.headers.get('cache-control') ?? '')) {
+    setCachedApiRead(cacheKey, payload)
   }
 
   return payload as T

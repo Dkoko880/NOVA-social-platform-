@@ -1,13 +1,17 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
+import { Readable } from 'node:stream';
 import multer from 'multer';
 import sharp from 'sharp';
 import env from '../config/env.js';
-import { getMediaStorage, MediaStorageUnavailableError } from '../lib/mediaStorage.js';
+import { getMediaStorage, imageFileMediaKeyFromUrl, liveReplayMediaKey, MediaStorageUnavailableError, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
 import { isDatabaseAvailable, prisma } from '../lib/prisma.js';
 import { socialStore } from '../lib/socialStore.js';
+import { getLiveSession } from '../lib/platform.js';
 import { requireActiveAccountIfAuthenticated, requireAuth } from '../middleware/auth.js';
 
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+const VIDEO_READ_CHUNK_BYTES = 1024 * 1024;
 const attachmentTypes = new Map([
   ['audio/webm', 'webm'],
   ['audio/ogg', 'ogg'],
@@ -19,8 +23,48 @@ const attachmentTypes = new Map([
   ['application/pdf', 'pdf'],
   ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx'],
 ]);
+const videoTypesByExtension = new Map([
+  ['webm', 'video/webm'],
+  ['mp4', 'video/mp4'],
+  ['ogg', 'video/ogg'],
+]);
 
 export const mediaRouter = Router();
+const videoUploadStartedAt = new WeakMap<Request, number>();
+
+function parseByteRange(value: string, size: number) {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value);
+  if (!match || (!match[1] && !match[2]) || size === 0) return null;
+  const fileSize = BigInt(size);
+
+  if (!match[1]) {
+    const suffixLength = BigInt(match[2]);
+    if (suffixLength <= 0n) return null;
+    return { start: suffixLength >= fileSize ? 0 : size - Number(suffixLength), end: size - 1 };
+  }
+
+  const start = BigInt(match[1]);
+  const requestedEnd = match[2] ? BigInt(match[2]) : fileSize - 1n;
+  if (start >= fileSize || start > requestedEnd) {
+    return null;
+  }
+  return {
+    start: Number(start),
+    end: Number(requestedEnd >= fileSize ? fileSize - 1n : requestedEnd),
+  };
+}
+
+async function* readVideoChunks(storage: ReturnType<typeof getMediaStorage>, key: string, start: number, end: number) {
+  for (let offset = start; offset <= end;) {
+    const length = Math.min(VIDEO_READ_CHUNK_BYTES, end - offset + 1);
+    const bytes = await storage.getRange(key, offset, length);
+    if (!bytes || bytes.length !== length) {
+      throw new Error(`Video media ${key} could not be read completely.`);
+    }
+    yield bytes;
+    offset += length;
+  }
+}
 
 function uploadMediaFile(req: Request, res: Response, next: NextFunction) {
   multer({
@@ -67,6 +111,41 @@ function uploadAttachmentFile(req: Request, res: Response, next: NextFunction) {
   });
 }
 
+function uploadVideoFile(req: Request, res: Response, next: NextFunction) {
+  videoUploadStartedAt.set(req, performance.now());
+  multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_VIDEO_BYTES, files: 1 },
+    fileFilter(_request, file, callback) {
+      const extension = file.originalname.split('.').at(-1)?.toLowerCase();
+      const contentType = normalizedVideoContentType(file.mimetype, extension);
+      if (!contentType || attachmentTypes.get(contentType) !== extension) {
+        callback(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'file'));
+        return;
+      }
+      file.mimetype = contentType;
+      callback(null, true);
+    },
+  }).single('file')(req, res, (error) => {
+    if (error instanceof multer.MulterError) {
+      const tooLarge = error.code === 'LIMIT_FILE_SIZE';
+      return res.status(tooLarge ? 413 : 400).json({
+        message: tooLarge ? 'Videos must be 100 MB or smaller.' : 'Choose an MP4, WebM, or Ogg video.',
+      });
+    }
+    return next(error);
+  });
+}
+
+function normalizedVideoContentType(mimetype: string, extension?: string) {
+  const contentType = mimetype.split(';', 1)[0].trim().toLowerCase();
+  if (['video/webm', 'video/mp4', 'video/ogg'].includes(contentType)) return contentType;
+  if (contentType === 'text/plain' || contentType === 'application/octet-stream') {
+    return videoTypesByExtension.get(extension ?? '') ?? null;
+  }
+  return null;
+}
+
 function hasValidFileSignature(contentType: string, bytes: Buffer) {
   if (contentType === 'application/pdf') return bytes.subarray(0, 5).toString() === '%PDF-';
   if (contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
@@ -85,48 +164,71 @@ async function canReadAttachment(key: string, ownerUserId: string, viewerId: str
   if (ownerUserId === viewerId) return true;
   const mediaUrl = `/api/media/files/${key}`;
   if (!(await isDatabaseAvailable())) {
-    const referencedByPost = socialStore.state.posts.some((post) =>
-      post.imageUrl === mediaUrl
-      && (post.visibility === 'PUBLIC'
-        || (post.visibility === 'FOLLOWERS' && socialStore.state.follows.some((follow) => follow.followerId === viewerId && follow.followingId === ownerUserId))),
-    );
-    const isBlocked = socialStore.state.blocks.some((block) =>
-      (block.blockerId === viewerId && block.blockedId === ownerUserId)
-      || (block.blockerId === ownerUserId && block.blockedId === viewerId),
-    );
-    return !isBlocked && (referencedByPost || socialStore.state.messages.some((message) =>
+    const referencedByMessage = socialStore.state.messages.some((message) =>
       message.mediaUrl === mediaUrl
       && !message.deletedAt
+      && !message.moderationHiddenAt
       && (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now())
       && socialStore.state.conversationParticipants.some((participant) =>
         participant.conversationId === message.conversationId
         && participant.userId === viewerId
         && !participant.leftAt,
       ),
-    ));
+    );
+    if (referencedByMessage) return true;
+    if (!videoMediaKeyFromUrl(mediaUrl) && !imageFileMediaKeyFromUrl(mediaUrl)) return false;
+    const isBlocked = socialStore.state.blocks.some((block) =>
+      (block.blockerId === viewerId && block.blockedId === ownerUserId)
+      || (block.blockerId === ownerUserId && block.blockedId === viewerId),
+    );
+    if (isBlocked) return false;
+    const followsOwner = socialStore.state.follows.some((follow) => follow.followerId === viewerId && follow.followingId === ownerUserId);
+    const post = socialStore.state.posts.find((post) =>
+      post.authorId === ownerUserId
+      && post.imageUrl === mediaUrl
+      && !post.moderationHiddenAt
+      && (post.visibility === 'PUBLIC' || (post.visibility === 'FOLLOWERS' && followsOwner)),
+    );
+    if (!post) return false;
+    if (!post.sourceLiveBroadcastId) return true;
+    const live = getLiveSession(post.sourceLiveBroadcastId);
+    if (!live || live.blockedUserIds.includes(viewerId) || live.visibility === 'private') return false;
+    return live.visibility !== 'followers' || followsOwner;
   }
-  const [blocked, publicPost, message] = await Promise.all([
+  const message = await prisma.message.findFirst({
+    where: {
+      mediaUrl,
+      deletedAt: null,
+      moderationHiddenAt: null,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      conversation: { participants: { some: { userId: viewerId, leftAt: null } } },
+    },
+    select: { id: true },
+  });
+  if (message) return true;
+  if (!videoMediaKeyFromUrl(mediaUrl) && !imageFileMediaKeyFromUrl(mediaUrl)) return false;
+  const [blocked, follow, post] = await Promise.all([
     prisma.block.findFirst({
       where: { OR: [{ blockerId: viewerId, blockedId: ownerUserId }, { blockerId: ownerUserId, blockedId: viewerId }] },
       select: { id: true },
     }),
-    prisma.post.findFirst({ where: { imageUrl: mediaUrl, visibility: 'PUBLIC' }, select: { id: true } }),
-    prisma.message.findFirst({
-      where: {
-        mediaUrl,
-        deletedAt: null,
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-        conversation: { participants: { some: { userId: viewerId, leftAt: null } } },
-      },
+    prisma.follow.findUnique({
+      where: { followerId_followingId: { followerId: viewerId, followingId: ownerUserId } },
       select: { id: true },
     }),
+    prisma.post.findFirst({
+      where: { authorId: ownerUserId, imageUrl: mediaUrl, moderationHiddenAt: null, visibility: { in: ['PUBLIC', 'FOLLOWERS'] } },
+      select: { visibility: true, sourceLiveBroadcastId: true },
+    }),
   ]);
-  if (blocked || message || publicPost) return !blocked;
-  const [follow, followerPost] = await Promise.all([
-    prisma.follow.findUnique({ where: { followerId_followingId: { followerId: viewerId, followingId: ownerUserId } }, select: { id: true } }),
-    prisma.post.findFirst({ where: { imageUrl: mediaUrl, visibility: 'FOLLOWERS', authorId: ownerUserId }, select: { id: true } }),
-  ]);
-  return Boolean(follow && followerPost);
+  if (blocked || !post || !(post.visibility === 'PUBLIC' || follow)) return false;
+  if (!post.sourceLiveBroadcastId) return true;
+  const live = await prisma.liveBroadcast.findUnique({
+    where: { id: post.sourceLiveBroadcastId },
+    select: { hostId: true, visibility: true, blockedUserIds: true },
+  });
+  if (!live || live.blockedUserIds.includes(viewerId) || live.visibility === 'private') return false;
+  return live.visibility !== 'followers' || Boolean(follow);
 }
 
 async function canReadUploadedMedia(key: string, ownerUserId: string, viewerId: string) {
@@ -145,6 +247,7 @@ async function canReadUploadedMedia(key: string, ownerUserId: string, viewerId: 
     const referencedByPost = socialStore.state.posts.some((post) =>
       post.authorId === ownerUserId
       && post.imageUrl === mediaUrl
+      && !post.moderationHiddenAt
       && (post.visibility === 'PUBLIC' || (post.visibility === 'FOLLOWERS' && followsOwner)),
     );
     const referencedByStory = socialStore.state.stories.some((story) =>
@@ -163,7 +266,16 @@ async function canReadUploadedMedia(key: string, ownerUserId: string, viewerId: 
         && !participant.leftAt,
       ),
     );
-    return Boolean(referencedByProfile || referencedByPost || referencedByStory || referencedByMessage);
+    const referencedByConversation = socialStore.state.conversations.some((conversation) =>
+      conversation.isGroup
+      && conversation.imageUrl === mediaUrl
+      && socialStore.state.conversationParticipants.some((participant) =>
+        participant.conversationId === conversation.id
+        && participant.userId === viewerId
+        && !participant.leftAt,
+      ),
+    );
+    return Boolean(referencedByProfile || referencedByPost || referencedByStory || referencedByMessage || referencedByConversation);
   }
 
   const blocked = await prisma.block.findFirst({
@@ -183,13 +295,13 @@ async function canReadUploadedMedia(key: string, ownerUserId: string, viewerId: 
   });
   if (profile) return true;
 
-  const [follow, posts, stories, message] = await Promise.all([
+  const [follow, posts, stories, message, conversation] = await Promise.all([
     prisma.follow.findUnique({
       where: { followerId_followingId: { followerId: viewerId, followingId: ownerUserId } },
       select: { id: true },
     }),
     prisma.post.findMany({
-      where: { authorId: ownerUserId, imageUrl: mediaUrl },
+      where: { authorId: ownerUserId, imageUrl: mediaUrl, moderationHiddenAt: null },
       select: { visibility: true },
     }),
     prisma.story.findFirst({
@@ -205,9 +317,13 @@ async function canReadUploadedMedia(key: string, ownerUserId: string, viewerId: 
       },
       select: { id: true },
     }),
+    prisma.conversation.findFirst({
+      where: { isGroup: true, imageUrl: mediaUrl, participants: { some: { userId: viewerId, leftAt: null } } },
+      select: { id: true },
+    }),
   ]);
 
-  return posts.some((post) => post.visibility === 'PUBLIC' || (post.visibility === 'FOLLOWERS' && Boolean(follow))) || Boolean((stories && follow) || message);
+  return posts.some((post) => post.visibility === 'PUBLIC' || (post.visibility === 'FOLLOWERS' && Boolean(follow))) || Boolean((stories && follow) || message || conversation);
 }
 
 mediaRouter.post('/uploads', requireAuth, uploadMediaFile, async (req, res, next) => {
@@ -225,6 +341,63 @@ mediaRouter.post('/uploads', requireAuth, uploadMediaFile, async (req, res, next
     if (error instanceof Error && /Input buffer|unsupported image|corrupt|pixel limit/i.test(error.message)) {
       return res.status(400).json({ message: 'The uploaded file is not a valid supported image.' });
     }
+    return next(error);
+  }
+});
+
+mediaRouter.post('/videos', requireAuth, uploadVideoFile, async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'Choose a video to upload.' });
+    const receiveDurationMs = Math.round(performance.now() - (videoUploadStartedAt.get(req) ?? performance.now()));
+    videoUploadStartedAt.delete(req);
+    const processingStartedAt = performance.now();
+    const fileExtension = req.file.originalname.split('.').at(-1)?.toLowerCase();
+    const contentType = normalizedVideoContentType(req.file.mimetype, fileExtension);
+    const extension = contentType ? attachmentTypes.get(contentType) : undefined;
+    if (!contentType || !extension || extension !== fileExtension) {
+      return res.status(400).json({ message: 'Choose an MP4, WebM, or Ogg video.' });
+    }
+    if (!hasValidFileSignature(contentType, req.file.buffer)) {
+      return res.status(400).json({ message: 'The uploaded file does not match its declared video type.' });
+    }
+    const storage = getMediaStorage(env.NODE_ENV);
+    let replayKey: string | undefined;
+    const liveId = req.query.liveId;
+    if (liveId !== undefined) {
+      if (typeof liveId !== 'string' || !liveId.trim()) {
+        return res.status(400).json({ message: 'A valid live broadcast ID is required for a replay upload.' });
+      }
+      const live = await isDatabaseAvailable()
+        ? await prisma.liveBroadcast.findUnique({
+          where: { id: liveId },
+          select: { hostId: true, status: true, recordingStatus: true },
+        })
+        : getLiveSession(liveId);
+      if (!live || live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the broadcast host can upload its replay.' });
+      if (!['live', 'ended'].includes(live.status) || !['RECORDING', 'PROCESSING'].includes(live.recordingStatus)) {
+        return res.status(409).json({ message: 'This broadcast is not accepting a replay recording.' });
+      }
+      replayKey = liveReplayMediaKey(liveId, extension);
+      const existing = await storage.getMetadata(replayKey);
+      if (existing && existing.ownerUserId !== req.user!.id) {
+        return res.status(409).json({ message: 'The replay media key is already owned by another account.' });
+      }
+      if (existing) {
+        return res.status(201).json({
+          mediaUrl: `/api/media/files/${replayKey}`,
+          contentType: existing.contentType,
+          uploadMetrics: { sizeBytes: req.file.size, receiveDurationMs, serverProcessingMs: Math.round(performance.now() - processingStartedAt) },
+        });
+      }
+    }
+    const stored = await storage.putAttachment(req.file.buffer, contentType, extension, req.user!.id, replayKey);
+    return res.status(201).json({
+      mediaUrl: stored.publicUrl,
+      contentType,
+      uploadMetrics: { sizeBytes: req.file.size, receiveDurationMs, serverProcessingMs: Math.round(performance.now() - processingStartedAt) },
+    });
+  } catch (error) {
+    if (error instanceof MediaStorageUnavailableError) return res.status(503).json({ message: 'Persistent video storage is not configured.' });
     return next(error);
   }
 });
@@ -268,16 +441,56 @@ mediaRouter.get('/avatars/:key', requireActiveAccountIfAuthenticated, async (req
 mediaRouter.get('/files/:key', requireAuth, async (req, res, next) => {
   try {
     const key = String(req.params.key);
-    if (!/^[0-9a-f-]{36}\.(?:webm|mp4|ogg|mp3|m4a|pdf|docx)$/.test(key)) return res.status(404).end();
-    const object = await getMediaStorage(env.NODE_ENV).get(key);
-    if (!object || !object.ownerUserId || !(await canReadAttachment(key, object.ownerUserId, req.user!.id))) {
+    if (!/^[0-9a-f-]{36}\.(?:jpe?g|png|webp|webm|mp4|ogg|mp3|m4a|pdf|docx)$/.test(key)) return res.status(404).end();
+    const storage = getMediaStorage(env.NODE_ENV);
+    const metadata = await storage.getMetadata(key);
+    if (!metadata || !metadata.ownerUserId || !(await canReadAttachment(key, metadata.ownerUserId, req.user!.id))) {
       return res.status(404).end();
     }
-    res.setHeader('Content-Type', object.contentType);
+    const isVideo = metadata.contentType.startsWith('video/');
+    const object = isVideo || req.method === 'HEAD' ? null : await storage.get(key);
+    if (!isVideo && req.method !== 'HEAD' && !object) return res.status(404).end();
+
+    res.setHeader('Content-Type', metadata.contentType);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Vary', 'Cookie, Authorization');
-    return res.send(object.bytes);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Range, Content-Length');
+    const rangeHeader = req.headers.range;
+    const range = rangeHeader ? parseByteRange(rangeHeader, metadata.size) : null;
+    if (rangeHeader) {
+      if (!range) return res.status(416).setHeader('Content-Range', `bytes */${metadata.size}`).end();
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${metadata.size}`);
+      res.setHeader('Content-Length', range.end - range.start + 1);
+    } else {
+      res.setHeader('Content-Length', metadata.size);
+    }
+    if (req.method === 'HEAD') return res.end();
+
+    if (isVideo) {
+      const start = range?.start ?? 0;
+      const end = range?.end ?? metadata.size - 1;
+      const videoStream = Readable.from(readVideoChunks(storage, key, start, end));
+      let clientDisconnected = false;
+      res.once('close', () => {
+        if (!res.writableFinished) {
+          clientDisconnected = true;
+          videoStream.destroy();
+        }
+      });
+      videoStream.once('error', (error) => {
+        if (!clientDisconnected && !req.aborted) next(error);
+      });
+      videoStream.pipe(res);
+      return;
+    }
+
+    const bytes = object?.bytes;
+    if (!bytes) return res.status(404).end();
+    if (range) return res.send(bytes.subarray(range.start, range.end + 1));
+    return res.send(bytes);
   } catch (error) {
     if (error instanceof MediaStorageUnavailableError) return res.status(503).json({ message: 'Persistent attachment storage is not configured.' });
     return next(error);

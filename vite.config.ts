@@ -5,7 +5,11 @@ import { defineConfig } from 'vitest/config'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  oxc: {
+    jsx: { runtime: 'automatic' },
+  },
   test: {
+    setupFiles: ['./server/src/__tests__/setup.ts'],
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
