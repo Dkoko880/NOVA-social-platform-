@@ -58,7 +58,6 @@ export type LiveViewer = {
   isMuted: boolean;
   isBlocked: boolean;
   joinedAt: string;
-  lastSeenAt?: string;
 };
 
 export type LiveComment = {
@@ -451,7 +450,7 @@ export function listLiveSessions() {
   return [...getStore().liveSessions].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 }
 
-export function createLiveSession(hostId: string, input: { title: string; description?: string; visibility: LiveVisibility; providerConfigured?: boolean }) {
+export function createLiveSession(hostId: string, input: { title: string; description?: string; visibility: LiveVisibility }) {
   const now = new Date().toISOString();
   const live: LiveSession = {
     id: `live_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,

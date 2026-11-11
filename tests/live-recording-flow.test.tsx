@@ -186,10 +186,13 @@ describe('automatic live recording and replay publishing', () => {
     })
 
     await renderLivePage()
+    expect(host.textContent).toContain('LiveKit Egress recording is not configured.')
     await act(async () => {
       clickButton('Start broadcasting')
       await new Promise((resolve) => setTimeout(resolve, 0))
     })
+    expect(host.querySelector('[aria-label="0 viewers"] svg')).not.toBeNull()
+    expect(host.textContent).toContain('Browser MediaRecorder replay: recording · LiveKit Egress not configured')
     expect(mocks.apiRequest).toHaveBeenCalledWith('/api/live/live-1/recording/start', { method: 'POST' })
     expect(TestMediaRecorder.lastOptions).toMatchObject({ videoBitsPerSecond: 1_500_000, audioBitsPerSecond: 96_000 })
     await act(async () => { mocks.roomHandlers.reconnecting?.() })

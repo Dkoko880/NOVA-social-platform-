@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { TokenVerifier } from 'livekit-server-sdk';
 import { app } from '../app.js';
-import env from '../config/env.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { socialStore } from '../lib/socialStore.js';
 import { clearCommand2AStores, updateLiveSession } from '../lib/platform.js';

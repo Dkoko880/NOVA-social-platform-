@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { Heart, Headphones, Maximize, Mic, MicOff, Minimize, PhoneOff, Radio, RefreshCw, Send, Share2, Users, Video, VideoOff, Volume2 } from 'lucide-react'
+import { Eye, Heart, Headphones, Maximize, Mic, MicOff, Minimize, PhoneOff, Radio, RefreshCw, Send, Share2, Users, Video, VideoOff, Volume2 } from 'lucide-react'
 import type { RemoteTrack, Room, Track } from 'livekit-client'
 import { Link, useSearchParams } from 'react-router-dom'
 import { Button } from '../components/ui/Button'
@@ -446,7 +446,6 @@ export function LivePage() {
       return
     }
     setError('')
-    let stream: MediaStream | null = null
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: true,
@@ -563,22 +562,6 @@ export function LivePage() {
     } finally {
       setBusy(false)
     }
-  }
-
-  const stopLocalRecording = async () => {
-    const recorder = mediaRecorderRef.current
-    if (recorder?.state === 'recording') {
-      await new Promise<void>((resolve) => {
-        recorder.addEventListener('stop', () => resolve(), { once: true })
-        recorder.stop()
-      })
-    }
-    const recordingId = recordingIdRef.current
-    await recordingQueueRef.current.catch(() => undefined)
-    if (recordingId) await markLiveRecordingPending(recordingId)
-    mediaRecorderRef.current = null
-    recordingIdRef.current = null
-    await loadPendingRecordings()
   }
 
   const endBroadcast = async (live: LiveSession) => {
@@ -820,8 +803,6 @@ export function LivePage() {
       await apiRequest(`/api/live/${encodeURIComponent(currentLive.id)}/viewers/leave`, { method: 'POST' })
       joinedLiveRef.current = null
       setJoinedLive(null)
-      setCommentsOpen(false)
-      setViewerListOpen(false)
       await loadLives()
     } catch (leaveError) {
       setError(leaveError instanceof Error ? leaveError.message : 'Unable to leave this session.')
@@ -1054,7 +1035,7 @@ export function LivePage() {
       <header className="absolute inset-x-0 top-0 flex max-h-[36dvh] flex-wrap items-start justify-between gap-3 overflow-y-auto overscroll-contain px-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <div className="min-w-0">
-            <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide"><span className={`rounded-full px-2 py-1 ${activeLive.status === 'live' ? 'bg-rose-600' : 'bg-amber-500'}`}>{activeLive.status === 'live' ? 'LIVE' : 'PREVIEW'}</span><span className="inline-flex items-center gap-1"><Users className="h-4 w-4" aria-hidden="true" />{activeLive.viewerCount}</span></p>
+            <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide"><span className={`rounded-full px-2 py-1 ${activeLive.status === 'live' ? 'bg-rose-600' : 'bg-amber-500'}`}>{activeLive.status === 'live' ? 'LIVE' : 'PREVIEW'}</span><span className="inline-flex items-center gap-1" aria-label={`${activeLive.viewerCount} viewers`}><Eye className="h-4 w-4" aria-hidden="true" />{activeLive.viewerCount}</span></p>
             <h1 className="mt-1 max-w-[55vw] truncate text-base font-semibold sm:max-w-md">{activeLive.title}</h1>
             <p className="truncate text-xs text-white/75">{isHost ? user?.name : activeLive.host?.name ?? 'novachat host'}</p>
           </div>
@@ -1107,7 +1088,7 @@ export function LivePage() {
         </div>
       </details> : null}
       {!isHost && (needsAudioPlayback || needsVideoPlayback) ? <button type="button" onClick={() => void enablePlayback()} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white px-5 py-3 font-semibold text-slate-900 shadow-lg"><Volume2 className="mr-2 inline h-5 w-5" aria-hidden="true" />Tap to enable sound</button> : null}
-      {isHost && recordingPhase !== 'IDLE' ? <p className="absolute bottom-36 left-3 right-3 mx-auto max-w-lg rounded-xl bg-black/75 p-2 text-center text-xs text-white" role="status">Replay: {recordingPhase.toLowerCase()}</p> : null}
+      {isHost && recordingPhase !== 'IDLE' ? <p className="absolute bottom-36 left-3 right-3 mx-auto max-w-lg rounded-xl bg-black/75 p-2 text-center text-xs text-white" role="status">Browser MediaRecorder replay: {recordingPhase.toLowerCase()} · LiveKit Egress not configured</p> : null}
       {isHost && recordingPhase === 'UPLOADING' ? <p className="absolute bottom-24 left-3 right-3 mx-auto max-w-lg rounded-xl bg-black/80 p-3 text-center text-xs text-white" role="status">{describeUploadProgress(recordingUploadDetails, recordingUploadProgress)}</p> : null}
       {recordingError && isHost ? <p className="absolute bottom-24 left-3 right-3 mx-auto max-w-lg rounded-xl bg-amber-950/90 p-3 text-center text-xs text-amber-50" role="status">{recordingError}</p> : null}
       {shareNotice ? <p className="absolute bottom-36 left-3 right-3 text-center text-sm text-white" role="status">{shareNotice}</p> : null}
@@ -1130,24 +1111,12 @@ export function LivePage() {
         <h2 className="mt-2 text-2xl font-semibold text-slate-900">Live sessions</h2>
       </header>
 
-      <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900" role="status">Live broadcasts use LiveKit for encrypted, low-latency audio and video. Your administrator must configure the LiveKit media server.</div>
+      <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900" role="status">Live video uses LiveKit when configured and browser peer connections otherwise. Replays are recorded by browser MediaRecorder and saved locally before upload; LiveKit Egress recording is not configured.</div>
       {error ? <p className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p> : null}
       {recordingPhase === 'UPLOADING' || recordingPhase === 'PROCESSING' || recordingPhase === 'FINALIZING' ? <p className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900" role="status">{recordingPhase === 'UPLOADING' ? describeUploadProgress(recordingUploadDetails, recordingUploadProgress) : recordingPhase === 'PROCESSING' ? 'Publishing the uploaded replay to Feed…' : 'Finalizing the replay…'}</p> : null}
       {recordingError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status"><p>{recordingError}</p>{recordingRetryLiveId ? <Button variant="secondary" size="sm" className="mt-2" onClick={() => void retrySaveRecording()} disabled={recordingRetryBusy}>{recordingRetryBusy ? recordingUploadProgress === null ? 'Saving replay…' : `Uploading replay ${recordingUploadProgress}%…` : 'Retry upload and publish'}</Button> : null}</div> : null}
 
-      {pendingRecordings.length ? <section aria-label="Saved live recordings" className="space-y-2 border-y border-amber-200 py-3">
-        <h3 className="text-sm font-semibold text-slate-900">Saved replays awaiting upload</h3>
-        {pendingRecordings.map((recording) => {
-          const progress = recordingProgress?.recordingId === recording.recordingId ? recordingProgress : null
-          return <div key={recording.recordingId} className="flex min-w-0 flex-wrap items-center gap-3">
-            <p className="min-w-0 flex-1 truncate text-sm text-slate-700">{recording.title} · {recording.chunks.length} saved chunks</p>
-            {progress ? <span className="text-xs text-slate-600" role="status">{progress.stage === 'saving' ? 'Saving replay…' : `${Math.floor((progress.loaded / Math.max(progress.total, 1)) * 100)}% uploaded`}</span> : null}
-            <Button type="button" variant="secondary" size="sm" disabled={isUploading} onClick={() => void uploadPendingRecording(recording)}>{isUploading && progress ? 'Uploading…' : 'Retry upload'}</Button>
-          </div>
-        })}
-      </section> : null}
-
-      <form onSubmit={(event) => void createLive(event)} className="min-w-0 space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+      <form onSubmit={(event) => void createLive(event)} className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
         <h3 className="font-semibold text-slate-900">Create a live session</h3>
         <input aria-label="Live session title" required maxLength={120} value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder="What are you going live about?" className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
         <textarea aria-label="Live session description" maxLength={1000} value={newDescription} onChange={(event) => setNewDescription(event.target.value)} placeholder="Add a description (optional)" className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
@@ -1161,7 +1130,7 @@ export function LivePage() {
 
       {loading ? <p className="rounded-xl bg-white p-4 text-sm text-slate-500">Loading sessions…</p> : null}
       {!loading && lives.length === 0 && !error ? <p className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">No live sessions are available.</p> : null}
-      <ul className="min-w-0 divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white">
+      <ul className="divide-y divide-slate-200 rounded-2xl border border-slate-200 bg-white">
         {lives.map((live) => (
           <li key={live.id} className="flex flex-wrap items-center gap-3 p-4">
             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-700"><Headphones className="h-5 w-5" aria-hidden="true" /></span>
