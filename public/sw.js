@@ -1,4 +1,4 @@
-const CACHE_NAME = 'novachat-shell-v2'
+const CACHE_NAME = 'novachat-shell-v3'
 const SHELL_URLS = [
   '/',
   '/index.html',
@@ -9,6 +9,8 @@ const SHELL_URLS = [
   '/icons/icon-192.png',
   '/icons/icon-512.png',
   '/icons/icon-512-maskable.png',
+  '/audio/voice-call-ringtone.wav',
+  '/audio/video-call-ringtone.wav',
 ]
 
 self.addEventListener('install', (event) => {
@@ -21,6 +23,53 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))),
   )
   self.clients.claim()
+})
+
+self.addEventListener('push', (event) => {
+  let payload
+  try {
+    payload = event.data?.json()
+  } catch {
+    return
+  }
+  if (!payload || payload.type !== 'incoming-call' || typeof payload.callId !== 'string') return
+
+  const callerName = typeof payload.callerName === 'string' ? payload.callerName : 'NOVACHAT member'
+  const callType = payload.callType === 'video' ? 'video' : 'voice'
+  const icon = typeof payload.callerAvatar === 'string' && payload.callerAvatar.startsWith('https://')
+    ? payload.callerAvatar
+    : '/icons/icon-192.png'
+  event.waitUntil(self.registration.showNotification(
+    `Incoming ${callType} call`,
+    {
+      body: `${callerName} is calling you.`,
+      tag: `novachat-call-${payload.callId}`,
+      icon,
+      data: { callId: payload.callId },
+      actions: [{ action: 'accept', title: 'Accept' }, { action: 'reject', title: 'Reject' }],
+    },
+  ))
+})
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close()
+  const callId = event.notification.data?.callId
+  const action = event.action
+  const target = callId && ['accept', 'reject'].includes(action)
+    ? `/?call=${encodeURIComponent(callId)}&callAction=${action}`
+    : '/'
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (clients) => {
+      const client = clients[0]
+      if (client) {
+        await client.navigate(target)
+        await client.focus()
+      } else {
+        await self.clients.openWindow(target)
+      }
+    }),
+  )
 })
 
 self.addEventListener('fetch', (event) => {

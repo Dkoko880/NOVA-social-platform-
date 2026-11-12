@@ -4,7 +4,7 @@ import { TokenVerifier, TrackSource } from 'livekit-server-sdk';
 import { app } from '../app.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { getLiveKitParticipants, removeLiveKitParticipant } from '../lib/livekit.js';
-import { clearCommand2AStores, updateLiveSession } from '../lib/platform.js';
+import { CALL_RING_TIMEOUT_MS, clearCommand2AStores, createCallSession, getCallSession, updateLiveSession } from '../lib/platform.js';
 import { subscribeToUserEvents } from '../lib/realtime.js';
 import { socialStore } from '../lib/socialStore.js';
 
@@ -35,6 +35,17 @@ describe('command 2a foundation', () => {
     fallbackStore.clear();
     socialStore.clear();
     clearCommand2AStores();
+  });
+
+  it('marks unanswered call invitations missed after the ring timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const call = createCallSession('caller', ['recipient'], 'voice');
+      await vi.advanceTimersByTimeAsync(CALL_RING_TIMEOUT_MS);
+      expect(getCallSession(call.id)?.status).toBe('missed');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('creates and reads notification state and unread counts', async () => {
@@ -236,13 +247,22 @@ describe('command 2a foundation', () => {
     });
     const bobUser = (await request(app).get('/api/users')).body.users.find((user: { name: string }) => user.name === 'Bob');
 
-    const started = await request(app)
-      .post('/api/calls/start')
-      .set('Cookie', getCookieHeader(aliceLogin))
-      .send({ targetUserId: bobUser.id, type: 'voice' });
+    const parallelStarts = await Promise.all([
+      request(app).post('/api/calls/start').set('Cookie', getCookieHeader(aliceLogin)).send({ targetUserId: bobUser.id, type: 'voice' }),
+      request(app).post('/api/calls/start').set('Cookie', getCookieHeader(aliceLogin)).send({ targetUserId: bobUser.id, type: 'voice' }),
+    ]);
+    expect(parallelStarts.map((response) => response.status).sort()).toEqual([201, 409]);
+    const started = parallelStarts.find((response) => response.status === 201)!;
 
     expect(started.status).toBe(201);
     expect(started.body.call.provider).toBe('livekit');
+
+    const simultaneous = await request(app)
+      .post('/api/calls/start')
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ targetUserId: bobUser.id, type: 'video' });
+    expect(simultaneous.status).toBe(409);
+    expect(simultaneous.body.message).toMatch(/already in another call/);
 
     await request(app)
       .post(`/api/users/${bobUser.id}/block`)

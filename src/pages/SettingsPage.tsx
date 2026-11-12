@@ -18,6 +18,12 @@ const notificationLabels: Record<NotificationPreference['key'], string> = {
   mentions: 'Mentions',
 }
 
+function decodeVapidPublicKey(value: string) {
+  const base64 = value.replace(/-/g, '+').replace(/_/g, '/')
+  const decoded = window.atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='))
+  return Uint8Array.from(decoded, (character) => character.charCodeAt(0)).buffer
+}
+
 type Session = {
   id: string
   userAgent: string | null
@@ -39,6 +45,9 @@ export function SettingsPage() {
   const [preferencesLoading, setPreferencesLoading] = useState(true)
   const [preferencesBusy, setPreferencesBusy] = useState('')
   const [preferencesError, setPreferencesError] = useState('')
+  const [pushBusy, setPushBusy] = useState(false)
+  const [pushStatus, setPushStatus] = useState('')
+  const [pushError, setPushError] = useState('')
 
   useEffect(() => {
     let mounted = true
@@ -67,10 +76,60 @@ export function SettingsPage() {
         body: JSON.stringify({ key: preference.key, enabled: !preference.enabled }),
       })
       setNotificationPreferences(response.preferences)
+      if (preference.key === 'calls') {
+        const enabled = response.preferences.find((entry) => entry.key === 'calls')?.enabled ?? true
+        window.dispatchEvent(new CustomEvent('novachat:call-notification-preference', { detail: { enabled } }))
+      }
     } catch (error) {
       setPreferencesError(error instanceof ApiError ? error.message : 'Notification preference could not be updated.')
     } finally {
       setPreferencesBusy('')
+    }
+  }
+
+  const enablePushNotifications = async () => {
+    setPushBusy(true)
+    setPushError('')
+    setPushStatus('')
+    try {
+      if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+        throw new Error('This browser does not support web push notifications.')
+      }
+      const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission()
+      if (permission !== 'granted') throw new Error('Notification permission was not granted.')
+      const { publicKey } = await apiRequest<{ publicKey: string }>('/api/calls/push/public-key')
+      const registration = await navigator.serviceWorker.ready
+      const subscription = await registration.pushManager.getSubscription()
+        ?? await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: decodeVapidPublicKey(publicKey),
+        })
+      await apiRequest('/api/calls/push/subscriptions', {
+        method: 'POST',
+        body: JSON.stringify(subscription.toJSON()),
+      })
+      setPushStatus('Browser call notifications are enabled on this device.')
+    } catch (error) {
+      setPushError(error instanceof Error ? error.message : 'Browser call notifications could not be enabled.')
+    } finally {
+      setPushBusy(false)
+    }
+  }
+
+  const disablePushNotifications = async () => {
+    setPushBusy(true)
+    setPushError('')
+    setPushStatus('')
+    try {
+      const registration = await navigator.serviceWorker.ready
+      const subscription = await registration.pushManager.getSubscription()
+      await apiRequest('/api/calls/push/subscriptions', { method: 'DELETE' })
+      await subscription?.unsubscribe()
+      setPushStatus('Browser call notifications are disabled on this device.')
+    } catch (error) {
+      setPushError(error instanceof Error ? error.message : 'Browser call notifications could not be disabled.')
+    } finally {
+      setPushBusy(false)
     }
   }
 
@@ -174,6 +233,22 @@ export function SettingsPage() {
               ))}
             </ul>
           ) : null}
+          <div className="mt-4 border-t border-slate-100 pt-4">
+            <p className="text-sm font-semibold text-slate-800">Background call notifications</p>
+            <p className="mt-1 text-xs text-slate-500">Web push can alert this browser while NOVACHAT is backgrounded. Delivery depends on browser and device support.</p>
+            {pushError ? <p role="alert" className="mt-3 text-sm text-rose-700">{pushError}</p> : null}
+            {pushStatus ? <p role="status" className="mt-3 text-sm text-emerald-700">{pushStatus}</p> : null}
+            {import.meta.env.PROD && 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window ? (
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button type="button" onClick={() => void enablePushNotifications()} disabled={pushBusy} className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">
+                  Enable on this device
+                </button>
+                <button type="button" onClick={() => void disablePushNotifications()} disabled={pushBusy} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">
+                  Disable on this device
+                </button>
+              </div>
+            ) : <p className="mt-3 text-xs text-slate-500">Web push requires a supported browser on a secure installed or hosted web app.</p>}
+          </div>
         </section>
       </div>
     </div>

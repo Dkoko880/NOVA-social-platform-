@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { TrackSource } from 'livekit-server-sdk';
 import { z } from 'zod';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
-import { createCallSession, createLiveSession, createNotification, getCallSession, getLiveSession, getNotificationPreferences, listCallHistory, listLiveSessions, markAllNotificationsRead, markNotificationRead, restoreLiveSession, setNotificationPreferences, setPresence, setTypingState, updateCallSession, updateLiveSession, type LiveComment, type LiveReaction, type LiveViewer } from '../lib/platform.js';
+import { CALL_RING_TIMEOUT_MS, createCallSession, createLiveSession, createNotification, getCallSession, getLiveSession, getNotificationPreferences, listCallHistory, listLiveSessions, markAllNotificationsRead, markNotificationRead, restoreLiveSession, setNotificationPreferences, setPresence, setTypingState, updateCallSession, updateLiveSession, type LiveComment, type LiveReaction, type LiveViewer } from '../lib/platform.js';
 import { socialStore } from '../lib/socialStore.js';
 import { fallbackStore, findUserById } from '../lib/fallbackStore.js';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
@@ -14,11 +14,13 @@ import { canDeleteLiveReplayMedia, isLiveReplayOwner, isLiveReplayUploadRetry } 
 import { realtimeHub } from '../lib/realtime.js';
 import { isLiveKitEgressConfigured, liveKitEgressMissingConfiguration, startLiveKitRoomEgress, stopLiveKitEgress } from '../lib/livekitEgress.js';
 import { randomUUID } from 'node:crypto';
+import { CallPushSubscriptionConflictError, getWebPushPublicKey, isSupportedPushEndpoint, isWebPushConfigured, removeCallPushSubscriptions, saveCallPushSubscription, sendIncomingCallPush } from '../lib/callPush.js';
 
 const command2aRouter = Router();
 command2aRouter.use(requireActiveAccountIfAuthenticated);
 const startingLiveIds = new Set<string>();
 const startingRecordingIds = new Set<string>();
+const startingCallParticipantIds = new Set<string>();
 
 const notificationPreferenceSchema = z.object({
   key: z.enum(['social', 'messages', 'security', 'live', 'calls', 'mentions']),
@@ -45,6 +47,13 @@ const callSchema = z.object({
   message: 'Choose at least one call participant or a group conversation.',
 });
 const callControlSchema = z.object({ muted: z.boolean().optional(), cameraOn: z.boolean().optional(), speakerOn: z.boolean().optional() });
+const callPushSubscriptionSchema = z.object({
+  endpoint: z.string().url().max(2048),
+  keys: z.object({
+    p256dh: z.string().min(20).max(200),
+    auth: z.string().min(16).max(100),
+  }),
+});
 const liveCreateSchema = z.object({
   title: z.string().trim().min(1).max(120),
   description: z.string().trim().max(1000).optional(),
@@ -613,8 +622,62 @@ command2aRouter.post('/calls/start', requireAuth, async (req, res) => {
     if (await isBlocked(userId, targetId)) return res.status(403).json({ message: 'You cannot call a user who has blocked you or who you have blocked.' });
   }
 
-  const call = createCallSession(userId, targetUserIds, payload.type, payload.conversationId);
+  const isBusy = (participantId: string) => listCallHistory(participantId).some((call) =>
+    call.status === 'connected'
+    || (['ringing', 'outgoing'].includes(call.status) && Date.now() - Date.parse(call.createdAt) < CALL_RING_TIMEOUT_MS),
+  );
+  const participantIds = [userId, ...targetUserIds];
+  if (participantIds.some((participantId) => startingCallParticipantIds.has(participantId) || isBusy(participantId))) {
+    return res.status(409).json({ message: 'A call participant is already in another call.' });
+  }
+
+  participantIds.forEach((participantId) => startingCallParticipantIds.add(participantId));
+  let call: ReturnType<typeof createCallSession>;
+  try {
+    call = createCallSession(userId, targetUserIds, payload.type, payload.conversationId);
+  } finally {
+    participantIds.forEach((participantId) => startingCallParticipantIds.delete(participantId));
+  }
+  void (async () => {
+    const callerAvatar = await isDatabaseAvailable()
+      ? (await prisma.profile.findUnique({ where: { userId }, select: { avatarUrl: true } }))?.avatarUrl ?? null
+      : socialStore.state.profiles.find((profile) => profile.userId === userId)?.avatarUrl ?? null;
+    await Promise.all(targetUserIds.map((targetId) => sendIncomingCallPush(targetId, {
+      id: call.id,
+      type: call.type,
+      callerName: req.user!.name,
+      callerAvatar,
+    })));
+  })().catch((error: unknown) => {
+    console.error('Incoming call push delivery failed; the in-app call was started.', error);
+  });
   return res.status(201).json({ call, message: 'Call started. Connecting to LiveKit.' });
+});
+
+command2aRouter.get('/calls/push/public-key', requireAuth, (_req, res) => {
+  const publicKey = getWebPushPublicKey();
+  if (!publicKey) return res.status(503).json({ message: 'Web Push is unavailable until VAPID keys are configured.' });
+  return res.json({ publicKey });
+});
+
+command2aRouter.post('/calls/push/subscriptions', requireAuth, async (req, res) => {
+  if (!isWebPushConfigured()) return res.status(503).json({ message: 'Web Push is unavailable until VAPID keys are configured.' });
+  const subscription = callPushSubscriptionSchema.parse(req.body ?? {});
+  if (!isSupportedPushEndpoint(subscription.endpoint)) {
+    return res.status(400).json({ message: 'Use a supported HTTPS browser push endpoint.' });
+  }
+  try {
+    await saveCallPushSubscription(req.user!.id, subscription);
+  } catch (error) {
+    if (error instanceof CallPushSubscriptionConflictError) return res.status(409).json({ message: error.message });
+    throw error;
+  }
+  return res.status(201).json({ subscribed: true });
+});
+
+command2aRouter.delete('/calls/push/subscriptions', requireAuth, async (req, res) => {
+  await removeCallPushSubscriptions(req.user!.id);
+  return res.json({ unsubscribed: true });
 });
 
 command2aRouter.get('/calls/history', requireAuth, async (req, res) => {

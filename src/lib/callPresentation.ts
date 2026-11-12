@@ -5,6 +5,14 @@ type CallPresentationRecord = {
   participants: { userId: string; status: string }[]
 }
 
+type IncomingCallRecord = {
+  id: string
+  callerId: string
+  status: string
+  createdAt: string
+  participants: { userId: string; status: string }[]
+}
+
 export type CallScreenState = 'incoming' | 'outgoing' | 'connecting' | 'active' | 'ended' | 'failed'
 
 export const callViewportClassName = 'fixed inset-0 z-50 flex h-[100dvh] w-auto max-w-full min-w-0 flex-col overflow-y-auto bg-gradient-to-b from-indigo-950 via-slate-950 to-black pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] text-white'
@@ -27,4 +35,18 @@ export function formatCallDuration(milliseconds: number) {
   const seconds = totalSeconds % 60
   const twoDigits = (value: number) => String(value).padStart(2, '0')
   return hours ? `${hours}:${twoDigits(minutes)}:${twoDigits(seconds)}` : `${twoDigits(minutes)}:${twoDigits(seconds)}`
+}
+
+export function getIncomingCallForUser<T extends IncomingCallRecord>(calls: T[], userId: string) {
+  const uniqueCalls = new Map<string, T>()
+  for (const call of calls) {
+    if (
+      call.status === 'ringing'
+      && call.callerId !== userId
+      && call.participants.some((participant) => participant.userId === userId && participant.status === 'pending')
+    ) {
+      uniqueCalls.set(call.id, call)
+    }
+  }
+  return [...uniqueCalls.values()].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))[0]
 }

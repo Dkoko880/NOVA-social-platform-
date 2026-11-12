@@ -42,6 +42,9 @@ export const envSchema = z.object({
   LIVEKIT_URL: optionalLiveKitString,
   LIVEKIT_API_KEY: optionalLiveKitString,
   LIVEKIT_API_SECRET: optionalLiveKitString,
+  VAPID_PUBLIC_KEY: optionalLiveKitString.refine((value) => !value || /^[A-Za-z0-9_-]{80,90}$/.test(value), 'VAPID_PUBLIC_KEY must be a URL-safe base64 public key.'),
+  VAPID_PRIVATE_KEY: optionalLiveKitString.refine((value) => !value || /^[A-Za-z0-9_-]{40,50}$/.test(value), 'VAPID_PRIVATE_KEY must be a URL-safe base64 private key.'),
+  VAPID_SUBJECT: z.string().trim().min(1).default('mailto:admin@example.com'),
   LIVEKIT_EGRESS_WEBHOOK_URL: z.preprocess(
     (value) => value === '' ? undefined : value,
     z.string().url().optional(),
@@ -76,6 +79,24 @@ export const envSchema = z.object({
       path: ['LIVEKIT_API_SECRET'],
       message: 'LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET must be configured together.',
     });
+  }
+  if (Boolean(data.VAPID_PUBLIC_KEY) !== Boolean(data.VAPID_PRIVATE_KEY)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['VAPID_PRIVATE_KEY'],
+      message: 'VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must be configured together.',
+    });
+  }
+  if (data.VAPID_SUBJECT && !data.VAPID_SUBJECT.startsWith('mailto:')) {
+    try {
+      if (new URL(data.VAPID_SUBJECT).protocol !== 'https:') throw new Error('HTTPS required');
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['VAPID_SUBJECT'],
+        message: 'VAPID_SUBJECT must be a mailto: address or HTTPS URL.',
+      });
+    }
   }
   if (data.LIVEKIT_URL) {
     if (data.LIVEKIT_URL.trim() !== data.LIVEKIT_URL || /[\r\n]/.test(data.LIVEKIT_URL)) {

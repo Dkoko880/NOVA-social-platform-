@@ -1,8 +1,9 @@
 import { App as CapacitorApp } from '@capacitor/app'
 import { Capacitor } from '@capacitor/core'
-import { lazy, Suspense, useEffect, useRef } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
+import { IncomingCallManager } from './components/IncomingCallManager'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { CommunitiesPage } from './pages/CommunitiesPage'
 import { ExplorePage } from './pages/ExplorePage'
@@ -120,7 +121,17 @@ function AndroidBackHandler() {
 }
 
 function AppRoutes() {
+  const { isAuthenticated, user } = useAuth()
+  const location = useLocation()
+  const [hasOpenedCalls, setHasOpenedCalls] = useState(location.pathname === '/calls')
+
+  useEffect(() => {
+    if (location.pathname === '/calls') setHasOpenedCalls(true)
+  }, [location.pathname])
+
   return (
+    <>
+    {isAuthenticated && user && hasOpenedCalls ? <Suspense fallback={<MediaPageLoading />}><CallsPage key={user.id} /></Suspense> : null}
     <Routes>
       <Route path="/download" element={<DownloadPage />} />
       <Route element={<PublicRoute />}>
@@ -139,7 +150,7 @@ function AppRoutes() {
         <Route path="/messages" element={<AppShell><MessagesPage /></AppShell>} />
         <Route path="/updates" element={<AppShell><UpdatesPage /></AppShell>} />
         <Route path="/live" element={<Suspense fallback={<MediaPageLoading />}><AppShell><LivePage /></AppShell></Suspense>} />
-        <Route path="/calls" element={<Suspense fallback={<MediaPageLoading />}><AppShell><CallsPage /></AppShell></Suspense>} />
+        <Route path="/calls" element={null} />
         <Route path="/ai" element={<AppShell><AiPage /></AppShell>} />
         <Route path="/communities" element={<AppShell><CommunitiesPage /></AppShell>} />
         <Route path="/profile" element={<AppShell><ProfilePage /></AppShell>} />
@@ -155,6 +166,7 @@ function AppRoutes() {
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
   )
 }
 
@@ -164,6 +176,7 @@ function App() {
       <BrowserRouter>
         <AndroidBackHandler />
         <UpdateChecker />
+        <IncomingCallManager />
         <AppRoutes />
       </BrowserRouter>
     </AuthProvider>

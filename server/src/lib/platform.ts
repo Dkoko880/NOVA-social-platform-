@@ -26,6 +26,7 @@ export type TypingState = {
 
 export type CallType = 'voice' | 'video';
 export type CallStatus = 'ringing' | 'outgoing' | 'connected' | 'ended' | 'missed' | 'rejected' | 'cancelled';
+export const CALL_RING_TIMEOUT_MS = 45_000;
 
 export type CallParticipantState = {
   userId: string;
@@ -397,6 +398,10 @@ export function createCallSession(callerId: string, targetUserIds: string[], typ
   };
   getStore().callSessions.unshift(call);
   realtimeHub.emit('call:update', { call, allowedUserIds: call.participants.map((participant) => participant.userId) });
+  const expirationTimer = setTimeout(() => {
+    if (call.status === 'ringing') updateCallSession(call.id, { status: 'missed' });
+  }, CALL_RING_TIMEOUT_MS);
+  expirationTimer.unref();
   return call;
 }
 

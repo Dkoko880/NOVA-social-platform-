@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { callScreenState, callViewportClassName, formatCallDuration } from '../src/lib/callPresentation'
+import { callScreenState, callViewportClassName, formatCallDuration, getIncomingCallForUser } from '../src/lib/callPresentation'
 import { cameraSwitchErrorMessage, chooseNextCamera, switchToNextCamera } from '../src/lib/cameraSwitching'
 import { sendPostToConversation } from '../src/lib/postSharing'
 import { isVideoStoryMedia, sendStoryReply } from '../src/lib/storyReplies'
@@ -47,6 +47,15 @@ describe('call screen state', () => {
   it('formats a connected duration as mm:ss or h:mm:ss', () => {
     expect(formatCallDuration(65_000)).toBe('01:05')
     expect(formatCallDuration(3_661_000)).toBe('1:01:01')
+  })
+
+  it('selects one pending invitation and ignores duplicate or terminal call updates', () => {
+    const older = { ...baseCall, id: 'older', createdAt: '2026-01-01T10:00:00.000Z' }
+    const newer = { ...baseCall, id: 'newer', createdAt: '2026-01-01T10:01:00.000Z', type: 'video' as const }
+    const duplicate = { ...older, status: 'rejected' }
+    expect(getIncomingCallForUser([newer, older, duplicate], 'recipient')?.id).toBe('older')
+    expect(getIncomingCallForUser([{ ...older, status: 'missed' }], 'recipient')).toBeUndefined()
+    expect(getIncomingCallForUser([older], 'caller')).toBeUndefined()
   })
 
   it('uses a responsive safe-area call viewport with dynamic device height', () => {
