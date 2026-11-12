@@ -5,9 +5,10 @@ import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { socialStore } from '../lib/socialStore.js';
 import { reviewContentForSafety } from '../lib/moderation.js';
-import { getLiveSession, isNotificationEnabled } from '../lib/platform.js';
+import { getLiveSession, isNotificationEnabled, updateLiveSession } from '../lib/platform.js';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
-import { imageFileMediaKeyFromUrl, mediaKeyFromUrl, uploadedMediaBelongsTo, uploadedVideoBelongsTo, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
+import { getMediaStorage, imageFileMediaKeyFromUrl, mediaKeyFromUrl, uploadedMediaBelongsTo, uploadedVideoBelongsTo, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
+import { canDeleteLiveReplayMedia } from '../lib/liveReplayPolicy.js';
 import { decryptPrivateAddress, encryptPrivateAddress } from '../lib/privateProfile.js';
 
 function isSafeMediaUrl(value: string) {
@@ -1184,17 +1185,77 @@ socialRouter.delete('/posts/:id', requireAuth, async (req, res) => {
   const dbAvailable = await isDatabaseAvailable();
 
   if (dbAvailable) {
-    const post = await prisma.post.findUnique({ where: { id: postId }, select: { authorId: true, id: true, sourceLiveBroadcastId: true } });
+    const post = await prisma.post.findUnique({
+      where: { id: postId },
+      select: { authorId: true, id: true, sourceLiveBroadcastId: true, sourceLiveReplayId: true },
+    });
 
     if (!post) {
       return res.status(404).json({ message: 'Post not found.' });
     }
 
-    if (post.authorId !== userId && !['MODERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+    const isAdmin = ['MODERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(req.user!.role);
+    if (post.authorId !== userId && !isAdmin) {
       return res.status(403).json({ message: 'You may only delete your own posts.' });
     }
-    if (post.sourceLiveBroadcastId && !['MODERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+    if (post.sourceLiveBroadcastId && !isAdmin) {
       return res.status(409).json({ message: 'Live broadcast posts stay in the Feed so the session and replay remain linked.' });
+    }
+
+    if (post.sourceLiveReplayId) {
+      const replay = await prisma.liveReplay.findUnique({ where: { id: post.sourceLiveReplayId } });
+      if (!replay || replay.hostId !== post.authorId
+        || replay.publishedPostId && replay.publishedPostId !== postId
+        || !['READY', 'PUBLISHED', 'DELETING', 'DELETED'].includes(replay.status)) {
+        return res.status(409).json({ message: 'The linked live replay could not be verified for safe deletion.' });
+      }
+
+      const key = videoMediaKeyFromUrl(replay.mediaUrl);
+      if (!key) return res.status(409).json({ message: 'The replay media could not be verified for safe deletion.' });
+      const storage = getMediaStorage(process.env.NODE_ENV ?? 'development');
+      const metadata = await storage.getMetadata(key);
+      if (metadata && !canDeleteLiveReplayMedia(replay.status, metadata, replay.hostId)) {
+        return res.status(409).json({ message: 'The replay media could not be verified for safe deletion.' });
+      }
+      const [otherPostCount, otherReplayCount, storyReference, messageReference] = metadata
+        ? await Promise.all([
+          prisma.post.count({ where: { imageUrl: replay.mediaUrl, id: { not: postId } } }),
+          prisma.liveReplay.count({ where: { mediaUrl: replay.mediaUrl, id: { not: replay.id }, status: { not: 'DELETED' } } }),
+          prisma.story.findFirst({ where: { mediaUrl: replay.mediaUrl }, select: { id: true } }),
+          prisma.message.findFirst({ where: { mediaUrl: replay.mediaUrl }, select: { id: true } }),
+        ])
+        : [0, 0, null, null] as const;
+      if (!['DELETING', 'DELETED'].includes(replay.status)) {
+        await prisma.liveReplay.update({ where: { id: replay.id }, data: { status: 'DELETING' } });
+      }
+      if (metadata && otherPostCount === 0 && otherReplayCount === 0 && !storyReference && !messageReference) {
+        await storage.delete(key);
+      }
+      await prisma.$transaction(async (transaction) => {
+        const currentPost = await transaction.post.findUnique({
+          where: { id: postId },
+          select: { authorId: true, sourceLiveReplayId: true },
+        });
+        if (currentPost && (currentPost.authorId !== post.authorId || currentPost.sourceLiveReplayId !== replay.id)) {
+          throw new Error('The Feed post changed while its live replay was being deleted.');
+        }
+        if (currentPost) await transaction.post.delete({ where: { id: postId } });
+        await transaction.liveReplay.update({
+          where: { id: replay.id },
+          data: { status: 'DELETED', publishedPostId: null },
+        });
+        await transaction.liveBroadcast.updateMany({
+          where: { id: replay.id, replayUrl: replay.mediaUrl },
+          data: { replayUrl: null, recordingStatus: 'UNAVAILABLE' },
+        });
+      });
+      updateLiveSession(replay.id, (live) => ({
+        ...live,
+        replayUrl: null,
+        recordingUrl: null,
+        recordingStatus: 'UNAVAILABLE',
+      }));
+      return res.json({ message: 'Post deleted.' });
     }
 
     await prisma.post.delete({ where: { id: postId } });

@@ -11,7 +11,13 @@ const databaseMocks = vi.hoisted(() => ({
   liveBroadcastReactionFindMany: vi.fn(),
   blockFindUnique: vi.fn(),
   postFindUnique: vi.fn(),
+  postCount: vi.fn(),
   postCreate: vi.fn(),
+  postDelete: vi.fn(),
+  liveBroadcastUpdateMany: vi.fn(),
+  liveReplayCount: vi.fn(),
+  storyFindFirst: vi.fn(),
+  messageFindFirst: vi.fn(),
   sessionFindFirst: vi.fn(),
   userFindUnique: vi.fn(),
 }));
@@ -23,15 +29,23 @@ vi.mock('../lib/prisma.js', () => ({
     liveReplay: {
       findUnique: databaseMocks.liveReplayFindUnique,
       update: databaseMocks.liveReplayUpdate,
+      count: databaseMocks.liveReplayCount,
     },
-    liveBroadcast: { findUnique: databaseMocks.liveBroadcastFindUnique },
+    liveBroadcast: {
+      findUnique: databaseMocks.liveBroadcastFindUnique,
+      updateMany: databaseMocks.liveBroadcastUpdateMany,
+    },
     liveBroadcastComment: { findMany: databaseMocks.liveBroadcastCommentFindMany },
     liveBroadcastReaction: { findMany: databaseMocks.liveBroadcastReactionFindMany },
     block: { findUnique: databaseMocks.blockFindUnique },
     post: {
       findUnique: databaseMocks.postFindUnique,
+      count: databaseMocks.postCount,
       create: databaseMocks.postCreate,
+      delete: databaseMocks.postDelete,
     },
+    story: { findFirst: databaseMocks.storyFindFirst },
+    message: { findFirst: databaseMocks.messageFindFirst },
     session: { findFirst: databaseMocks.sessionFindFirst },
     user: { findUnique: databaseMocks.userFindUnique },
   },
@@ -205,5 +219,73 @@ describe('linked Live replay publishing', () => {
     expect(getLiveSession(liveId)?.comments).toMatchObject([
       { id: comment.id, userId: host.user.id, text: comment.text },
     ]);
+  });
+
+  it('lets only the post owner delete a published replay and removes its file and replay references', async () => {
+    const host = await register('ReplayDeleteHost');
+    const other = await register('ReplayDeleteOther');
+    const stored = await getMediaStorage('test').putAttachment(
+      Buffer.from('published replay'),
+      'video/webm',
+      'webm',
+      host.user.id,
+    );
+    const post = {
+      id: 'published-replay-post',
+      authorId: host.user.id,
+      sourceLiveReplayId: 'live-delete-1',
+      sourceLiveBroadcastId: null,
+    };
+    const replay = {
+      id: 'live-delete-1',
+      hostId: host.user.id,
+      title: 'Town hall',
+      status: 'PUBLISHED',
+      mediaUrl: stored.publicUrl,
+      publishedPostId: post.id as string | null,
+    };
+    const transaction = {
+      post: {
+        findUnique: vi.fn(async () => post),
+        delete: vi.fn(async () => post),
+      },
+      liveReplay: {
+        update: vi.fn(async ({ data }: { data: Partial<typeof replay> }) => {
+          Object.assign(replay, data);
+          return replay;
+        }),
+      },
+      liveBroadcast: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+    };
+    databaseMocks.isDatabaseAvailable.mockResolvedValue(true);
+    databaseMocks.postFindUnique.mockResolvedValue(post);
+    databaseMocks.postCount.mockResolvedValue(0);
+    databaseMocks.liveReplayFindUnique.mockResolvedValue(replay);
+    databaseMocks.liveReplayCount.mockResolvedValue(0);
+    databaseMocks.storyFindFirst.mockResolvedValue(null);
+    databaseMocks.messageFindFirst.mockResolvedValue(null);
+    databaseMocks.userFindUnique.mockImplementation(async ({ where }: { where: { id: string } }) =>
+      where.id === host.user.id ? host.user : where.id === other.user.id ? other.user : null);
+    databaseMocks.liveReplayUpdate.mockImplementation(async ({ data }: { data: Partial<typeof replay> }) => {
+      Object.assign(replay, data);
+      return replay;
+    });
+    databaseMocks.transaction.mockImplementation(async (operation: (client: typeof transaction) => Promise<unknown>) => operation(transaction));
+
+    const denied = await request(app).delete(`/api/posts/${post.id}`).set('Cookie', other.auth);
+    expect(denied.status).toBe(403);
+    expect(await getMediaStorage('test').getMetadata(stored.key)).not.toBeNull();
+
+    const deleted = await request(app).delete(`/api/posts/${post.id}`).set('Cookie', host.auth);
+    expect(deleted.status).toBe(200);
+    expect(await getMediaStorage('test').getMetadata(stored.key)).toBeNull();
+    expect(replay).toMatchObject({ status: 'DELETED', publishedPostId: null });
+    expect(transaction.post.delete).toHaveBeenCalledWith({ where: { id: post.id } });
+    expect(transaction.liveBroadcast.updateMany).toHaveBeenCalledWith({
+      where: { id: replay.id, replayUrl: stored.publicUrl },
+      data: { replayUrl: null, recordingStatus: 'UNAVAILABLE' },
+    });
   });
 });

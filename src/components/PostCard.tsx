@@ -280,13 +280,17 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
   }
 
   const deletePost = async () => {
+    if (busy) return
     if (!window.confirm('Delete this post? This cannot be undone.')) return
+    setBusy(true)
     setError('')
     try {
       await apiRequest(`/api/posts/${post.id}`, { method: 'DELETE' })
       onDeleted?.(post.id)
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : 'Unable to delete this post.')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -306,8 +310,8 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
         </Link>
         <div className="flex items-center gap-1">
           {!isOwnPost ? <button type="button" onClick={() => void toggleFollowAuthor()} disabled={busy} aria-label={authorFollowing ? `Unfollow ${post.author.name}` : `Follow ${post.author.name}`} className="rounded-xl px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-50 disabled:opacity-50">{authorFollowing ? 'Following' : 'Follow'}</button> : null}
-          <button type="button" onClick={() => void (isOwnPost ? deletePost() : reportPost())} aria-label={isOwnPost ? 'Delete post' : 'Report post'} title={isOwnPost ? 'Delete post' : 'Report post'} className="rounded-full p-2 text-slate-500 hover:bg-slate-100">
-            {isOwnPost ? <Trash2 className="h-4 w-4" aria-hidden="true" /> : <ShieldAlert className="h-4 w-4" aria-hidden="true" />}
+          <button type="button" onClick={() => void (isOwnPost ? deletePost() : reportPost())} disabled={isOwnPost && busy} aria-label={isOwnPost ? 'Delete post' : 'Report post'} title={isOwnPost ? 'Delete post' : 'Report post'} className="inline-flex items-center gap-1 rounded-xl px-2 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50">
+            {isOwnPost ? <><Trash2 className="h-4 w-4" aria-hidden="true" /><span>Delete</span></> : <ShieldAlert className="h-4 w-4" aria-hidden="true" />}
           </button>
         </div>
       </div>

@@ -43,7 +43,7 @@ beforeEach(() => {
     if (path === '/api/live') return { lives: [] }
     if (path === '/api/live/replays') return { replays: [replay] }
     if (path === '/api/live/live-1/replay/publish' && options?.method === 'POST') {
-      return { replay: { ...replay, status: 'PUBLISHED' }, post: { id: 'post-1' }, duplicate: false }
+      return { replay: { ...replay, status: 'PUBLISHED', publishedPostId: 'post-1' }, post: { id: 'post-1' }, duplicate: false }
     }
     if (path === '/api/live/live-1/replay' && options?.method === 'DELETE') return { deleted: true }
     throw new Error(`Unexpected API request: ${path}`)

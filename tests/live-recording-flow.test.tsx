@@ -15,8 +15,8 @@ const mocks = vi.hoisted(() => ({
   setCameraEnabled: vi.fn(),
   recordingProvider: 'browser' as 'browser' | 'livekit-egress',
   egressReplayReady: false,
-  cameraTrack: { kind: 'video', mediaStreamTrack: {}, attach: vi.fn(), detach: vi.fn() },
-  microphoneTrack: { kind: 'audio', mediaStreamTrack: {}, attach: vi.fn(), detach: vi.fn() },
+  cameraTrack: { kind: 'video', mediaStreamTrack: {}, attach: vi.fn(), detach: vi.fn(), stop: vi.fn() },
+  microphoneTrack: { kind: 'audio', mediaStreamTrack: {}, attach: vi.fn(), detach: vi.fn(), stop: vi.fn() },
 }))
 
 vi.mock('../src/lib/api', () => ({ apiRequest: mocks.apiRequest, uploadVideo: mocks.uploadVideo }))
@@ -162,6 +162,8 @@ beforeEach(async () => {
   mocks.roomDisconnect.mockReset().mockResolvedValue(undefined)
   mocks.setMicrophoneEnabled.mockReset().mockResolvedValue(undefined)
   mocks.setCameraEnabled.mockReset().mockResolvedValue(undefined)
+  mocks.cameraTrack.stop.mockReset()
+  mocks.microphoneTrack.stop.mockReset()
   mocks.recordingProvider = 'browser'
   mocks.egressReplayReady = false
   TestMediaRecorder.isTypeSupported.mockReset().mockImplementation((candidate) => candidate.includes('webm'))
@@ -188,6 +190,26 @@ afterEach(async () => {
 })
 
 describe('automatic live recording and replay publishing', () => {
+  it('adapts the host video and controls when the device rotates between landscape and portrait', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 900 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 400 })
+    await renderLivePage()
+
+    await act(async () => {
+      clickButton('Start broadcasting')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    const stage = host.querySelector('[aria-label="Live video session"]')
+    expect(stage?.getAttribute('data-orientation')).toBe('landscape')
+    expect(host.querySelector('video.object-contain')).not.toBeNull()
+    expect(host.querySelector('button[aria-label="End broadcast"]')?.parentElement?.className).toContain('bottom-')
+
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 360 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+    await act(async () => { window.dispatchEvent(new Event('resize')) })
+    expect(stage?.getAttribute('data-orientation')).toBe('portrait')
+  })
+
   it('records the broadcast, uploads the final chunk, and automatically publishes the linked Feed replay', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 360 })
     const uploadedContent: string[] = []
@@ -241,6 +263,36 @@ describe('automatic live recording and replay publishing', () => {
     expect(host.textContent).toContain('Your live replay was posted')
     expect(host.querySelector('input[type="file"]')).toBeNull()
     expect(mocks.roomDisconnect).toHaveBeenCalledWith(true)
+  })
+
+  it('disconnects camera and microphone before showing a designed replay upload state', async () => {
+    let resolveUpload: ((upload: { mediaUrl: string; contentType: string }) => void) | undefined
+    mocks.uploadVideo.mockImplementation(() => new Promise((resolve) => { resolveUpload = resolve }))
+    await renderLivePage()
+    await act(async () => {
+      clickButton('Start broadcasting')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    await act(async () => {
+      clickButton('End broadcast')
+      await new Promise((resolve) => setTimeout(resolve, 40))
+    })
+
+    expect(mocks.uploadVideo).toHaveBeenCalledTimes(1)
+    expect(mocks.roomDisconnect).toHaveBeenCalledWith(true)
+    expect(mocks.cameraTrack.stop).toHaveBeenCalled()
+    expect(mocks.microphoneTrack.stop).toHaveBeenCalled()
+    expect(host.querySelector('[aria-label="Finishing live broadcast"]')).not.toBeNull()
+    expect(host.textContent).not.toContain('transferred')
+    expect(host.textContent).not.toContain('MB/s')
+    expect(host.textContent).not.toContain('seconds remaining')
+
+    await act(async () => {
+      resolveUpload?.({ mediaUrl: readyReplay.mediaUrl, contentType: 'video/webm' })
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(host.textContent).toContain('Your live replay was posted')
   })
 
   it('uses server-side Egress without browser capture and publishes the completed server replay', async () => {
