@@ -12,10 +12,13 @@ import { getMediaStorage, uploadedVideoBelongsTo, videoMediaKeyFromUrl } from '.
 import { reviewContentForSafety as reviewPostContentForSafety } from '../lib/moderation.js';
 import { canDeleteLiveReplayMedia, isLiveReplayOwner, isLiveReplayUploadRetry } from '../lib/liveReplayPolicy.js';
 import { realtimeHub } from '../lib/realtime.js';
+import { isLiveKitEgressConfigured, liveKitEgressMissingConfiguration, startLiveKitRoomEgress, stopLiveKitEgress } from '../lib/livekitEgress.js';
+import { randomUUID } from 'node:crypto';
 
 const command2aRouter = Router();
 command2aRouter.use(requireActiveAccountIfAuthenticated);
 const startingLiveIds = new Set<string>();
+const startingRecordingIds = new Set<string>();
 
 const notificationPreferenceSchema = z.object({
   key: z.enum(['social', 'messages', 'security', 'live', 'calls', 'mentions']),
@@ -127,6 +130,7 @@ async function publishLiveFeedPost(live: NonNullable<ReturnType<typeof getLiveSe
           status: live.status,
           recordingStatus: live.recordingStatus,
           replayUrl: live.replayUrl,
+          egressError: live.recordingError ?? null,
           moderators: live.moderators,
           blockedUserIds: live.blockedUserIds,
           mutedUserIds: live.mutedUserIds,
@@ -136,6 +140,7 @@ async function publishLiveFeedPost(live: NonNullable<ReturnType<typeof getLiveSe
           status: live.status,
           recordingStatus: live.recordingStatus,
           replayUrl: live.replayUrl,
+          egressError: live.recordingError ?? null,
           moderators: live.moderators,
           blockedUserIds: live.blockedUserIds,
           mutedUserIds: live.mutedUserIds,
@@ -196,6 +201,7 @@ async function persistLiveSession(live: NonNullable<ReturnType<typeof getLiveSes
       status: live.status,
       recordingStatus: live.recordingStatus,
       replayUrl: live.replayUrl,
+      egressError: live.recordingError ?? null,
       moderators: live.moderators,
       blockedUserIds: live.blockedUserIds,
       mutedUserIds: live.mutedUserIds,
@@ -209,6 +215,7 @@ async function persistLiveSession(live: NonNullable<ReturnType<typeof getLiveSes
       status: live.status,
       recordingStatus: live.recordingStatus,
       replayUrl: live.replayUrl,
+      egressError: live.recordingError ?? null,
       moderators: live.moderators,
       blockedUserIds: live.blockedUserIds,
       mutedUserIds: live.mutedUserIds,
@@ -228,6 +235,7 @@ function liveSessionFromRecord(record: {
   status: string;
   recordingStatus: string;
   replayUrl: string | null;
+  egressError?: string | null;
   moderators: string[];
   blockedUserIds: string[];
   mutedUserIds: string[];
@@ -280,6 +288,7 @@ function liveSessionFromRecord(record: {
     replayUrl: record.replayUrl,
     recordingUrl: record.replayUrl,
     recordingStatus: record.recordingStatus as 'UNAVAILABLE' | 'RECORDING' | 'PROCESSING' | 'READY',
+    recordingError: record.egressError ?? null,
     analyticsHook: null,
     provider: 'livekit' as const,
     providerConfigured: isLiveKitConfigured(),
@@ -375,6 +384,7 @@ function liveForAudience(live: NonNullable<ReturnType<typeof getLiveSession>>, u
   const isManager = canManageLive(live, userId);
   return {
     ...live,
+    recordingError: isManager ? live.recordingError ?? null : null,
     moderators: isManager ? live.moderators : [],
     blockedUserIds: isManager ? live.blockedUserIds : [],
     mutedUserIds: isManager ? live.mutedUserIds : [],
@@ -401,6 +411,8 @@ async function presentLive(live: NonNullable<ReturnType<typeof getLiveSession>>,
     ...liveForAudience(live, userId),
     comments,
     host: host ? { name: host.name, avatar: 'profile' in host ? host.profile?.avatarUrl ?? null : null } : null,
+    egressConfigured: isLiveKitEgressConfigured(),
+    egressMissingConfiguration: canManageLive(live, userId) ? liveKitEgressMissingConfiguration() : [],
   };
 }
 
@@ -988,6 +1000,30 @@ command2aRouter.post('/live/:id/end', requireAuth, async (req, res) => {
     await emitLiveFeedUpdate(live);
     return res.json({ live, message: 'Live session already ended.' });
   }
+  let liveEgressId: string | null = null;
+  let databaseAvailable: boolean;
+  try {
+    databaseAvailable = await isDatabaseAvailable();
+  } catch {
+    return res.status(503).json({ message: 'PostgreSQL is unavailable. The live broadcast could not be safely finalized.' });
+  }
+  if (databaseAvailable) {
+    const egress = await prisma.liveBroadcast.findUnique({
+      where: { id: live.id },
+      select: { egressId: true, egressOutputKey: true },
+    });
+    if (egress?.egressOutputKey && !egress.egressId) {
+      return res.status(503).json({ message: 'LiveKit Egress is still starting. Retry ending the broadcast in a moment.' });
+    }
+    if (egress?.egressId) {
+      liveEgressId = egress.egressId;
+      try {
+        await stopLiveKitEgress(egress.egressId);
+      } catch {
+        return res.status(503).json({ message: 'LiveKit Egress could not stop this recording. The broadcast remains active; retry ending it.' });
+      }
+    }
+  }
   if (isLiveKitConfigured()) {
     try {
       await endLiveKitRoom(liveRoomName(live.id));
@@ -995,14 +1031,14 @@ command2aRouter.post('/live/:id/end', requireAuth, async (req, res) => {
       return res.status(503).json({ message: 'LiveKit could not stop this broadcast. The session remains active; retry ending it.' });
     }
   }
-  if (await isDatabaseAvailable()) {
+  if (databaseAvailable) {
     await prisma.liveBroadcastViewer.deleteMany({ where: { liveId: live.id } });
   }
   const endedLive = {
     ...live,
     status: 'ended' as const,
     recordingStatus: live.recordingStatus === 'RECORDING'
-      ? parsed.data.recordingUnavailable ? 'UNAVAILABLE' as const : 'PROCESSING' as const
+      ? liveEgressId ? 'PROCESSING' as const : parsed.data.recordingUnavailable ? 'UNAVAILABLE' as const : 'PROCESSING' as const
       : live.recordingStatus,
     viewers: [],
     viewerCount: 0,
@@ -1012,6 +1048,7 @@ command2aRouter.post('/live/:id/end', requireAuth, async (req, res) => {
     ...session,
     status: 'ended',
     recordingStatus: endedLive.recordingStatus,
+    recordingError: endedLive.recordingStatus === 'UNAVAILABLE' ? live.recordingError : null,
     viewers: [],
     viewerCount: 0,
   })) ?? endedLive;
@@ -1606,10 +1643,70 @@ command2aRouter.post('/live/:id/recording/start', requireAuth, async (req, res) 
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (live.hostId !== req.user!.id) return res.status(403).json({ message: 'Only the host can start the live recording.' });
   if (live.status !== 'live') return res.status(409).json({ message: 'Recording requires a running live session.' });
-  if (live.recordingStatus === 'RECORDING') return res.json({ live, message: 'Live recording is already active.' });
-  await persistLiveSession({ ...live, recordingStatus: 'RECORDING' });
-  const next = updateLiveSession(live.id, (session) => ({ ...session, recordingStatus: 'RECORDING' }));
-  return res.json({ live: next, providerConfigured: live.providerConfigured });
+  if (live.recordingStatus === 'RECORDING') {
+    const current = await (await isDatabaseAvailable()
+      ? prisma.liveBroadcast.findUnique({ where: { id: live.id }, select: { egressId: true } })
+      : Promise.resolve(null));
+    return res.json({ live, recordingProvider: current?.egressId ? 'livekit-egress' : 'browser' });
+  }
+  if (startingRecordingIds.has(live.id)) return res.status(409).json({ message: 'Live recording is already starting.' });
+  startingRecordingIds.add(live.id);
+  try {
+    if (isLiveKitEgressConfigured()) {
+      let databaseAvailable: boolean;
+      try {
+        databaseAvailable = await isDatabaseAvailable();
+      } catch {
+        return res.status(503).json({ message: 'LiveKit Egress recording requires persistent PostgreSQL storage. Configure DATABASE_URL and apply Prisma migrations.' });
+      }
+      if (!databaseAvailable) {
+        return res.status(503).json({ message: 'LiveKit Egress recording requires persistent PostgreSQL storage. Configure DATABASE_URL and apply Prisma migrations.' });
+      }
+      const outputKey = `live-recordings/${live.id}/${randomUUID()}.mp4`;
+      const claimed = await prisma.liveBroadcast.updateMany({
+        where: { id: live.id, hostId: live.hostId, status: 'live', recordingStatus: { in: ['UNAVAILABLE', 'READY'] } },
+        data: { recordingStatus: 'PROCESSING', egressId: null, egressOutputKey: outputKey, egressError: null },
+      });
+      if (claimed.count !== 1) return res.status(409).json({ message: 'The recording state changed; refresh the live session and retry.' });
+      let egressId: string | null = null;
+      try {
+        const info = await startLiveKitRoomEgress(liveRoomName(live.id), outputKey);
+        egressId = info.egressId;
+        const started = await prisma.liveBroadcast.updateMany({
+          where: { id: live.id, egressOutputKey: outputKey },
+          data: { recordingStatus: 'RECORDING', egressId, egressOutputKey: outputKey, egressError: null },
+        });
+        if (started.count === 0) {
+          const current = await loadLiveSession(live.id);
+          return res.json({ live: current, recordingProvider: 'livekit-egress', egressConfigured: true });
+        }
+      } catch (error) {
+        if (egressId) {
+          try {
+            await stopLiveKitEgress(egressId);
+          } catch {
+            console.error('Unable to stop LiveKit Egress after recording setup failed.');
+          }
+        }
+        const message = error instanceof Error ? error.message : 'LiveKit Egress could not start the recording.';
+        await prisma.liveBroadcast.updateMany({
+          where: { id: live.id, egressOutputKey: outputKey },
+          data: { recordingStatus: 'UNAVAILABLE', egressId: null, egressOutputKey: null, egressError: message },
+        });
+        return res.status(503).json({ message });
+      }
+      const next = updateLiveSession(live.id, (session) => ({ ...session, recordingStatus: 'RECORDING', recordingError: null }));
+      return res.json({ live: next, recordingProvider: 'livekit-egress', egressConfigured: true });
+    }
+
+    const missingConfiguration = liveKitEgressMissingConfiguration();
+    const message = `LiveKit Egress is not configured. Missing: ${missingConfiguration.join(', ')}. Browser recording will be used for this broadcast.`;
+    await persistLiveSession({ ...live, recordingStatus: 'RECORDING', recordingError: message });
+    const next = updateLiveSession(live.id, (session) => ({ ...session, recordingStatus: 'RECORDING', recordingError: message }));
+    return res.json({ live: next, recordingProvider: 'browser', egressConfigured: false, egressUnavailableReason: message });
+  } finally {
+    startingRecordingIds.delete(live.id);
+  }
 });
 
 command2aRouter.post('/live/:id/recording/stop', requireAuth, async (req, res) => {
@@ -1617,6 +1714,29 @@ command2aRouter.post('/live/:id/recording/stop', requireAuth, async (req, res) =
   if (!live) return res.status(404).json({ message: 'Live session not found.' });
   if (!canManageLive(live, req.user!.id)) return res.status(403).json({ message: 'Only the host or a moderator can control recording.' });
   if (live.recordingStatus !== 'RECORDING') return res.status(409).json({ message: 'No recording is active.' });
+  let databaseAvailable: boolean;
+  try {
+    databaseAvailable = await isDatabaseAvailable();
+  } catch {
+    return res.status(503).json({ message: 'PostgreSQL is unavailable. The live recording could not be safely stopped.' });
+  }
+  if (databaseAvailable) {
+    const egress = await prisma.liveBroadcast.findUnique({
+      where: { id: live.id },
+      select: { egressId: true },
+    });
+    if (egress?.egressId) {
+      try {
+        await stopLiveKitEgress(egress.egressId);
+      } catch {
+        return res.status(503).json({ message: 'LiveKit Egress could not stop this recording. Retry the stop request.' });
+      }
+    } else if (isLiveKitEgressConfigured()) {
+      return res.status(503).json({ message: 'The LiveKit Egress identity is not yet persisted. Retry the stop request shortly.' });
+    }
+  } else if (isLiveKitEgressConfigured()) {
+    return res.status(503).json({ message: 'LiveKit Egress recording requires persistent PostgreSQL storage.' });
+  }
   const recordingStatus = live.replayUrl ? 'READY' as const : 'PROCESSING' as const;
   await persistLiveSession({ ...live, recordingStatus });
   const next = updateLiveSession(live.id, (session) => ({ ...session, recordingStatus: session.replayUrl ? 'READY' : 'PROCESSING' }));

@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   roomDisconnect: vi.fn(),
   setMicrophoneEnabled: vi.fn(),
   setCameraEnabled: vi.fn(),
+  recordingProvider: 'browser' as 'browser' | 'livekit-egress',
+  egressReplayReady: false,
   cameraTrack: { kind: 'video', mediaStreamTrack: {}, attach: vi.fn(), detach: vi.fn() },
   microphoneTrack: { kind: 'audio', mediaStreamTrack: {}, attach: vi.fn(), detach: vi.fn() },
 }))
@@ -131,13 +133,22 @@ async function renderLivePage() {
 function setupApi() {
   mocks.apiRequest.mockImplementation(async (path: string) => {
     if (path === '/api/live') return { lives: [live] }
-    if (path === '/api/live/replays') return { replays: [] }
+    if (path === '/api/live/replays') return { replays: mocks.egressReplayReady ? [readyReplay] : [] }
     if (path === '/api/live/live-1/token') return { token: 'host-token', url: 'wss://media.example.test' }
     if (path === '/api/live/live-1/start') return { live: { ...live, status: 'live' } }
-    if (path === '/api/live/live-1/recording/start') return { live: { ...live, status: 'live', recordingStatus: 'RECORDING' } }
+    if (path === '/api/live/live-1/recording/start') return {
+      live: { ...live, status: 'live', recordingStatus: 'RECORDING' },
+      recordingProvider: mocks.recordingProvider,
+      ...(mocks.recordingProvider === 'browser'
+        ? { egressUnavailableReason: 'LiveKit Egress is not configured. Missing: LIVEKIT_EGRESS_S3_BUCKET.' }
+        : {}),
+    }
     if (path === '/api/live/live-1/replay') return { replay: readyReplay, live: { ...live, recordingStatus: 'READY' } }
     if (path === '/api/live/live-1/replay/publish') return { replay: publishedReplay, post: { id: 'post-1' }, duplicate: false }
-    if (path === '/api/live/live-1/end') return { live: { ...live, status: 'ended', recordingStatus: 'READY' } }
+    if (path === '/api/live/live-1/end') {
+      mocks.egressReplayReady = mocks.recordingProvider === 'livekit-egress'
+      return { live: { ...live, status: 'ended', recordingStatus: 'PROCESSING' } }
+    }
     throw new Error(`Unexpected API request: ${path}`)
   })
 }
@@ -151,6 +162,8 @@ beforeEach(async () => {
   mocks.roomDisconnect.mockReset().mockResolvedValue(undefined)
   mocks.setMicrophoneEnabled.mockReset().mockResolvedValue(undefined)
   mocks.setCameraEnabled.mockReset().mockResolvedValue(undefined)
+  mocks.recordingProvider = 'browser'
+  mocks.egressReplayReady = false
   TestMediaRecorder.isTypeSupported.mockReset().mockImplementation((candidate) => candidate.includes('webm'))
   TestMediaRecorder.lastOptions = undefined
   vi.stubGlobal('MediaRecorder', TestMediaRecorder)
@@ -186,13 +199,17 @@ describe('automatic live recording and replay publishing', () => {
     })
 
     await renderLivePage()
-    expect(host.textContent).toContain('LiveKit Egress recording is not configured.')
     await act(async () => {
       clickButton('Start broadcasting')
       await new Promise((resolve) => setTimeout(resolve, 0))
     })
     expect(host.querySelector('[aria-label="0 viewers"] svg')).not.toBeNull()
-    expect(host.textContent).toContain('Browser MediaRecorder replay: recording · LiveKit Egress not configured')
+    expect(host.textContent).toContain('LIVEKIT_EGRESS_S3_BUCKET')
+    expect(host.textContent).not.toContain('Live controls ·')
+    expect(host.textContent).not.toContain('Browser MediaRecorder replay:')
+    expect(host.querySelector('button[aria-label="Mute microphone"]')).not.toBeNull()
+    expect(host.querySelector('button[aria-label="Turn camera off"]')).not.toBeNull()
+    expect(host.querySelector('button[aria-label="Switch camera"]')).not.toBeNull()
     expect(mocks.apiRequest).toHaveBeenCalledWith('/api/live/live-1/recording/start', { method: 'POST' })
     expect(TestMediaRecorder.lastOptions).toMatchObject({ videoBitsPerSecond: 1_500_000, audioBitsPerSecond: 96_000 })
     await act(async () => { mocks.roomHandlers.reconnecting?.() })
@@ -224,6 +241,30 @@ describe('automatic live recording and replay publishing', () => {
     expect(host.textContent).toContain('Your live replay was posted')
     expect(host.querySelector('input[type="file"]')).toBeNull()
     expect(mocks.roomDisconnect).toHaveBeenCalledWith(true)
+  })
+
+  it('uses server-side Egress without browser capture and publishes the completed server replay', async () => {
+    mocks.recordingProvider = 'livekit-egress'
+    await renderLivePage()
+
+    await act(async () => {
+      clickButton('Start broadcasting')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(TestMediaRecorder.lastOptions).toBeUndefined()
+    expect(mocks.uploadVideo).not.toHaveBeenCalled()
+
+    await act(async () => {
+      clickButton('End broadcast')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+
+    expect(mocks.apiRequest).toHaveBeenCalledWith('/api/live/live-1/recording/start', { method: 'POST' })
+    expect(mocks.apiRequest).toHaveBeenCalledWith('/api/live/live-1/replay/publish', {
+      method: 'POST',
+      body: JSON.stringify({ content: readyReplay.title, visibility: 'FOLLOWERS' }),
+    })
+    expect(host.textContent).toContain('Your live replay was posted')
   })
 
   it('resumes publishing after reload when the original upload already completed', async () => {

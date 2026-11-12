@@ -630,6 +630,9 @@ model LiveBroadcast {
   status          String   @default("paused")
   recordingStatus String   @default("UNAVAILABLE")
   replayUrl       String?
+  egressId        String?  @unique
+  egressOutputKey String?
+  egressError     String?
   moderators      String[] @default([])
   blockedUserIds  String[] @default([])
   mutedUserIds    String[] @default([])

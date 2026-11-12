@@ -11,6 +11,14 @@ const runtimeEnvironment = {
 };
 
 const DEVELOPMENT_JWT_SECRET = 'nova-dev-jwt-secret-key-32-chars-plus';
+const optionalEgressString = z.preprocess(
+  (value) => value === '' ? undefined : value,
+  z.string().min(1).refine((value) => value.trim() === value, 'Remove surrounding whitespace.').optional(),
+);
+const optionalLiveKitString = z.preprocess(
+  (value) => value === '' ? undefined : value,
+  z.string().min(1).optional(),
+);
 
 export const envSchema = z.object({
   NODE_ENV: z.preprocess(
@@ -31,9 +39,31 @@ export const envSchema = z.object({
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(900000),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().default(100),
   AUTH_RATE_LIMIT_MAX: z.coerce.number().default(20),
-  LIVEKIT_URL: z.string().min(1).optional(),
-  LIVEKIT_API_KEY: z.string().min(1).optional(),
-  LIVEKIT_API_SECRET: z.string().min(1).optional(),
+  LIVEKIT_URL: optionalLiveKitString,
+  LIVEKIT_API_KEY: optionalLiveKitString,
+  LIVEKIT_API_SECRET: optionalLiveKitString,
+  LIVEKIT_EGRESS_WEBHOOK_URL: z.preprocess(
+    (value) => value === '' ? undefined : value,
+    z.string().url().optional(),
+  ),
+  LIVEKIT_EGRESS_S3_BUCKET: optionalEgressString,
+  LIVEKIT_EGRESS_S3_REGION: optionalEgressString,
+  LIVEKIT_EGRESS_S3_ACCESS_KEY: optionalEgressString,
+  LIVEKIT_EGRESS_S3_SECRET: optionalEgressString,
+  LIVEKIT_EGRESS_S3_ENDPOINT: z.preprocess(
+    (value) => value === '' ? undefined : value,
+    z.string().url().optional(),
+  ),
+  LIVEKIT_EGRESS_S3_FORCE_PATH_STYLE: z.preprocess(
+    (value) => value === '' || value === undefined
+      ? false
+      : value === 'true' || value === true
+        ? true
+        : value === 'false' || value === false
+          ? false
+          : value,
+    z.boolean(),
+  ).default(false),
 }).superRefine((data, ctx) => {
   const hasProductionSecret = Boolean(process.env.JWT_SECRET && process.env.JWT_SECRET.length >= 32);
   const hasProductionDatabaseUrl = Boolean(process.env.DATABASE_URL);
@@ -88,6 +118,23 @@ export const envSchema = z.object({
       path: ['LIVEKIT_API_SECRET'],
       message: 'LIVEKIT_API_SECRET must be a non-empty secret of at least 16 characters without surrounding whitespace.',
     });
+  }
+  if (data.LIVEKIT_EGRESS_S3_ENDPOINT && !['https:', 'http:'].includes(new URL(data.LIVEKIT_EGRESS_S3_ENDPOINT).protocol)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['LIVEKIT_EGRESS_S3_ENDPOINT'],
+      message: 'LIVEKIT_EGRESS_S3_ENDPOINT must use http:// or https://.',
+    });
+  }
+  if (data.LIVEKIT_EGRESS_WEBHOOK_URL) {
+    const webhookProtocol = new URL(data.LIVEKIT_EGRESS_WEBHOOK_URL).protocol;
+    if (!['https:', 'http:'].includes(webhookProtocol) || (data.NODE_ENV === 'production' && webhookProtocol !== 'https:')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['LIVEKIT_EGRESS_WEBHOOK_URL'],
+        message: 'LIVEKIT_EGRESS_WEBHOOK_URL must use HTTPS in production and HTTP or HTTPS otherwise.',
+      });
+    }
   }
 
   if (data.NODE_ENV === 'production') {

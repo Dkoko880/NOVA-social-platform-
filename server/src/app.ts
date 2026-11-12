@@ -19,6 +19,7 @@ import { mediaRouter } from './routes/media.js';
 import { paymentsRouter } from './routes/payments.js';
 import { socialRouter } from './routes/social.js';
 import { subscriptionRouter } from './routes/subscriptions.js';
+import { receiveLiveKitWebhook } from './routes/livekitWebhook.js';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -38,6 +39,7 @@ const connectSources = [
 ];
 
 app.use(cfRayDiagnostic);
+app.use('/api/livekit/webhook', express.raw({ type: '*/*', limit: '1mb' }));
 app.use(helmet({
   crossOriginResourcePolicy: false,
   contentSecurityPolicy: {
@@ -95,6 +97,7 @@ const authRateLimiter = rateLimit({
 });
 
 app.use('/api', apiRateLimiter);
+app.post('/api/livekit/webhook', receiveLiveKitWebhook);
 app.use('/api/auth', authRateLimiter);
 app.use('/health', healthRouter);
 app.use('/api/health', healthRouter);

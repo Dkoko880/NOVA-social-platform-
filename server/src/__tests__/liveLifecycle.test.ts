@@ -5,6 +5,10 @@ const liveKitMocks = vi.hoisted(() => ({
   endLiveKitRoom: vi.fn(),
   getLiveKitParticipants: vi.fn(),
   isLiveKitConfigured: vi.fn(),
+  isLiveKitEgressConfigured: vi.fn(),
+  liveKitEgressMissingConfiguration: vi.fn(),
+  startLiveKitRoomEgress: vi.fn(),
+  stopLiveKitEgress: vi.fn(),
 }));
 
 vi.mock('../lib/livekit.js', async (importOriginal) => {
@@ -14,6 +18,17 @@ vi.mock('../lib/livekit.js', async (importOriginal) => {
     endLiveKitRoom: liveKitMocks.endLiveKitRoom,
     getLiveKitParticipants: liveKitMocks.getLiveKitParticipants,
     isLiveKitConfigured: liveKitMocks.isLiveKitConfigured,
+  };
+});
+
+vi.mock('../lib/livekitEgress.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/livekitEgress.js')>();
+  return {
+    ...actual,
+    isLiveKitEgressConfigured: liveKitMocks.isLiveKitEgressConfigured,
+    liveKitEgressMissingConfiguration: liveKitMocks.liveKitEgressMissingConfiguration,
+    startLiveKitRoomEgress: liveKitMocks.startLiveKitRoomEgress,
+    stopLiveKitEgress: liveKitMocks.stopLiveKitEgress,
   };
 });
 
@@ -45,6 +60,10 @@ describe('live broadcast lifecycle', () => {
     liveKitMocks.endLiveKitRoom.mockReset().mockResolvedValue(undefined);
     liveKitMocks.getLiveKitParticipants.mockReset();
     liveKitMocks.isLiveKitConfigured.mockReset().mockReturnValue(true);
+    liveKitMocks.isLiveKitEgressConfigured.mockReset().mockReturnValue(false);
+    liveKitMocks.liveKitEgressMissingConfiguration.mockReset().mockReturnValue(['LIVEKIT_EGRESS_S3_BUCKET']);
+    liveKitMocks.startLiveKitRoomEgress.mockReset();
+    liveKitMocks.stopLiveKitEgress.mockReset();
   });
 
   it('publishes one linked Feed post when the broadcast starts, including on repeated start requests', async () => {
@@ -171,13 +190,28 @@ describe('live broadcast lifecycle', () => {
     const liveId = created.body.live.id as string;
     updateLiveSession(liveId, (live) => ({ ...live, status: 'live' }));
 
+    liveKitMocks.isLiveKitEgressConfigured.mockReturnValue(true);
     expect((await request(app).post(`/api/live/${liveId}/recording/start`).set('Cookie', other.auth)).status).toBe(403);
+    expect(liveKitMocks.startLiveKitRoomEgress).not.toHaveBeenCalled();
+    liveKitMocks.isLiveKitEgressConfigured.mockReturnValue(false);
     const started = await request(app).post(`/api/live/${liveId}/recording/start`).set('Cookie', host.auth);
     const repeated = await request(app).post(`/api/live/${liveId}/recording/start`).set('Cookie', host.auth);
 
     expect(started.status).toBe(200);
     expect(repeated.status).toBe(200);
     expect(repeated.body.live.recordingStatus).toBe('RECORDING');
+    expect(started.body.recordingProvider).toBe('browser');
+    expect(started.body.egressUnavailableReason).toContain('LIVEKIT_EGRESS_S3_BUCKET');
+  });
+
+  it('rejects unsigned LiveKit webhooks before processing Egress status', async () => {
+    const response = await request(app)
+      .post('/api/livekit/webhook')
+      .set('Content-Type', 'application/webhook+json')
+      .send('{"event":"egress_ended"}');
+
+    expect(response.status).toBe(401);
+    expect(response.body.message).toContain('signature is invalid');
   });
 
   it('marks a failed local finalization as unavailable instead of reporting a saved replay', async () => {

@@ -28,6 +28,9 @@ type LiveSession = {
   guests: Array<{ userId: string; role: 'GUEST' | 'COHOST'; status: 'REQUESTED' | 'LIVE' | 'REMOVED'; requestedAt: string; admittedAt?: string }>
   provider?: string
   providerConfigured: boolean
+  egressConfigured?: boolean
+  egressMissingConfiguration?: string[]
+  recordingError?: string | null
   comments: LiveComment[]
   host?: { name: string; avatar?: string | null } | null
 }
@@ -120,6 +123,7 @@ export function LivePage() {
   const livesRef = useRef<LiveSession[]>([])
   const intentionalDisconnectRef = useRef(new WeakSet<Room>())
   const recorderRef = useRef<MediaRecorder | null>(null)
+  const recordingProviderRef = useRef<'browser' | 'livekit-egress' | null>(null)
   const recordingChunksRef = useRef<Blob[]>([])
   const recordingStartedAtRef = useRef(0)
   const pendingRecordingRef = useRef<PendingLiveRecording | null>(null)
@@ -315,6 +319,38 @@ export function LivePage() {
     }
   }, [savePendingRecording, userId])
 
+  const publishEgressReplayWhenReady = useCallback(async (live: LiveSession) => {
+    setRecordingPhase('FINALIZING')
+    try {
+      for (let attempt = 0; attempt < 45; attempt += 1) {
+        const { replays: savedReplays } = await apiRequest<{ replays: LiveReplay[] }>('/api/live/replays')
+        const replay = savedReplays.find((entry) => entry.id === live.id && ['READY', 'PUBLISHED'].includes(entry.status))
+        if (replay) {
+          const visibility = live.visibility === 'private' ? 'PRIVATE' : live.visibility === 'followers' ? 'FOLLOWERS' : 'PUBLIC'
+          const published = await apiRequest<{ replay: LiveReplay }>(`/api/live/${encodeURIComponent(live.id)}/replay/publish`, {
+            method: 'POST',
+            body: JSON.stringify({ content: replay.title, visibility }),
+          })
+          setReplays((current) => [published.replay, ...current.filter((entry) => entry.id !== published.replay.id)])
+          setReplayChoice(published.replay)
+          setRecordingPhase('PUBLISHED')
+          setRecordingError('')
+          return
+        }
+        const response = await apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}`)
+        setLiveState(response.live)
+        if (response.live.recordingStatus === 'UNAVAILABLE') {
+          throw new Error(response.live.recordingError || 'LiveKit Egress could not finalize this recording.')
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 2000))
+      }
+      throw new Error('LiveKit Egress is still processing the replay. Refresh Live sessions to check again.')
+    } catch (egressError) {
+      setRecordingPhase('FAILED')
+      setRecordingError(egressError instanceof Error ? egressError.message : 'LiveKit Egress could not publish the replay.')
+    }
+  }, [setLiveState])
+
   const clearRoom = useCallback(async (room: Room) => {
     intentionalDisconnectRef.current.add(room)
     if (hostRoomRef.current === room && recorderRef.current) {
@@ -412,7 +448,10 @@ export function LivePage() {
         void recordingPromise.then(() => apiRequest(cleanupPath, {
           method: 'POST',
           ...(hostLive ? {
-            body: JSON.stringify({ recordingUnavailable: pendingRecordingRef.current?.liveId !== hostLive.id }),
+            body: JSON.stringify({
+              recordingUnavailable: recordingProviderRef.current !== 'livekit-egress'
+                && pendingRecordingRef.current?.liveId !== hostLive.id,
+            }),
           } : {}),
         }))
           .catch((cleanupError: unknown) => console.error('Unable to close live media while leaving the live page.', cleanupError))
@@ -496,9 +535,18 @@ export function LivePage() {
               : Promise.resolve(null)
             void recordingPromise.then(() => apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/end`, {
               method: 'POST',
-              body: JSON.stringify({ recordingUnavailable: wasHost && pendingRecordingRef.current?.liveId !== live.id }),
+              body: JSON.stringify({
+                recordingUnavailable: wasHost
+                  && recordingProviderRef.current !== 'livekit-egress'
+                  && pendingRecordingRef.current?.liveId !== live.id,
+              }),
             }))
-              .then(({ live: ended }) => setLiveState(ended))
+              .then(({ live: ended }) => {
+                setLiveState(ended)
+                if (wasHost && recordingProviderRef.current === 'livekit-egress') {
+                  void publishEgressReplayWhenReady(ended)
+                }
+              })
               .catch((disconnectError) => setError(disconnectError instanceof Error ? disconnectError.message : 'Unable to close the disconnected broadcast.'))
           }
         }
@@ -516,7 +564,20 @@ export function LivePage() {
       setHostMuted(false)
       setHostCameraOn(true)
       setRecordingError('')
+      recordingProviderRef.current = null
       try {
+        const recording = await apiRequest<{
+          recordingProvider?: 'browser' | 'livekit-egress'
+          egressUnavailableReason?: string
+        }>(`/api/live/${encodeURIComponent(live.id)}/recording/start`, { method: 'POST' })
+        const provider = recording.recordingProvider ?? 'browser'
+        recordingProviderRef.current = provider
+        if (provider === 'livekit-egress') {
+          setRecordingPhase('RECORDING')
+          setRecordingError('')
+          return
+        }
+        if (recording.egressUnavailableReason) setRecordingError(recording.egressUnavailableReason)
         const videoTrack = room.localParticipant.getTrackPublication(cameraTrackSource)?.track
         const audioTrack = room.localParticipant.getTrackPublication(microphoneTrackSource)?.track
         if (!videoTrack || !audioTrack || typeof MediaRecorder === 'undefined') throw new Error('This browser cannot record the live camera and microphone stream.')
@@ -528,9 +589,8 @@ export function LivePage() {
         recordingChunksRef.current = []
         recordingStartedAtRef.current = Date.now()
         recorder.ondataavailable = (event) => { if (event.data.size > 0) recordingChunksRef.current.push(event.data) }
-        recorderRef.current = recorder
         recorder.start(1000)
-        await apiRequest(`/api/live/${encodeURIComponent(live.id)}/recording/start`, { method: 'POST' })
+        recorderRef.current = recorder
         setRecordingPhase('RECORDING')
       } catch (recordError) {
         if (recorderRef.current) {
@@ -569,23 +629,28 @@ export function LivePage() {
     endInFlightRef.current = true
     setBusy(true)
     setError('')
-    setRecordingError('')
     let savedReplay: LiveReplay | null = null
-    try {
-      if (recorderRef.current || pendingRecordingRef.current?.liveId === live.id) {
-        savedReplay = await finalizeAndPublishRecording(live.id)
-      } else {
-        setRecordingPhase('UNAVAILABLE')
-        setRecordingError(recordingError || 'No replay recording was available from this device.')
+    const usesEgress = recordingProviderRef.current === 'livekit-egress'
+    if (usesEgress || !recordingError.startsWith('LiveKit Egress is not configured.')) setRecordingError('')
+    if (usesEgress) {
+      setRecordingPhase('FINALIZING')
+    } else {
+      try {
+        if (recorderRef.current || pendingRecordingRef.current?.liveId === live.id) {
+          savedReplay = await finalizeAndPublishRecording(live.id)
+        } else {
+          setRecordingPhase('UNAVAILABLE')
+          setRecordingError(recordingError || 'No replay recording was available from this device.')
+        }
+      } catch (recordError) {
+        setRecordingError(recordError instanceof Error ? recordError.message : 'The live replay could not be finalized or stored.')
+        if (pendingRecordingRef.current?.liveId === live.id) setRecordingRetryLiveId(live.id)
+      } finally {
+        recorderRef.current = null
       }
-    } catch (recordError) {
-      setRecordingError(recordError instanceof Error ? recordError.message : 'The live replay could not be finalized or stored.')
-      if (pendingRecordingRef.current?.liveId === live.id) setRecordingRetryLiveId(live.id)
-    } finally {
-      recorderRef.current = null
     }
     try {
-      const recordingUnavailable = live.recordingStatus === 'RECORDING'
+      const recordingUnavailable = !usesEgress && live.recordingStatus === 'RECORDING'
         && !savedReplay
         && pendingRecordingRef.current?.liveId !== live.id
       const response = await apiRequest<{ live: LiveSession; persistenceWarning?: boolean }>(`/api/live/${encodeURIComponent(live.id)}/end`, {
@@ -598,6 +663,7 @@ export function LivePage() {
       }
       if (hostRoomRef.current) await clearRoom(hostRoomRef.current)
       if (savedReplay) setReplayChoice(savedReplay)
+      if (usesEgress) void publishEgressReplayWhenReady(live)
     } catch (endError) {
       setError(endError instanceof Error ? endError.message : 'Unable to end this live session.')
     } finally {
@@ -1065,8 +1131,8 @@ export function LivePage() {
 
       {error ? <p className="absolute left-3 right-3 top-[max(5rem,calc(env(safe-area-inset-top)+4.5rem))] mx-auto max-w-xl rounded-xl bg-black/75 p-3 text-center text-sm text-white" role="alert">{error}</p> : null}
       {!isHost && approvedGuest && !guestRoom ? <button type="button" onClick={() => void joinGuestStage(activeLive)} disabled={busy} className="absolute left-3 top-[max(5rem,calc(env(safe-area-inset-top)+4.5rem))] min-h-11 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">Join the stage</button> : null}
-      {canModerate ? <details aria-label="Live moderation controls" className="absolute right-3 top-[max(5rem,calc(env(safe-area-inset-top)+4.5rem))] max-h-[45dvh] w-72 max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-xl bg-black/80 text-xs text-white ring-1 ring-white/20">
-        <summary className="min-h-11 cursor-pointer list-none px-3 py-3 font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-white">Live controls · {activeLive.guests.filter((guest) => guest.status === 'REQUESTED').length} requests · {activeLive.viewerCount} viewers</summary>
+      {canModerate ? <details aria-label="Live moderation controls" className="absolute right-3 top-[max(5rem,calc(env(safe-area-inset-top)+4.5rem))] max-h-[45dvh] w-fit max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-xl bg-black/80 text-xs text-white ring-1 ring-white/20 open:w-72">
+        <summary className="flex min-h-11 w-11 cursor-pointer list-none items-center justify-center rounded-full bg-black/55 font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-white" aria-label="Manage guests and viewers" title="Manage guests and viewers"><Users className="h-4 w-4" aria-hidden="true" /><span className="sr-only">Manage guests and viewers</span></summary>
         <div className="max-h-[calc(45dvh-3rem)] space-y-3 overflow-y-auto overscroll-contain px-3 pb-3">
         <div><h2 className="font-semibold">Guest requests</h2>
           {activeLive.guests.filter((guest) => guest.status !== 'REMOVED').map((guest) => <div key={guest.userId} className="mt-2 flex items-center justify-between gap-2">
@@ -1088,9 +1154,12 @@ export function LivePage() {
         </div>
       </details> : null}
       {!isHost && (needsAudioPlayback || needsVideoPlayback) ? <button type="button" onClick={() => void enablePlayback()} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white px-5 py-3 font-semibold text-slate-900 shadow-lg"><Volume2 className="mr-2 inline h-5 w-5" aria-hidden="true" />Tap to enable sound</button> : null}
-      {isHost && recordingPhase !== 'IDLE' ? <p className="absolute bottom-36 left-3 right-3 mx-auto max-w-lg rounded-xl bg-black/75 p-2 text-center text-xs text-white" role="status">Browser MediaRecorder replay: {recordingPhase.toLowerCase()} · LiveKit Egress not configured</p> : null}
       {isHost && recordingPhase === 'UPLOADING' ? <p className="absolute bottom-24 left-3 right-3 mx-auto max-w-lg rounded-xl bg-black/80 p-3 text-center text-xs text-white" role="status">{describeUploadProgress(recordingUploadDetails, recordingUploadProgress)}</p> : null}
-      {recordingError && isHost ? <p className="absolute bottom-24 left-3 right-3 mx-auto max-w-lg rounded-xl bg-amber-950/90 p-3 text-center text-xs text-amber-50" role="status">{recordingError}</p> : null}
+      {recordingError && isHost
+        ? recordingError.startsWith('LiveKit Egress is not configured.')
+          ? <p className="sr-only" role="status">{recordingError}</p>
+          : <p className="absolute bottom-24 left-3 right-3 mx-auto max-w-lg rounded-xl bg-amber-950/90 p-3 text-center text-xs text-amber-50" role="status">{recordingError}</p>
+        : null}
       {shareNotice ? <p className="absolute bottom-36 left-3 right-3 text-center text-sm text-white" role="status">{shareNotice}</p> : null}
 
       {!isHost ? <div className="absolute inset-x-0 bottom-0 flex max-h-[40dvh] flex-col bg-gradient-to-t from-black/85 to-transparent px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-12 sm:px-6">
@@ -1111,7 +1180,7 @@ export function LivePage() {
         <h2 className="mt-2 text-2xl font-semibold text-slate-900">Live sessions</h2>
       </header>
 
-      <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900" role="status">Live video uses LiveKit when configured and browser peer connections otherwise. Replays are recorded by browser MediaRecorder and saved locally before upload; LiveKit Egress recording is not configured.</div>
+      <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900" role="status">Server-side LiveKit Egress recordings use S3-compatible temporary storage and the existing owner-scoped replay store. If Egress configuration is incomplete, the host sees the exact missing settings and browser recording is used for that session. Configured Egress failures are surfaced and never marked as saved.</div>
       {error ? <p className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p> : null}
       {recordingPhase === 'UPLOADING' || recordingPhase === 'PROCESSING' || recordingPhase === 'FINALIZING' ? <p className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900" role="status">{recordingPhase === 'UPLOADING' ? describeUploadProgress(recordingUploadDetails, recordingUploadProgress) : recordingPhase === 'PROCESSING' ? 'Publishing the uploaded replay to Feed…' : 'Finalizing the replay…'}</p> : null}
       {recordingError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status"><p>{recordingError}</p>{recordingRetryLiveId ? <Button variant="secondary" size="sm" className="mt-2" onClick={() => void retrySaveRecording()} disabled={recordingRetryBusy}>{recordingRetryBusy ? recordingUploadProgress === null ? 'Saving replay…' : `Uploading replay ${recordingUploadProgress}%…` : 'Retry upload and publish'}</Button> : null}</div> : null}

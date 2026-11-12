@@ -100,6 +100,7 @@ export type LiveSession = {
   replayUrl?: string | null;
   recordingUrl?: string | null;
   recordingStatus: 'UNAVAILABLE' | 'RECORDING' | 'PROCESSING' | 'READY';
+  recordingError?: string | null;
   analyticsHook: string | null;
   provider: 'livekit';
   providerConfigured: boolean;
@@ -470,6 +471,7 @@ export function createLiveSession(hostId: string, input: { title: string; descri
     replayUrl: null,
     recordingUrl: null,
     recordingStatus: 'UNAVAILABLE',
+    recordingError: null,
     analyticsHook: null,
     provider: 'livekit',
     providerConfigured: isLiveKitConfigured(),
