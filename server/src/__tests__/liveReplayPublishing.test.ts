@@ -7,6 +7,7 @@ const databaseMocks = vi.hoisted(() => ({
   liveReplayFindUnique: vi.fn(),
   liveReplayUpdate: vi.fn(),
   liveBroadcastFindUnique: vi.fn(),
+  liveBroadcastFindFirst: vi.fn(),
   liveBroadcastCommentFindMany: vi.fn(),
   liveBroadcastReactionFindMany: vi.fn(),
   blockFindUnique: vi.fn(),
@@ -20,6 +21,12 @@ const databaseMocks = vi.hoisted(() => ({
   messageFindFirst: vi.fn(),
   sessionFindFirst: vi.fn(),
   userFindUnique: vi.fn(),
+  profileFindFirst: vi.fn(),
+}));
+
+const egressMocks = vi.hoisted(() => ({
+  deleteFile: vi.fn(),
+  stop: vi.fn(),
 }));
 
 vi.mock('../lib/prisma.js', () => ({
@@ -33,6 +40,7 @@ vi.mock('../lib/prisma.js', () => ({
     },
     liveBroadcast: {
       findUnique: databaseMocks.liveBroadcastFindUnique,
+      findFirst: databaseMocks.liveBroadcastFindFirst,
       updateMany: databaseMocks.liveBroadcastUpdateMany,
     },
     liveBroadcastComment: { findMany: databaseMocks.liveBroadcastCommentFindMany },
@@ -46,10 +54,20 @@ vi.mock('../lib/prisma.js', () => ({
     },
     story: { findFirst: databaseMocks.storyFindFirst },
     message: { findFirst: databaseMocks.messageFindFirst },
+    profile: { findFirst: databaseMocks.profileFindFirst },
     session: { findFirst: databaseMocks.sessionFindFirst },
     user: { findUnique: databaseMocks.userFindUnique },
   },
 }));
+
+vi.mock('../lib/livekitEgress.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/livekitEgress.js')>();
+  return {
+    ...actual,
+    deleteLiveKitEgressFile: egressMocks.deleteFile,
+    stopLiveKitEgress: egressMocks.stop,
+  };
+});
 
 import { app } from '../app.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
@@ -233,8 +251,8 @@ describe('linked Live replay publishing', () => {
     const post = {
       id: 'published-replay-post',
       authorId: host.user.id,
-      sourceLiveReplayId: 'live-delete-1',
-      sourceLiveBroadcastId: null,
+      sourceLiveReplayId: null,
+      sourceLiveBroadcastId: 'live-delete-1',
     };
     const replay = {
       id: 'live-delete-1',
@@ -243,29 +261,49 @@ describe('linked Live replay publishing', () => {
       status: 'PUBLISHED',
       mediaUrl: stored.publicUrl,
       publishedPostId: post.id as string | null,
+      deletedPostId: null as string | null,
+    };
+    let postExists = true;
+    const broadcast = {
+      replayUrl: stored.publicUrl as string | null,
+      egressId: 'egress-delete-test' as string | null,
+      egressOutputKey: 'live-recordings/live-delete-1/recording.mp4' as string | null,
+      recordingStatus: 'READY',
     };
     const transaction = {
       post: {
-        findUnique: vi.fn(async () => post),
-        delete: vi.fn(async () => post),
+        findUnique: vi.fn(async () => postExists ? post : null),
+        delete: vi.fn(async () => {
+          postExists = false;
+          return post;
+        }),
       },
       liveReplay: {
+        findUnique: vi.fn(async () => replay),
         update: vi.fn(async ({ data }: { data: Partial<typeof replay> }) => {
           Object.assign(replay, data);
           return replay;
         }),
       },
       liveBroadcast: {
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        updateMany: vi.fn(async ({ data }: { data: Partial<typeof broadcast> }) => {
+          Object.assign(broadcast, data);
+          return { count: 1 };
+        }),
       },
     };
     databaseMocks.isDatabaseAvailable.mockResolvedValue(true);
-    databaseMocks.postFindUnique.mockResolvedValue(post);
+    databaseMocks.postFindUnique.mockImplementation(async () => postExists ? post : null);
     databaseMocks.postCount.mockResolvedValue(0);
-    databaseMocks.liveReplayFindUnique.mockResolvedValue(replay);
+    databaseMocks.liveReplayFindUnique.mockImplementation(async ({ where }: { where: { id?: string; publishedPostId?: string; deletedPostId?: string } }) =>
+      where.deletedPostId === post.id && replay.deletedPostId === post.id ? replay
+        : where.id === replay.id || where.publishedPostId === post.id ? replay : null);
     databaseMocks.liveReplayCount.mockResolvedValue(0);
     databaseMocks.storyFindFirst.mockResolvedValue(null);
     databaseMocks.messageFindFirst.mockResolvedValue(null);
+    databaseMocks.profileFindFirst.mockResolvedValue(null);
+    databaseMocks.liveBroadcastFindFirst.mockResolvedValue(null);
+    databaseMocks.liveBroadcastFindUnique.mockImplementation(async () => broadcast);
     databaseMocks.userFindUnique.mockImplementation(async ({ where }: { where: { id: string } }) =>
       where.id === host.user.id ? host.user : where.id === other.user.id ? other.user : null);
     databaseMocks.liveReplayUpdate.mockImplementation(async ({ data }: { data: Partial<typeof replay> }) => {
@@ -281,11 +319,100 @@ describe('linked Live replay publishing', () => {
     const deleted = await request(app).delete(`/api/posts/${post.id}`).set('Cookie', host.auth);
     expect(deleted.status).toBe(200);
     expect(await getMediaStorage('test').getMetadata(stored.key)).toBeNull();
-    expect(replay).toMatchObject({ status: 'DELETED', publishedPostId: null });
+    expect(await getMediaStorage('test').get(stored.key)).toBeNull();
+    expect(replay).toMatchObject({ status: 'DELETED', publishedPostId: null, deletedPostId: post.id });
+    expect(deleted.body).toMatchObject({ mediaDeleted: true, sharedMediaPreserved: false });
     expect(transaction.post.delete).toHaveBeenCalledWith({ where: { id: post.id } });
     expect(transaction.liveBroadcast.updateMany).toHaveBeenCalledWith({
-      where: { id: replay.id, replayUrl: stored.publicUrl },
+      where: { id: post.sourceLiveBroadcastId, replayUrl: stored.publicUrl },
       data: { replayUrl: null, recordingStatus: 'UNAVAILABLE' },
     });
+    expect(egressMocks.stop).toHaveBeenCalledWith('egress-delete-test');
+    expect(egressMocks.deleteFile).toHaveBeenCalledWith('live-recordings/live-delete-1/recording.mp4');
+    expect(broadcast).toMatchObject({ replayUrl: null, egressId: null, egressOutputKey: null });
+
+    const retry = await request(app).delete(`/api/posts/${post.id}`).set('Cookie', host.auth);
+    expect(retry.status).toBe(200);
+    expect(retry.body).toMatchObject({ alreadyDeleted: true });
+    expect(transaction.post.delete).toHaveBeenCalledTimes(1);
+    expect(await getMediaStorage('test').get(stored.key)).toBeNull();
+  });
+
+  it('preserves replay bytes still referenced by another Feed post', async () => {
+    const host = await register('ReplaySharedMediaOwner');
+    const stored = await getMediaStorage('test').putAttachment(
+      Buffer.from('shared replay'),
+      'video/webm',
+      'webm',
+      host.user.id,
+    );
+    const post = {
+      id: 'shared-replay-post',
+      authorId: host.user.id,
+      sourceLiveReplayId: null,
+      sourceLiveBroadcastId: 'live-shared-1',
+    };
+    const replay = {
+      id: 'live-shared-1',
+      hostId: host.user.id,
+      title: 'Shared replay',
+      status: 'PUBLISHED',
+      mediaUrl: stored.publicUrl,
+      publishedPostId: post.id as string | null,
+      deletedPostId: null as string | null,
+    };
+    const broadcast = {
+      replayUrl: stored.publicUrl as string | null,
+      egressId: null as string | null,
+      egressOutputKey: null as string | null,
+      recordingStatus: 'READY',
+    };
+    let postExists = true;
+    const transaction = {
+      post: {
+        findUnique: vi.fn(async () => postExists ? post : null),
+        delete: vi.fn(async () => {
+          postExists = false;
+          return post;
+        }),
+      },
+      liveReplay: {
+        findUnique: vi.fn(async () => replay),
+        update: vi.fn(async ({ data }: { data: Partial<typeof replay> }) => {
+          Object.assign(replay, data);
+          return replay;
+        }),
+      },
+      liveBroadcast: {
+        updateMany: vi.fn(async ({ data }: { data: Partial<typeof broadcast> }) => {
+          Object.assign(broadcast, data);
+          return { count: 1 };
+        }),
+      },
+    };
+    databaseMocks.isDatabaseAvailable.mockResolvedValue(true);
+    databaseMocks.postFindUnique.mockImplementation(async () => postExists ? post : null);
+    databaseMocks.postCount.mockResolvedValue(1);
+    databaseMocks.liveReplayFindUnique.mockImplementation(async ({ where }: { where: { id?: string; publishedPostId?: string; deletedPostId?: string } }) =>
+      where.deletedPostId === post.id && replay.deletedPostId === post.id ? replay
+        : where.id === replay.id || where.publishedPostId === post.id ? replay : null);
+    databaseMocks.liveReplayCount.mockResolvedValue(0);
+    databaseMocks.storyFindFirst.mockResolvedValue(null);
+    databaseMocks.messageFindFirst.mockResolvedValue(null);
+    databaseMocks.profileFindFirst.mockResolvedValue(null);
+    databaseMocks.liveBroadcastFindFirst.mockResolvedValue(null);
+    databaseMocks.liveBroadcastFindUnique.mockImplementation(async () => broadcast);
+    databaseMocks.liveReplayUpdate.mockImplementation(async ({ data }: { data: Partial<typeof replay> }) => {
+      Object.assign(replay, data);
+      return replay;
+    });
+    databaseMocks.transaction.mockImplementation(async (operation: (client: typeof transaction) => Promise<unknown>) => operation(transaction));
+
+    const deleted = await request(app).delete(`/api/posts/${post.id}`).set('Cookie', host.auth);
+
+    expect(deleted.status).toBe(200);
+    expect(deleted.body).toMatchObject({ mediaDeleted: false, sharedMediaPreserved: true });
+    expect(await getMediaStorage('test').get(stored.key)).not.toBeNull();
+    expect(transaction.post.delete).toHaveBeenCalledWith({ where: { id: post.id } });
   });
 });

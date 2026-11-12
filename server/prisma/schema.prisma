@@ -611,6 +611,7 @@ model LiveReplay {
   durationSeconds Int
   status          String   @default("READY")
   publishedPostId String?  @unique
+  deletedPostId   String?  @unique
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 

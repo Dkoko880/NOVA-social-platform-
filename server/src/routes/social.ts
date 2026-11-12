@@ -9,6 +9,7 @@ import { getLiveSession, isNotificationEnabled, updateLiveSession } from '../lib
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
 import { getMediaStorage, imageFileMediaKeyFromUrl, mediaKeyFromUrl, uploadedMediaBelongsTo, uploadedVideoBelongsTo, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
 import { canDeleteLiveReplayMedia } from '../lib/liveReplayPolicy.js';
+import { deleteLiveKitEgressFile, stopLiveKitEgress } from '../lib/livekitEgress.js';
 import { decryptPrivateAddress, encryptPrivateAddress } from '../lib/privateProfile.js';
 
 function isSafeMediaUrl(value: string) {
@@ -1191,6 +1192,13 @@ socialRouter.delete('/posts/:id', requireAuth, async (req, res) => {
     });
 
     if (!post) {
+      const deletedReplay = await prisma.liveReplay.findUnique({
+        where: { deletedPostId: postId },
+        select: { hostId: true, status: true },
+      });
+      if (deletedReplay?.hostId === userId && deletedReplay.status === 'DELETED') {
+        return res.json({ message: 'Post already deleted.', alreadyDeleted: true });
+      }
       return res.status(404).json({ message: 'Post not found.' });
     }
 
@@ -1198,64 +1206,195 @@ socialRouter.delete('/posts/:id', requireAuth, async (req, res) => {
     if (post.authorId !== userId && !isAdmin) {
       return res.status(403).json({ message: 'You may only delete your own posts.' });
     }
-    if (post.sourceLiveBroadcastId && !isAdmin) {
-      return res.status(409).json({ message: 'Live broadcast posts stay in the Feed so the session and replay remain linked.' });
-    }
 
-    if (post.sourceLiveReplayId) {
-      const replay = await prisma.liveReplay.findUnique({ where: { id: post.sourceLiveReplayId } });
+    const replay = post.sourceLiveReplayId
+      ? await prisma.liveReplay.findUnique({ where: { id: post.sourceLiveReplayId } })
+      : post.sourceLiveBroadcastId
+        ? await prisma.liveReplay.findUnique({ where: { publishedPostId: postId } })
+        : null;
+
+    if (replay) {
+      if (post.authorId !== userId || replay.hostId !== userId) {
+        return res.status(403).json({ message: 'Only the live replay owner can delete this replay.' });
+      }
       if (!replay || replay.hostId !== post.authorId
-        || replay.publishedPostId && replay.publishedPostId !== postId
-        || !['READY', 'PUBLISHED', 'DELETING', 'DELETED'].includes(replay.status)) {
+        || replay.publishedPostId !== postId
+        || !['PUBLISHED', 'DELETING', 'DELETED'].includes(replay.status)) {
         return res.status(409).json({ message: 'The linked live replay could not be verified for safe deletion.' });
       }
 
       const key = videoMediaKeyFromUrl(replay.mediaUrl);
       if (!key) return res.status(409).json({ message: 'The replay media could not be verified for safe deletion.' });
+      const associatedBroadcastId = post.sourceLiveBroadcastId ?? replay.id;
       const storage = getMediaStorage(process.env.NODE_ENV ?? 'development');
-      const metadata = await storage.getMetadata(key);
+      let metadata;
+      try {
+        metadata = await storage.getMetadata(key);
+      } catch (error) {
+        console.error('Unable to verify live replay media before deletion.', error instanceof Error ? error.name : 'Unknown error');
+        return res.status(503).json({ message: 'The replay recording could not be verified in media storage. Retry deletion.' });
+      }
       if (metadata && !canDeleteLiveReplayMedia(replay.status, metadata, replay.hostId)) {
         return res.status(409).json({ message: 'The replay media could not be verified for safe deletion.' });
       }
-      const [otherPostCount, otherReplayCount, storyReference, messageReference] = metadata
-        ? await Promise.all([
+      let otherPostCount;
+      let otherReplayCount;
+      let storyReference;
+      let messageReference;
+      let profileReference;
+      let otherBroadcastReference;
+      let broadcast;
+      try {
+        [otherPostCount, otherReplayCount, storyReference, messageReference, profileReference, otherBroadcastReference, broadcast] = await Promise.all([
           prisma.post.count({ where: { imageUrl: replay.mediaUrl, id: { not: postId } } }),
           prisma.liveReplay.count({ where: { mediaUrl: replay.mediaUrl, id: { not: replay.id }, status: { not: 'DELETED' } } }),
           prisma.story.findFirst({ where: { mediaUrl: replay.mediaUrl }, select: { id: true } }),
           prisma.message.findFirst({ where: { mediaUrl: replay.mediaUrl }, select: { id: true } }),
-        ])
-        : [0, 0, null, null] as const;
+          prisma.profile.findFirst({
+            where: { OR: [{ avatarUrl: replay.mediaUrl }, { coverUrl: replay.mediaUrl }] },
+            select: { id: true },
+          }),
+          prisma.liveBroadcast.findFirst({
+            where: { replayUrl: replay.mediaUrl, id: { not: associatedBroadcastId } },
+            select: { id: true },
+          }),
+          prisma.liveBroadcast.findUnique({
+            where: { id: associatedBroadcastId },
+            select: { egressId: true, egressOutputKey: true, recordingStatus: true },
+          }),
+        ]);
+      } catch (error) {
+        console.error('Unable to verify live replay references before deletion.', error instanceof Error ? error.name : 'Unknown error');
+        return res.status(503).json({ message: 'The replay references could not be verified for safe deletion. Retry the request.' });
+      }
+      const hasOtherMediaReferences = otherPostCount > 0 || otherReplayCount > 0
+        || Boolean(storyReference || messageReference || profileReference || otherBroadcastReference);
+      if (broadcast?.egressOutputKey && ['RECORDING', 'PROCESSING'].includes(broadcast.recordingStatus)) {
+        return res.status(409).json({ message: 'The live recording is still active; end it before deleting this replay.' });
+      }
       if (!['DELETING', 'DELETED'].includes(replay.status)) {
-        await prisma.liveReplay.update({ where: { id: replay.id }, data: { status: 'DELETING' } });
-      }
-      if (metadata && otherPostCount === 0 && otherReplayCount === 0 && !storyReference && !messageReference) {
-        await storage.delete(key);
-      }
-      await prisma.$transaction(async (transaction) => {
-        const currentPost = await transaction.post.findUnique({
-          where: { id: postId },
-          select: { authorId: true, sourceLiveReplayId: true },
-        });
-        if (currentPost && (currentPost.authorId !== post.authorId || currentPost.sourceLiveReplayId !== replay.id)) {
-          throw new Error('The Feed post changed while its live replay was being deleted.');
+        try {
+          await prisma.liveReplay.update({ where: { id: replay.id }, data: { status: 'DELETING' } });
+        } catch (error) {
+          console.error('Unable to mark the live replay for deletion.', error instanceof Error ? error.name : 'Unknown error');
+          return res.status(503).json({ message: 'The replay could not be marked for deletion. Retry the request.' });
         }
-        if (currentPost) await transaction.post.delete({ where: { id: postId } });
-        await transaction.liveReplay.update({
-          where: { id: replay.id },
-          data: { status: 'DELETED', publishedPostId: null },
+      }
+      if (broadcast?.egressId && broadcast.egressOutputKey) {
+        try {
+          await stopLiveKitEgress(broadcast.egressId);
+        } catch (error) {
+          console.error('Unable to stop the LiveKit Egress replay cleanup.', error instanceof Error ? error.name : 'Unknown error');
+          return res.status(503).json({ message: 'The temporary LiveKit recording could not be stopped. Retry deletion.' });
+        }
+      }
+      if (broadcast?.egressOutputKey) {
+        try {
+          await deleteLiveKitEgressFile(broadcast.egressOutputKey);
+        } catch (error) {
+          console.error('Unable to delete the temporary LiveKit Egress recording.', error instanceof Error ? error.name : 'Unknown error');
+          return res.status(503).json({ message: 'The temporary LiveKit recording could not be deleted. Retry deletion.' });
+        }
+      }
+      const mediaWillBeDeleted = Boolean(metadata && !hasOtherMediaReferences);
+      if (mediaWillBeDeleted) {
+        try {
+          await storage.delete(key);
+        } catch (error) {
+          console.error('Unable to delete the live replay media object.', error instanceof Error ? error.name : 'Unknown error');
+          return res.status(503).json({ message: 'The replay recording could not be deleted from media storage. Retry deletion.' });
+        }
+      }
+      try {
+        if (mediaWillBeDeleted && await storage.getMetadata(key)) {
+          return res.status(503).json({ message: 'The replay recording is still present in media storage. Retry deletion.' });
+        }
+      } catch (error) {
+        console.error('Unable to verify live replay media deletion.', error instanceof Error ? error.name : 'Unknown error');
+        return res.status(503).json({ message: 'The replay recording deletion could not be verified. Retry deletion.' });
+      }
+
+      try {
+        await prisma.$transaction(async (transaction) => {
+          const currentPost = await transaction.post.findUnique({
+            where: { id: postId },
+            select: { authorId: true, sourceLiveReplayId: true, sourceLiveBroadcastId: true },
+          });
+          const currentReplay = await transaction.liveReplay.findUnique({ where: { id: replay.id } });
+          if (currentPost && (currentPost.authorId !== post.authorId
+            || currentPost.sourceLiveReplayId !== post.sourceLiveReplayId
+            || currentPost.sourceLiveBroadcastId !== post.sourceLiveBroadcastId)) {
+            throw new Error('The Feed post changed while its live replay was being deleted.');
+          }
+          if (!currentReplay || currentReplay.hostId !== userId || currentReplay.mediaUrl !== replay.mediaUrl
+            || currentReplay.publishedPostId !== postId
+            || !['DELETING', 'DELETED'].includes(currentReplay.status)) {
+            throw new Error('The live replay changed while it was being deleted.');
+          }
+          if (currentPost) await transaction.post.delete({ where: { id: postId } });
+          await transaction.liveReplay.update({
+            where: { id: replay.id },
+            data: { status: 'DELETED', publishedPostId: null, deletedPostId: postId },
+          });
+          await transaction.liveBroadcast.updateMany({
+            where: { id: associatedBroadcastId, replayUrl: replay.mediaUrl },
+            data: { replayUrl: null, recordingStatus: 'UNAVAILABLE' },
+          });
+          if (broadcast?.egressOutputKey) {
+            await transaction.liveBroadcast.updateMany({
+              where: { id: associatedBroadcastId, egressOutputKey: broadcast.egressOutputKey },
+              data: { egressId: null, egressOutputKey: null },
+            });
+          }
         });
-        await transaction.liveBroadcast.updateMany({
-          where: { id: replay.id, replayUrl: replay.mediaUrl },
-          data: { replayUrl: null, recordingStatus: 'UNAVAILABLE' },
-        });
-      });
+      } catch (error) {
+        console.error('Unable to remove the live replay Feed and database references.', error instanceof Error ? error.name : 'Unknown error');
+        return res.status(503).json({ message: 'The replay recording was removed, but its Feed or database references could not be finalized. Retry deletion.' });
+      }
+
+      let remainingPost;
+      let deletedReplay;
+      let remainingBroadcast;
+      let mediaRemains = false;
+      try {
+        [remainingPost, deletedReplay, remainingBroadcast] = await Promise.all([
+          prisma.post.findUnique({ where: { id: postId }, select: { id: true } }),
+          prisma.liveReplay.findUnique({
+            where: { id: replay.id },
+            select: { status: true, publishedPostId: true, deletedPostId: true },
+          }),
+          prisma.liveBroadcast.findUnique({
+            where: { id: associatedBroadcastId },
+            select: { replayUrl: true, egressOutputKey: true },
+          }),
+        ]);
+        mediaRemains = mediaWillBeDeleted && Boolean(await storage.getMetadata(key));
+      } catch (error) {
+        console.error('Unable to verify live replay database and media cleanup.', error instanceof Error ? error.name : 'Unknown error');
+        return res.status(503).json({ message: 'The replay deletion could not be verified. Retry deletion.' });
+      }
+      if (remainingPost || deletedReplay?.status !== 'DELETED' || deletedReplay.publishedPostId !== null
+        || deletedReplay.deletedPostId !== postId
+        || remainingBroadcast?.replayUrl === replay.mediaUrl
+        || (broadcast?.egressOutputKey && remainingBroadcast?.egressOutputKey === broadcast.egressOutputKey)
+        || mediaRemains) {
+        return res.status(503).json({ message: 'The replay deletion could not be verified across Feed and database references. Retry deletion.' });
+      }
       updateLiveSession(replay.id, (live) => ({
         ...live,
         replayUrl: null,
         recordingUrl: null,
         recordingStatus: 'UNAVAILABLE',
       }));
-      return res.json({ message: 'Post deleted.' });
+      return res.json({
+        message: mediaWillBeDeleted || !metadata ? 'Post and replay permanently deleted.' : 'Post deleted; shared replay media remains in use.',
+        mediaDeleted: mediaWillBeDeleted || !metadata,
+        sharedMediaPreserved: Boolean(metadata && hasOtherMediaReferences),
+      });
+    }
+
+    if (post.sourceLiveBroadcastId && !isAdmin) {
+      return res.status(409).json({ message: 'Live broadcast posts stay in the Feed unless they are linked to a published replay.' });
     }
 
     await prisma.post.delete({ where: { id: postId } });

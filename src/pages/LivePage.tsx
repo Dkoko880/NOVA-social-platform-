@@ -93,6 +93,7 @@ export function LivePage() {
   const [isLandscape, setIsLandscape] = useState(() => window.innerWidth > window.innerHeight)
   const [fullscreenFallback, setFullscreenFallback] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [guestControlsOpen, setGuestControlsOpen] = useState(false)
   const [shareNotice, setShareNotice] = useState('')
   const [replayBusy, setReplayBusy] = useState(false)
   const [replayActionError, setReplayActionError] = useState('')
@@ -1162,41 +1163,40 @@ export function LivePage() {
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/70 via-transparent to-black/80" />
       </div>
 
-      <header className="absolute inset-x-0 top-0 flex max-h-[36dvh] flex-wrap items-start justify-between gap-3 overflow-y-auto overscroll-contain px-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:px-6">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="min-w-0">
-            <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide"><span className={`rounded-full px-2 py-1 ${activeLive.status === 'live' ? 'bg-rose-600' : 'bg-amber-500'}`}>{activeLive.status === 'live' ? 'LIVE' : 'PREVIEW'}</span><span className="inline-flex items-center gap-1" aria-label={`${activeLive.viewerCount} viewers`}><Eye className="h-4 w-4" aria-hidden="true" />{activeLive.viewerCount}</span></p>
-            <h1 className="mt-1 max-w-[55vw] truncate text-base font-semibold sm:max-w-md">{activeLive.title}</h1>
-            <p className="truncate text-xs text-white/75">{isHost ? user?.name : activeLive.host?.name ?? 'novachat host'}</p>
-          </div>
+      <header className="absolute inset-x-0 top-0 z-10 flex flex-col items-stretch gap-2 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:px-6">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide"><span className={`rounded-full px-2 py-1 ${activeLive.status === 'live' ? 'bg-rose-600' : 'bg-amber-500'}`}>{activeLive.status === 'live' ? 'LIVE' : 'PREVIEW'}</span><span className="inline-flex items-center gap-1" aria-label={`${activeLive.viewerCount} viewers`}><Eye className="h-4 w-4" aria-hidden="true" />{activeLive.viewerCount}</span></p>
+          <h1 className="mt-1 max-w-[calc(100vw-1.5rem)] truncate text-base font-semibold">{activeLive.title}</h1>
+          <p className="truncate text-xs text-white/75">{isHost ? user?.name : activeLive.host?.name ?? 'novachat host'}</p>
         </div>
-        <div className={`flex max-w-full gap-2 ${isLandscape ? 'absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-3 z-10 max-h-[45dvh] flex-col overflow-y-auto' : 'flex-wrap justify-end'}`}>
+        <div data-testid="live-controls-row" className="flex w-full min-w-0 flex-nowrap items-center gap-1 overflow-x-auto overscroll-x-contain pb-1 sm:gap-2">
           {isHost && activeLive.status === 'live' ? <>
-            <button type="button" aria-label={hostMuted ? 'Unmute microphone' : 'Mute microphone'} title={hostMuted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => void toggleHostMute()} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75">{hostMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}<span className="hidden sm:inline">{hostMuted ? 'Unmute' : 'Mute'}</span></button>
-            <button type="button" aria-label={hostCameraOn ? 'Turn camera off' : 'Turn camera on'} title={hostCameraOn ? 'Turn camera off' : 'Turn camera on'} onClick={() => void toggleHostCamera()} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75">{hostCameraOn ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}<span className="hidden sm:inline">{hostCameraOn ? 'Camera on' : 'Camera off'}</span></button>
-            {hostCameraOn ? <button type="button" aria-label="Switch camera" title="Switch camera" onClick={() => void switchHostCamera()} disabled={cameraSwitchBusy} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75 disabled:opacity-60"><RefreshCw className={`h-5 w-5 ${cameraSwitchBusy ? 'animate-spin' : ''}`} /><span className="hidden sm:inline">Flip</span></button> : null}
-            <button type="button" aria-label="End broadcast" title="End broadcast" onClick={() => { if (window.confirm('End your live broadcast?')) void endBroadcast(activeLive) }} disabled={busy} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-rose-600 px-3 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-60"><PhoneOff className="h-5 w-5" /><span className="hidden sm:inline">End</span></button>
+            <button type="button" aria-label={hostMuted ? 'Unmute microphone' : 'Mute microphone'} title={hostMuted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => void toggleHostMute()} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75">{hostMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}<span className="hidden sm:inline">{hostMuted ? 'Unmute' : 'Mute'}</span></button>
+            <button type="button" aria-label={hostCameraOn ? 'Turn camera off' : 'Turn camera on'} title={hostCameraOn ? 'Turn camera off' : 'Turn camera on'} onClick={() => void toggleHostCamera()} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75">{hostCameraOn ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}<span className="hidden sm:inline">{hostCameraOn ? 'Camera on' : 'Camera off'}</span></button>
+            {hostCameraOn ? <button type="button" aria-label="Switch camera" title="Switch camera" onClick={() => void switchHostCamera()} disabled={cameraSwitchBusy} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75 disabled:opacity-60"><RefreshCw className={`h-5 w-5 ${cameraSwitchBusy ? 'animate-spin' : ''}`} /><span className="hidden sm:inline">Flip</span></button> : null}
+            <button type="button" aria-label="End broadcast" title="End broadcast" onClick={() => { if (window.confirm('End your live broadcast?')) void endBroadcast(activeLive) }} disabled={busy} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded-full bg-rose-600 px-3 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-60"><PhoneOff className="h-5 w-5" /><span className="hidden sm:inline">End</span></button>
           </> : isHost ? <>
-            <button type="button" onClick={() => void startBroadcast(activeLive)} disabled={busy} className="min-h-11 rounded-full bg-rose-600 px-4 text-sm font-semibold text-white disabled:opacity-60">Start broadcast</button>
-            <button type="button" onClick={cancelPreview} className="min-h-11 rounded-full bg-black/55 px-4 text-sm font-semibold text-white ring-1 ring-white/20">Cancel preview</button>
+            <button type="button" onClick={() => void startBroadcast(activeLive)} disabled={busy} className="min-h-11 shrink-0 rounded-full bg-rose-600 px-4 text-sm font-semibold text-white disabled:opacity-60">Start broadcast</button>
+            <button type="button" onClick={cancelPreview} className="min-h-11 shrink-0 rounded-full bg-black/55 px-4 text-sm font-semibold text-white ring-1 ring-white/20">Cancel preview</button>
           </> : <>
-            <button type="button" aria-label="Share live broadcast" title="Share live broadcast" onClick={() => void shareLive(activeLive)} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20 hover:bg-black/75"><Share2 className="h-5 w-5" /></button>
+            <button type="button" aria-label="Share live broadcast" title="Share live broadcast" onClick={() => void shareLive(activeLive)} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20 hover:bg-black/75"><Share2 className="h-5 w-5" /></button>
             {approvedGuest && guestRoom ? <>
-              <button type="button" aria-label={hostMuted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => void toggleHostMute()} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20">{hostMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}</button>
-              <button type="button" aria-label={hostCameraOn ? 'Turn camera off' : 'Turn camera on'} onClick={() => void toggleHostCamera()} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20">{hostCameraOn ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}</button>
+              <button type="button" aria-label={hostMuted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => void toggleHostMute()} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20">{hostMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}</button>
+              <button type="button" aria-label={hostCameraOn ? 'Turn camera off' : 'Turn camera on'} onClick={() => void toggleHostCamera()} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full bg-black/55 p-3 ring-1 ring-white/20">{hostCameraOn ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}</button>
             </> : null}
-            <button type="button" aria-label="Leave live broadcast" title="Leave live broadcast" onClick={() => void leaveLive()} disabled={busy} className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75"><PhoneOff className="h-5 w-5" /><span className="hidden sm:inline">Leave</span></button>
+            <button type="button" aria-label="Leave live broadcast" title="Leave live broadcast" onClick={() => void leaveLive()} disabled={busy} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded-full bg-black/55 px-3 text-sm text-white ring-1 ring-white/20 hover:bg-black/75"><PhoneOff className="h-5 w-5" /><span className="hidden sm:inline">Leave</span></button>
           </>}
-          <button type="button" aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} onClick={() => void toggleFullscreen()} className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-black/55 p-3 text-white ring-1 ring-white/20 hover:bg-black/75">
+          <button type="button" aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} onClick={() => void toggleFullscreen()} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full bg-black/55 p-3 text-white ring-1 ring-white/20 hover:bg-black/75">
             {isFullscreen ? <Minimize className="h-5 w-5" aria-hidden="true" /> : <Maximize className="h-5 w-5" aria-hidden="true" />}
           </button>
+          {canModerate ? <button type="button" aria-label="Manage guests and viewers" title="Manage guests and viewers" aria-expanded={guestControlsOpen} aria-controls="live-guest-controls" onClick={() => setGuestControlsOpen((open) => !open)} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full bg-black/55 p-3 text-white ring-1 ring-white/20 hover:bg-black/75"><Users className="h-4 w-4" aria-hidden="true" /></button> : null}
         </div>
       </header>
 
-      {error ? <p className="absolute left-3 right-3 top-[max(5rem,calc(env(safe-area-inset-top)+4.5rem))] mx-auto max-w-xl rounded-xl bg-black/75 p-3 text-center text-sm text-white" role="alert">{error}</p> : null}
-      {!isHost && approvedGuest && !guestRoom ? <button type="button" onClick={() => void joinGuestStage(activeLive)} disabled={busy} className="absolute left-3 top-[max(5rem,calc(env(safe-area-inset-top)+4.5rem))] min-h-11 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">Join the stage</button> : null}
-      {canModerate ? <details aria-label="Live moderation controls" className="absolute right-3 top-[max(5rem,calc(env(safe-area-inset-top)+4.5rem))] max-h-[45dvh] w-fit max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-xl bg-black/80 text-xs text-white ring-1 ring-white/20 open:w-72">
-        <summary className="flex min-h-11 w-11 cursor-pointer list-none items-center justify-center rounded-full bg-black/55 font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-white" aria-label="Manage guests and viewers" title="Manage guests and viewers"><Users className="h-4 w-4" aria-hidden="true" /><span className="sr-only">Manage guests and viewers</span></summary>
+      {error ? <p className="absolute left-3 right-3 top-[max(8rem,calc(env(safe-area-inset-top)+7.5rem))] mx-auto max-w-xl rounded-xl bg-black/75 p-3 text-center text-sm text-white" role="alert">{error}</p> : null}
+      {!isHost && approvedGuest && !guestRoom ? <button type="button" onClick={() => void joinGuestStage(activeLive)} disabled={busy} className="absolute left-3 top-[max(8rem,calc(env(safe-area-inset-top)+7.5rem))] min-h-11 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">Join the stage</button> : null}
+      {canModerate && guestControlsOpen ? <div id="live-guest-controls" aria-label="Live moderation controls" className="absolute left-3 right-3 top-[max(8rem,calc(env(safe-area-inset-top)+7.5rem))] z-20 mx-auto max-h-[45dvh] w-fit max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-xl bg-black/80 text-xs text-white ring-1 ring-white/20 sm:left-auto">
+        <div className="flex justify-end px-3 pt-2"><button type="button" onClick={() => setGuestControlsOpen(false)} className="rounded px-2 py-1 font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-white">Close guest controls</button></div>
         <div className="max-h-[calc(45dvh-3rem)] space-y-3 overflow-y-auto overscroll-contain px-3 pb-3">
         <div><h2 className="font-semibold">Guest requests</h2>
           {activeLive.guests.filter((guest) => guest.status !== 'REMOVED').map((guest) => <div key={guest.userId} className="mt-2 flex items-center justify-between gap-2">
@@ -1216,7 +1216,7 @@ export function LivePage() {
           </div>)}
         </div>
         </div>
-      </details> : null}
+      </div> : null}
       {!isHost && (needsAudioPlayback || needsVideoPlayback) ? <button type="button" onClick={() => void enablePlayback()} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white px-5 py-3 font-semibold text-slate-900 shadow-lg"><Volume2 className="mr-2 inline h-5 w-5" aria-hidden="true" />Tap to enable sound</button> : null}
       {isHost && recordingPhase === 'UPLOADING' ? <p className="sr-only" role="status">Replay uploading</p> : null}
       {recordingError && isHost

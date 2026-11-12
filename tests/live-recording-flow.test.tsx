@@ -190,9 +190,9 @@ afterEach(async () => {
 })
 
 describe('automatic live recording and replay publishing', () => {
-  it('adapts the host video and controls when the device rotates between landscape and portrait', async () => {
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 900 })
-    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 400 })
+  it('keeps host controls in a horizontal top row on narrow landscape and portrait screens', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 568 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 320 })
     await renderLivePage()
 
     await act(async () => {
@@ -202,12 +202,25 @@ describe('automatic live recording and replay publishing', () => {
     const stage = host.querySelector('[aria-label="Live video session"]')
     expect(stage?.getAttribute('data-orientation')).toBe('landscape')
     expect(host.querySelector('video.object-contain')).not.toBeNull()
-    expect(host.querySelector('button[aria-label="End broadcast"]')?.parentElement?.className).toContain('bottom-')
+    const controls = host.querySelector('[data-testid="live-controls-row"]')
+    expect(controls?.className).toContain('flex-nowrap')
+    expect(controls?.className).toContain('overflow-x-auto')
+    expect(controls?.className).toContain('gap-1')
+    for (const label of ['Mute microphone', 'Turn camera off', 'Switch camera', 'End broadcast', 'Enter fullscreen', 'Manage guests and viewers']) {
+      const button = controls?.querySelector(`button[aria-label="${label}"]`)
+      expect(button).not.toBeNull()
+      expect(button?.className).toContain('min-w-11')
+      expect(button?.className).toContain('shrink-0')
+    }
+    expect(controls?.parentElement?.className).toContain('flex-col')
+    expect(host.querySelector('h1')?.textContent).toBe(live.title)
 
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 360 })
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
     await act(async () => { window.dispatchEvent(new Event('resize')) })
     expect(stage?.getAttribute('data-orientation')).toBe('portrait')
+    expect(host.querySelector('[data-testid="live-controls-row"]')?.className).toContain('flex-nowrap')
+    expect(host.querySelector('button[aria-label="End broadcast"]')?.closest('[data-testid="live-controls-row"]')).not.toBeNull()
   })
 
   it('records the broadcast, uploads the final chunk, and automatically publishes the linked Feed replay', async () => {
@@ -239,10 +252,11 @@ describe('automatic live recording and replay publishing', () => {
     await act(async () => { mocks.roomHandlers.reconnected?.() })
     expect(host.textContent).not.toContain('LiveKit connection interrupted')
     expect(host.querySelector('video.object-contain')).not.toBeNull()
-    const moderationPanel = host.querySelector<HTMLDetailsElement>('details[aria-label="Live moderation controls"]')
-    expect(moderationPanel?.open).toBe(false)
-    moderationPanel?.querySelector('summary')?.click()
-    expect(moderationPanel?.open).toBe(true)
+    const moderationButton = host.querySelector<HTMLButtonElement>('button[aria-label="Manage guests and viewers"]')
+    expect(moderationButton?.getAttribute('aria-expanded')).toBe('false')
+    await act(async () => { moderationButton?.click() })
+    expect(moderationButton?.getAttribute('aria-expanded')).toBe('true')
+    expect(host.querySelector('#live-guest-controls')).not.toBeNull()
     await act(async () => { clickButton('Enter fullscreen') })
     expect(host.querySelector('button[aria-label="Exit fullscreen"]')).not.toBeNull()
     await act(async () => { clickButton('Exit fullscreen') })
