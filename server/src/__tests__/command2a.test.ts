@@ -203,6 +203,8 @@ describe('command 2a foundation', () => {
       .set('Cookie', getCookieHeader(aliceLogin))
       .send({ participantId: bobUser.id });
 
+    const bobEvents: Array<Record<string, unknown>> = [];
+    const stopListening = subscribeToUserEvents(bobUser.id, (event) => bobEvents.push(event as Record<string, unknown>));
     const presence = await request(app)
       .post('/api/presence')
       .set('Cookie', getCookieHeader(aliceLogin))
@@ -218,6 +220,11 @@ describe('command 2a foundation', () => {
 
     expect(typingResponse.status).toBe(200);
     expect(typingResponse.body.typing.isTyping).toBe(true);
+    expect(bobEvents).toContainEqual(expect.objectContaining({
+      event: 'typing:start',
+      conversationId: convo.body.conversation.id,
+      userId: aliceLogin.body.user.id,
+    }));
 
     const unauthorized = await request(app)
       .post(`/api/conversations/unknown/typing`)
@@ -225,6 +232,7 @@ describe('command 2a foundation', () => {
       .send({ isTyping: true });
 
     expect(unauthorized.status).toBe(404);
+    stopListening();
   });
 
   it('creates configured LiveKit calls and still applies existing block controls', async () => {

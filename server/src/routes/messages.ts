@@ -32,14 +32,14 @@ function isAllowedMessageMediaUrl(value: string) {
 }
 
 const messageSchema = z.object({
-  contentType: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'CONTACT', 'LOCATION', 'POLL', 'EVENT']).default('TEXT'),
+  contentType: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'GIF', 'STICKER', 'CONTACT', 'LOCATION', 'POLL', 'EVENT']).default('TEXT'),
   text: z.string().trim().max(2000).optional(),
   mediaUrl: z.string().trim().max(2000).refine(isAllowedMessageMediaUrl, 'Use an HTTPS URL or an uploaded novachat image.').optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   replyToId: z.string().min(1).optional(),
   status: z.enum(['SENT', 'DELIVERED', 'READ', 'FAILED']).optional(),
 }).refine((payload) => payload.contentType !== 'TEXT' || Boolean(payload.text?.trim()), { message: 'Text messages need content.' })
-  .refine((payload) => !['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE'].includes(payload.contentType) || Boolean(payload.mediaUrl), { message: 'Media messages need a media URL.' })
+  .refine((payload) => !['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'GIF', 'STICKER'].includes(payload.contentType) || Boolean(payload.mediaUrl), { message: 'Media messages need a media URL.' })
   .refine((payload) => !['CONTACT', 'LOCATION', 'POLL', 'EVENT'].includes(payload.contentType) || Boolean(payload.metadata), { message: 'This message type needs metadata.' })
   .refine((payload) => payload.contentType !== 'POLL' || (
     typeof payload.metadata?.question === 'string'
@@ -61,6 +61,12 @@ const interactiveResponseSchema = z.object({
 
 const messageEditSchema = z.object({ text: z.string().trim().min(1).max(2000) });
 const reactionSchema = z.object({ type: z.string().trim().min(1).max(24) });
+const messagePreferenceSchema = z.object({
+  pinned: z.boolean().optional(),
+  starred: z.boolean().optional(),
+}).refine((payload) => payload.pinned !== undefined || payload.starred !== undefined, {
+  message: 'Choose a message preference to update.',
+});
 const conversationPreferenceSchema = z.object({
   pinned: z.boolean().optional(),
   archived: z.boolean().optional(),
@@ -151,6 +157,8 @@ const messageToPublicShape = (message: any) => ({
   forwardedFromId: message.forwardedFromId ?? null,
   editedAt: message.editedAt ?? null,
   expiresAt: message.expiresAt ?? null,
+  pinnedAt: message.pinnedAt ?? null,
+  starredAt: (message.preferences ?? []).some((preference: { starredAt?: Date | string | null }) => Boolean(preference.starredAt)),
   reactions: message.reactions ?? [],
 });
 
@@ -226,6 +234,7 @@ messagesRouter.post('/conversations', requireAuth, async (req, res) => {
       imageUrl: conversation.imageUrl,
       isGroup: conversation.isGroup,
       isChannel: conversation.isChannel,
+      disappearingAfterSeconds: conversation.disappearingAfterSeconds,
       updatedAt: conversation.updatedAt,
       lastMessageAt: conversation.lastMessageAt,
       lastMessagePreview: conversation.lastMessagePreview,
@@ -293,7 +302,7 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
       where: { participants: { some: { userId, leftAt: null } } },
       include: {
         participants: { where: { leftAt: null }, include: { user: { select: { id: true, name: true, profile: { select: { avatarUrl: true } } } } } },
-        messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+        messages: { orderBy: { createdAt: 'desc' }, take: 1, include: { preferences: { where: { userId }, select: { starredAt: true } } } },
         _count: { select: { messages: { where: { senderId: { not: userId }, readAt: null, deletedAt: null, moderationHiddenAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] } } } },
       },
       orderBy: { updatedAt: 'desc' },
@@ -369,7 +378,7 @@ messagesRouter.get('/conversations/:id', requireAuth, async (req, res) => {
       where: { id: conversationId },
       include: {
         participants: { include: { user: { select: { id: true, name: true, profile: { select: { avatarUrl: true } } } } } },
-        messages: { where: { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, include: { reactions: true }, orderBy: { createdAt: 'asc' } },
+        messages: { where: { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, include: { reactions: true, preferences: { where: { userId }, select: { starredAt: true } } }, orderBy: { createdAt: 'asc' } },
       },
     });
 
@@ -408,7 +417,10 @@ messagesRouter.get('/conversations/:id', requireAuth, async (req, res) => {
         ? messageToPublicShape(conversationMessages.at(-1)).text
         : conversation.lastMessagePreview,
       participants: socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversationId),
-      messages: conversationMessages.map(messageToPublicShape),
+      messages: conversationMessages.map((message) => messageToPublicShape({
+        ...message,
+        preferences: socialStore.state.messagePreferences.filter((preference) => preference.messageId === message.id && preference.userId === userId),
+      })),
     },
   });
 });
@@ -610,12 +622,18 @@ messagesRouter.get('/conversations/:id/messages', requireAuth, async (req, res) 
   if (dbAvailable) {
     const messages = await prisma.message.findMany({
       where: { conversationId, deletedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }], ...(before && !Number.isNaN(before.getTime()) ? { createdAt: { lt: before } } : {}) },
-      include: { reactions: true },
+      include: { reactions: true, preferences: { where: { userId }, select: { starredAt: true } } },
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
 
-    return res.json({ messages: messages.reverse().map(messageToPublicShape), hasMore: messages.length === limit });
+    const newlyDelivered = messages.filter((message) => message.senderId !== userId && message.status === 'SENT');
+    if (newlyDelivered.length) {
+      await prisma.message.updateMany({ where: { id: { in: newlyDelivered.map((message) => message.id) }, status: 'SENT' }, data: { status: 'DELIVERED' } });
+      for (const message of newlyDelivered) emitConversationEvent('message:delivered', conversationId, { messageId: message.id }, [message.senderId]);
+    }
+    const deliveredIds = new Set(newlyDelivered.map((message) => message.id));
+    return res.json({ messages: messages.reverse().map((message) => messageToPublicShape(deliveredIds.has(message.id) ? { ...message, status: 'DELIVERED' } : message)), hasMore: messages.length === limit });
   }
 
   const messages = socialStore.state.messages
@@ -623,9 +641,18 @@ messagesRouter.get('/conversations/:id/messages', requireAuth, async (req, res) 
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .filter((message) => !before || new Date(message.createdAt) < before)
     .slice(0, limit)
+    .map((message) => {
+      if (message.senderId === userId || message.status !== 'SENT') return message;
+      message.status = 'DELIVERED';
+      emitConversationEvent('message:delivered', conversationId, { messageId: message.id }, [message.senderId]);
+      return message;
+    })
     .reverse();
 
-  return res.json({ messages: messages.map(messageToPublicShape), hasMore: messages.length === limit });
+  return res.json({ messages: messages.map((message) => messageToPublicShape({
+    ...message,
+    preferences: socialStore.state.messagePreferences.filter((preference) => preference.messageId === message.id && preference.userId === userId),
+  })), hasMore: messages.length === limit });
 });
 
 messagesRouter.post('/conversations/:id/read', requireAuth, async (req, res) => {
@@ -888,6 +915,63 @@ messagesRouter.post('/messages/:id/reactions', requireAuth, async (req, res) => 
   return res.json({ reactions, active: index < 0 });
 });
 
+messagesRouter.patch('/messages/:id/preferences', requireAuth, async (req, res) => {
+  const messageId = String(req.params.id);
+  const userId = req.user!.id;
+  const payload = messagePreferenceSchema.parse(req.body ?? {});
+  const dbAvailable = await isDatabaseAvailable();
+  const current = dbAvailable
+    ? await prisma.message.findUnique({ where: { id: messageId }, select: { id: true, conversationId: true, deletedAt: true, moderationHiddenAt: true } })
+    : socialStore.state.messages.find((message) => message.id === messageId);
+  if (!current || current.deletedAt || current.moderationHiddenAt) return res.status(404).json({ message: 'Message not found.' });
+  if (!(await canViewConversation(current.conversationId, userId))) return res.status(403).json({ message: 'You do not have access to this message.' });
+
+  if (dbAvailable) {
+    if (payload.pinned !== undefined) {
+      await prisma.message.update({ where: { id: messageId }, data: { pinnedAt: payload.pinned ? new Date() : null } });
+    }
+    if (payload.starred === true) {
+      await prisma.messagePreference.upsert({
+        where: { messageId_userId: { messageId, userId } },
+        create: { messageId, userId, starredAt: new Date() },
+        update: { starredAt: new Date() },
+      });
+    } else if (payload.starred === false) {
+      await prisma.messagePreference.deleteMany({ where: { messageId, userId } });
+    }
+    const updated = await prisma.message.findUnique({
+      where: { id: messageId },
+      include: { reactions: true, preferences: { where: { userId }, select: { starredAt: true } } },
+    });
+    if (!updated) return res.status(404).json({ message: 'Message not found.' });
+    if (payload.pinned !== undefined) {
+      emitConversationEvent('message:pinned', current.conversationId, { messageId, pinnedAt: updated.pinnedAt }, await listConversationParticipantIds(current.conversationId));
+    }
+    return res.json({ message: messageToPublicShape(updated) });
+  }
+
+  const message = socialStore.state.messages.find((entry) => entry.id === messageId)!;
+  if (payload.pinned !== undefined) {
+    message.pinnedAt = payload.pinned ? new Date().toISOString() : null;
+    emitConversationEvent('message:pinned', current.conversationId, { messageId, pinnedAt: message.pinnedAt }, await listConversationParticipantIds(current.conversationId));
+  }
+  const preferenceIndex = socialStore.state.messagePreferences.findIndex((preference) => preference.messageId === messageId && preference.userId === userId);
+  if (payload.starred === true) {
+    const existing = socialStore.state.messagePreferences[preferenceIndex];
+    if (existing) existing.starredAt = new Date().toISOString();
+    else socialStore.state.messagePreferences.push({
+      id: `message_preference_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      messageId,
+      userId,
+      starredAt: new Date().toISOString(),
+    });
+  } else if (payload.starred === false && preferenceIndex >= 0) {
+    socialStore.state.messagePreferences.splice(preferenceIndex, 1);
+  }
+  const preferences = socialStore.state.messagePreferences.filter((preference) => preference.messageId === messageId && preference.userId === userId);
+  return res.json({ message: messageToPublicShape({ ...message, preferences }) });
+});
+
 messagesRouter.get('/messages/search', requireAuth, async (req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   const conversationId = typeof req.query.conversationId === 'string' ? req.query.conversationId : undefined;
@@ -903,7 +987,7 @@ messagesRouter.get('/messages/search', requireAuth, async (req, res) => {
         text: { contains: query, mode: 'insensitive' },
         ...(conversationId ? { conversationId } : { conversation: { participants: { some: { userId: req.user!.id } } } }),
       },
-      include: { reactions: true },
+      include: { reactions: true, preferences: { where: { userId: req.user!.id }, select: { starredAt: true } } },
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
@@ -915,18 +999,24 @@ messagesRouter.get('/messages/search', requireAuth, async (req, res) => {
     (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now()) &&
     (conversationId ? message.conversationId === conversationId : allowedConversationIds.has(message.conversationId)))
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 50);
-  return res.json({ messages: messages.map(messageToPublicShape) });
+  return res.json({ messages: messages.map((message) => messageToPublicShape({
+    ...message,
+    preferences: socialStore.state.messagePreferences.filter((preference) => preference.messageId === message.id && preference.userId === req.user!.id),
+  })) });
 });
 
 messagesRouter.get('/conversations/:id/media', requireAuth, async (req, res) => {
   const conversationId = String(req.params.id);
   if (!(await canViewConversation(conversationId, req.user!.id))) return res.status(403).json({ message: 'You do not have access to this conversation.' });
   const dbAvailable = await isDatabaseAvailable();
-  const allowedTypes = ['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE'];
+  const allowedTypes = ['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'GIF', 'STICKER'];
   const media = dbAvailable
-    ? await prisma.message.findMany({ where: { conversationId, contentType: { in: allowedTypes }, deletedAt: null, moderationHiddenAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, include: { reactions: true }, orderBy: { createdAt: 'desc' }, take: 200 })
+    ? await prisma.message.findMany({ where: { conversationId, contentType: { in: allowedTypes }, deletedAt: null, moderationHiddenAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, include: { reactions: true, preferences: { where: { userId: req.user!.id }, select: { starredAt: true } } }, orderBy: { createdAt: 'desc' }, take: 200 })
     : socialStore.state.messages.filter((entry) => entry.conversationId === conversationId && allowedTypes.includes(entry.contentType ?? 'TEXT') && !entry.deletedAt && !entry.moderationHiddenAt && (!entry.expiresAt || new Date(entry.expiresAt).getTime() > Date.now())).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 200);
-  return res.json({ media: media.map(messageToPublicShape) });
+  return res.json({ media: media.map((message) => messageToPublicShape(dbAvailable ? message : {
+    ...message,
+    preferences: socialStore.state.messagePreferences.filter((preference) => preference.messageId === message.id && preference.userId === req.user!.id),
+  })) });
 });
 
 messagesRouter.post('/messages/:id/report', requireAuth, async (req, res) => {

@@ -118,6 +118,7 @@ const globalStore = globalThis as typeof globalThis & {
     notificationPreferences: Record<string, NotificationPreference[]>;
   };
 };
+const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 if (!globalStore.__novaPlatformStore) {
   globalStore.__novaPlatformStore = {
@@ -354,7 +355,11 @@ export function getPresenceState(userId: string) {
   };
 }
 
-export function setTypingState(conversationId: string, userId: string, isTyping: boolean) {
+export function setTypingState(conversationId: string, userId: string, isTyping: boolean, allowedUserIds = [userId]) {
+  const timerKey = `${conversationId}:${userId}`;
+  const existingTimer = typingTimers.get(timerKey);
+  if (existingTimer) clearTimeout(existingTimer);
+
   const existing = getStore().typing.find((entry) => entry.conversationId === conversationId && entry.userId === userId);
   const record: TypingState = {
     conversationId,
@@ -370,7 +375,15 @@ export function setTypingState(conversationId: string, userId: string, isTyping:
   }
 
   const eventName = isTyping ? 'typing:start' : 'typing:stop';
-  realtimeHub.emit(eventName, { conversationId, userId, isTyping, allowedUserIds: [userId] });
+  realtimeHub.emit(eventName, { conversationId, userId, isTyping, allowedUserIds });
+  if (isTyping) {
+    typingTimers.set(timerKey, setTimeout(() => {
+      typingTimers.delete(timerKey);
+      setTypingState(conversationId, userId, false, allowedUserIds);
+    }, 5000));
+  } else {
+    typingTimers.delete(timerKey);
+  }
   return { ...record };
 }
 
@@ -503,6 +516,8 @@ export function updateLiveSession(liveId: string, updater: (session: LiveSession
 }
 
 export function clearCommand2AStores() {
+  for (const timer of typingTimers.values()) clearTimeout(timer);
+  typingTimers.clear();
   getStore().presence = [];
   getStore().typing = [];
   getStore().callSessions = [];

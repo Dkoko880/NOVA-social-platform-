@@ -1,7 +1,11 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
-import { MessagesNavigation } from '../src/components/AppShell'
+import { describe, expect, it, vi } from 'vitest'
+import { AppShell, MessagesNavigation } from '../src/components/AppShell'
+
+vi.mock('../src/context/AuthContext', () => ({
+  useAuth: () => ({ user: null, logout: vi.fn(), isLoading: false }),
+}))
 
 const messageTabs = [
   { label: 'Chats', path: '/messages' },
@@ -20,6 +24,7 @@ describe('Messages navigation', () => {
     const links = markup.match(/<a\b[^>]*>/g) ?? []
     const activeLink = links.find((link) => link.includes('aria-current="page"'))
 
+    expect(markup).toContain(`<span>${label}</span>`)
     expect(markup).toContain('aria-label="Messages navigation"')
     for (const tab of messageTabs) {
       expect(markup).toContain(`href="${tab.path}"`)
@@ -27,5 +32,16 @@ describe('Messages navigation', () => {
     }
     expect(activeLink).toContain(`href="${path}"`)
     expect(links.filter((link) => link.includes('aria-current="page"'))).toHaveLength(1)
+  })
+
+  it('hides message tabs while a conversation is open and shows them on the chat list', () => {
+    const renderShell = (path: string) => renderToStaticMarkup(
+      <MemoryRouter initialEntries={[path]}>
+        <AppShell><div>Messages content</div></AppShell>
+      </MemoryRouter>,
+    )
+
+    expect(renderShell('/messages')).toContain('aria-label="Messages navigation"')
+    expect(renderShell('/messages?conversationId=chat-1')).not.toContain('aria-label="Messages navigation"')
   })
 })

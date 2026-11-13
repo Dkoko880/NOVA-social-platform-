@@ -584,7 +584,10 @@ command2aRouter.post('/conversations/:id/typing', requireAuth, async (req, res) 
     return res.status(404).json({ message: 'Conversation not found.' });
   }
 
-  const typing = setTypingState(conversationId, userId, payload.isTyping);
+  const participantIds = await isDatabaseAvailable()
+    ? (await prisma.conversationParticipant.findMany({ where: { conversationId, leftAt: null }, select: { userId: true } })).map((participant) => participant.userId)
+    : socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversationId && !participant.leftAt).map((participant) => participant.userId);
+  const typing = setTypingState(conversationId, userId, payload.isTyping, participantIds);
   return res.json({ typing });
 });
 

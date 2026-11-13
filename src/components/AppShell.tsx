@@ -77,6 +77,7 @@ export function AppShell({ children }: AppShellProps) {
   const userName = user?.name ?? 'novachat User'
   const userHandle = user?.username ? `@${user.username}` : user?.email ?? 'novachat member'
   const userAvatar = ''
+  const conversationOpen = location.pathname === '/messages' && new URLSearchParams(location.search).has('conversationId')
 
   return (
     <div className="min-h-screen text-slate-900">
@@ -142,7 +143,8 @@ export function AppShell({ children }: AppShellProps) {
 
       </div>
 
-      {isMessagesExperience ? <MessagesNavigation /> : <MobileNavigation />}
+      {isMessagesExperience && !conversationOpen ? <MessagesNavigation /> : null}
+      {!isMessagesExperience ? <MobileNavigation /> : null}
     </div>
   )
 }

@@ -159,6 +159,7 @@ model User {
   conversationsOwnedBy     Conversation[]            @relation("ConversationOwner")
   messageSent              Message[]                 @relation("MessageSender")
   messageReactions         MessageReaction[]
+  messagePreferences       MessagePreference[]
   conversationParticipants ConversationParticipant[]
   subscriptions            Subscription[]
   entitlements             Entitlement[]
@@ -445,6 +446,7 @@ model Message {
   forwardedFromId String?
   editedAt        DateTime?
   expiresAt       DateTime?
+  pinnedAt        DateTime?
   moderationHiddenAt DateTime?
   moderationHiddenById String?
   moderationReason String?
@@ -452,6 +454,7 @@ model Message {
   conversation Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User              @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
   reactions    MessageReaction[]
+  preferences  MessagePreference[]
   reports      Report[]
 
   @@index([conversationId, createdAt])
@@ -459,6 +462,19 @@ model Message {
   @@index([readAt])
   @@index([status])
   @@index([expiresAt])
+}
+
+model MessagePreference {
+  id        String    @id @default(cuid())
+  messageId String
+  userId    String
+  starredAt DateTime?
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([userId, starredAt])
 }
 
 model MessageReaction {

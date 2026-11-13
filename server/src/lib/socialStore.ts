@@ -183,16 +183,24 @@ export type MessageRecord = {
   readAt: string | null;
   deletedAt: string | null;
   status: 'SENT' | 'DELIVERED' | 'READ' | 'FAILED' | 'DELETED';
-  contentType?: 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT' | 'VOICE' | 'CONTACT' | 'LOCATION' | 'POLL' | 'EVENT';
+  contentType?: 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT' | 'VOICE' | 'GIF' | 'STICKER' | 'CONTACT' | 'LOCATION' | 'POLL' | 'EVENT';
   mediaUrl?: string | null;
   metadata?: Record<string, unknown> | null;
   replyToId?: string | null;
   forwardedFromId?: string | null;
   editedAt?: string | null;
   expiresAt?: string | null;
+  pinnedAt?: string | null;
   moderationHiddenAt?: string | null;
   moderationHiddenById?: string | null;
   moderationReason?: string | null;
+};
+
+export type MessagePreferenceRecord = {
+  id: string;
+  messageId: string;
+  userId: string;
+  starredAt: string | null;
 };
 
 export type MessageReactionRecord = {
@@ -268,6 +276,7 @@ const globalStore = globalThis as typeof globalThis & {
     conversations: ConversationRecord[];
     conversationParticipants: ConversationParticipantRecord[];
     messages: MessageRecord[];
+    messagePreferences: MessagePreferenceRecord[];
     messageReactions: MessageReactionRecord[];
     communities: CommunityRecord[];
     communityMembers: CommunityMemberRecord[];
@@ -297,6 +306,7 @@ if (!globalStore.__novaSocialStore) {
     conversations: [],
     conversationParticipants: [],
     messages: [],
+    messagePreferences: [],
     messageReactions: [],
     communities: [],
     communityMembers: [],
@@ -336,6 +346,7 @@ export const socialStore = {
       conversations: [],
       conversationParticipants: [],
       messages: [],
+      messagePreferences: [],
       messageReactions: [],
       communities: [],
       communityMembers: [],

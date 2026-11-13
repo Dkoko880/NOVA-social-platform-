@@ -36,16 +36,44 @@ describe('product area gaps', () => {
     const image = await request(app).post(`/api/conversations/${conversationId}/messages`).set('Cookie', alice.auth).send({ contentType: 'IMAGE', mediaUrl: 'https://example.com/photo.jpg', text: 'garden' });
     expect(image.status).toBe(201);
     expect(image.body.message.contentType).toBe('IMAGE');
+    const gif = await request(app).post(`/api/conversations/${conversationId}/messages`).set('Cookie', alice.auth).send({ contentType: 'GIF', mediaUrl: 'https://example.com/party.gif' });
+    const sticker = await request(app).post(`/api/conversations/${conversationId}/messages`).set('Cookie', alice.auth).send({ contentType: 'STICKER', mediaUrl: 'https://example.com/sticker.webp' });
+    expect(gif.body.message.contentType).toBe('GIF');
+    expect(sticker.body.message.contentType).toBe('STICKER');
+    const aliceEvents: Array<Record<string, unknown>> = [];
+    const stopListening = subscribeToUserEvents(alice.user.id, (event) => aliceEvents.push(event as Record<string, unknown>));
+    const received = await request(app).get(`/api/conversations/${conversationId}/messages`).set('Cookie', bob.auth);
+    expect(received.body.messages.find((message: { id: string }) => message.id === image.body.message.id).status).toBe('DELIVERED');
+    expect(aliceEvents).toContainEqual(expect.objectContaining({ event: 'message:delivered', messageId: image.body.message.id }));
+    stopListening();
     const reply = await request(app).post(`/api/conversations/${conversationId}/messages`).set('Cookie', bob.auth).send({ text: 'Nice photo', replyToId: image.body.message.id });
     expect(reply.body.message.replyToId).toBe(image.body.message.id);
+
+    const pinnedAndStarred = await request(app).patch(`/api/messages/${image.body.message.id}/preferences`).set('Cookie', bob.auth).send({ pinned: true, starred: true });
+    expect(pinnedAndStarred.status).toBe(200);
+    expect(pinnedAndStarred.body.message.pinnedAt).toBeTruthy();
+    expect(pinnedAndStarred.body.message.starredAt).toBe(true);
+    const aliceMessages = await request(app).get(`/api/conversations/${conversationId}/messages`).set('Cookie', alice.auth);
+    expect(aliceMessages.body.messages.find((message: { id: string }) => message.id === image.body.message.id)).toMatchObject({ pinnedAt: expect.any(String), starredAt: false });
+    const bobMessages = await request(app).get(`/api/conversations/${conversationId}/messages`).set('Cookie', bob.auth);
+    expect(bobMessages.body.messages.find((message: { id: string }) => message.id === image.body.message.id).starredAt).toBe(true);
+    const unpinnedAndUnstarred = await request(app).patch(`/api/messages/${image.body.message.id}/preferences`).set('Cookie', bob.auth).send({ pinned: false, starred: false });
+    expect(unpinnedAndUnstarred.body.message).toMatchObject({ pinnedAt: null, starredAt: false });
 
     const edited = await request(app).patch(`/api/messages/${reply.body.message.id}`).set('Cookie', bob.auth).send({ text: 'Really nice photo' });
     expect(edited.body.message.text).toBe('Really nice photo');
     expect(edited.body.message.editedAt).toBeTruthy();
     const reacted = await request(app).post(`/api/messages/${image.body.message.id}/reactions`).set('Cookie', bob.auth).send({ type: '❤️' });
     expect(reacted.body.reactions).toHaveLength(1);
-    expect((await request(app).get('/api/messages/search?q=Really%20nice').set('Cookie', alice.auth)).body.messages).toHaveLength(1);
-    expect((await request(app).get(`/api/conversations/${conversationId}/media`).set('Cookie', bob.auth)).body.media).toHaveLength(1);
+    const search = await request(app).get(`/api/messages/search?q=Really%20nice&conversationId=${conversationId}`).set('Cookie', alice.auth);
+    expect(search.body.messages.map((message: { id: string }) => message.id)).toContain(reply.body.message.id);
+    expect(search.body.messages.every((message: { text: string }) => message.text.toLowerCase().includes('really nice'))).toBe(true);
+    const media = await request(app).get(`/api/conversations/${conversationId}/media`).set('Cookie', bob.auth);
+    expect(media.body.media.map((message: { id: string }) => message.id)).toEqual(expect.arrayContaining([
+      image.body.message.id,
+      gif.body.message.id,
+      sticker.body.message.id,
+    ]));
 
     const preferences = await request(app).patch(`/api/conversations/${conversationId}/preferences`).set('Cookie', alice.auth).send({ pinned: true, archived: true, starred: true, disappearingAfterSeconds: 3600 });
     expect(preferences.status).toBe(200);
@@ -53,6 +81,8 @@ describe('product area gaps', () => {
     expect(Date.parse(expiring.body.message.expiresAt)).toBeGreaterThan(Date.now());
 
     const charlie = await register('GapCharlie');
+    const outsiderPin = await request(app).patch(`/api/messages/${image.body.message.id}/preferences`).set('Cookie', charlie.auth).send({ pinned: true });
+    expect(outsiderPin.status).toBe(403);
     const destination = await request(app).post('/api/conversations').set('Cookie', alice.auth).send({ participantId: charlie.user.id });
     const forwarded = await request(app).post(`/api/messages/${image.body.message.id}/forward`).set('Cookie', alice.auth).send({ conversationId: destination.body.conversation.id });
     expect(forwarded.status).toBe(201);

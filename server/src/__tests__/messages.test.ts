@@ -98,6 +98,74 @@ describe('messaging database responses', () => {
     }));
   });
 
+  it('persists message pin and personal star preferences only for conversation members', async () => {
+    const userId = 'database-user';
+    const token = signAccessToken({ sub: userId, email: 'user@example.com', role: 'USER' });
+    const outsiderToken = signAccessToken({ sub: 'outsider', email: 'outsider@example.com', role: 'USER' });
+    const currentMessage = { id: 'database-message', conversationId: 'database-conversation', deletedAt: null, moderationHiddenAt: null };
+    const fullMessage = {
+      ...currentMessage,
+      senderId: userId,
+      text: 'Hello',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      readAt: null,
+      status: 'SENT',
+      contentType: 'TEXT',
+      mediaUrl: null,
+      metadata: null,
+      replyToId: null,
+      forwardedFromId: null,
+      editedAt: null,
+      expiresAt: null,
+      pinnedAt: new Date(),
+      reactions: [],
+      preferences: [{ starredAt: new Date() }],
+    };
+
+    vi.spyOn(prisma.session, 'findFirst').mockResolvedValue({ id: 'database-session' } as never);
+    vi.spyOn(prisma.user, 'findUnique').mockImplementation((args) => {
+      const requestUserId = (args as unknown as { where: { id: string } }).where.id;
+      return Promise.resolve({
+        id: requestUserId,
+        email: `${requestUserId}@example.com`,
+        name: requestUserId,
+        role: 'USER',
+        status: 'ACTIVE',
+      }) as never;
+    });
+    vi.spyOn(prisma.conversationParticipant, 'findFirst')
+      .mockResolvedValueOnce({ id: 'member' } as never)
+      .mockResolvedValueOnce(null as never);
+    vi.spyOn(prisma.conversationParticipant, 'findMany').mockResolvedValue([{ userId }] as never);
+    vi.spyOn(prisma.message, 'findUnique').mockImplementation((args) => {
+      const query = args as unknown as { select?: unknown };
+      return Promise.resolve(query.select ? currentMessage : fullMessage) as never;
+    });
+    const updateMessage = vi.spyOn(prisma.message, 'update').mockResolvedValue(fullMessage as never);
+    const upsertPreference = vi.spyOn(prisma.messagePreference, 'upsert').mockResolvedValue({ id: 'preference' } as never);
+
+    const saved = await request(app)
+      .patch('/api/messages/database-message/preferences')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ pinned: true, starred: true });
+
+    expect(saved.status).toBe(200);
+    expect(saved.body.message.pinnedAt).toBeTruthy();
+    expect(saved.body.message.starredAt).toBe(true);
+    expect(updateMessage).toHaveBeenCalledWith(expect.objectContaining({ data: { pinnedAt: expect.any(Date) } }));
+    expect(upsertPreference).toHaveBeenCalledWith(expect.objectContaining({
+      where: { messageId_userId: { messageId: 'database-message', userId } },
+    }));
+
+    const denied = await request(app)
+      .patch('/api/messages/database-message/preferences')
+      .set('Authorization', `Bearer ${outsiderToken}`)
+      .send({ pinned: true });
+    expect(denied.status).toBe(403);
+    expect(updateMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('enforces group admin permissions through database-backed membership queries', async () => {
     const tokenFor = (userId: string) => signAccessToken({ sub: userId, email: `${userId}@example.com`, role: 'USER' });
     const authFor = (userId: string) => ({ Authorization: `Bearer ${tokenFor(userId)}` });
