@@ -9,14 +9,6 @@ export type NotificationPreference = {
   channel: 'in_app' | 'email' | 'push';
 };
 
-export type PresenceState = {
-  userId: string;
-  online: boolean;
-  status: string;
-  lastSeen: string | null;
-  updatedAt: string;
-};
-
 export type TypingState = {
   conversationId: string;
   userId: string;
@@ -111,7 +103,6 @@ export type LiveSession = {
 
 const globalStore = globalThis as typeof globalThis & {
   __novaPlatformStore?: {
-    presence: PresenceState[];
     typing: TypingState[];
     callSessions: CallSession[];
     liveSessions: LiveSession[];
@@ -122,7 +113,6 @@ const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 if (!globalStore.__novaPlatformStore) {
   globalStore.__novaPlatformStore = {
-    presence: [],
     typing: [],
     callSessions: [],
     liveSessions: [],
@@ -317,44 +307,6 @@ export async function markAllNotificationsRead(userId: string) {
   return affected.length;
 }
 
-export function setPresence(userId: string, next: { online?: boolean; status?: string; lastSeen?: string | null }) {
-  const existing = getStore().presence.find((entry) => entry.userId === userId) ?? {
-    userId,
-    online: false,
-    status: 'offline',
-    lastSeen: null,
-    updatedAt: new Date().toISOString(),
-  };
-
-  const record: PresenceState = {
-    userId,
-    online: next.online ?? existing.online,
-    status: next.status ?? existing.status,
-    lastSeen: next.lastSeen ?? (next.online === false ? new Date().toISOString() : existing.lastSeen),
-    updatedAt: new Date().toISOString(),
-  };
-
-  const index = getStore().presence.findIndex((entry) => entry.userId === userId);
-  if (index >= 0) {
-    getStore().presence[index] = record;
-  } else {
-    getStore().presence.push(record);
-  }
-
-  realtimeHub.emit('presence:change', { ...record, allowedUserIds: [userId] });
-  return { ...record };
-}
-
-export function getPresenceState(userId: string) {
-  return getStore().presence.find((entry) => entry.userId === userId) ?? {
-    userId,
-    online: false,
-    status: 'offline',
-    lastSeen: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-}
-
 export function setTypingState(conversationId: string, userId: string, isTyping: boolean, allowedUserIds = [userId]) {
   const timerKey = `${conversationId}:${userId}`;
   const existingTimer = typingTimers.get(timerKey);
@@ -518,7 +470,6 @@ export function updateLiveSession(liveId: string, updater: (session: LiveSession
 export function clearCommand2AStores() {
   for (const timer of typingTimers.values()) clearTimeout(timer);
   typingTimers.clear();
-  getStore().presence = [];
   getStore().typing = [];
   getStore().callSessions = [];
   getStore().liveSessions = [];

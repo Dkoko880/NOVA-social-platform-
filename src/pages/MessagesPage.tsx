@@ -50,13 +50,20 @@ type MessageItem = {
   reactions?: MessageReaction[]
   pinnedAt?: string | null
   starredAt?: boolean
+  receipts?: Array<{ recipientId: string; deliveredAt: string | null; readAt: string | null }>
 }
 type DirectoryUser = { id: string; name: string }
+type MessageReceiptInfo = { recipientId: string; name: string; deliveredAt: string | null; readAt: string | null }
+type PrivateReplyContext = { groupId: string; groupName: string; messageId: string; senderName: string; text: string }
+type MediaPickerItem = { id: string; title: string; mediaUrl: string; previewUrl: string }
 
 function MessageMediaAttachment({ message, isOwn }: { message: MessageItem; isOwn: boolean }) {
   const [loadedMedia, setLoadedMedia] = useState<{ url: string; source: string; error: string }>({ url: '', source: '', error: '' })
+  const [failedRemoteUrl, setFailedRemoteUrl] = useState('')
   const mediaUrl = message.mediaUrl ?? ''
   const isUploaded = mediaUrl.startsWith('/api/media/')
+
+  useEffect(() => { setFailedRemoteUrl('') }, [mediaUrl])
 
   useEffect(() => {
     if (!isUploaded) return
@@ -81,10 +88,11 @@ function MessageMediaAttachment({ message, isOwn }: { message: MessageItem; isOw
   const source = isUploaded ? matchesLoaded ? loadedMedia.source : '' : resolveMediaUrl(mediaUrl)
   if (isUploaded && !matchesLoaded) return <p className="mb-2 text-xs text-slate-500">Loading attachment…</p>
   if (matchesLoaded && loadedMedia.error) return <p className="mb-2 text-xs text-rose-700" role="alert">{loadedMedia.error}</p>
+  if (failedRemoteUrl === mediaUrl) return <p className="mb-2 text-xs text-rose-700" role="alert">This media is unavailable. <button type="button" onClick={() => setFailedRemoteUrl('')} className="underline">Retry</button></p>
   if (!source) return null
-  if (['IMAGE', 'GIF', 'STICKER'].includes(message.contentType ?? '')) return <a href={source} target="_blank" rel="noreferrer"><img src={source} alt={message.contentType === 'GIF' ? 'Shared GIF' : message.contentType === 'STICKER' ? 'Shared sticker' : 'Message attachment'} className={`mb-2 rounded-xl object-cover ${message.contentType === 'STICKER' ? 'max-h-40 max-w-40' : 'max-h-64'}`} /></a>
-  if (message.contentType === 'VIDEO') return <video controls src={source} className="mb-2 max-h-64 rounded-xl" />
-  if (message.contentType === 'VOICE') return <audio controls src={source} className="mb-2 max-w-full" />
+  if (['IMAGE', 'GIF', 'STICKER'].includes(message.contentType ?? '')) return <a href={source} target="_blank" rel="noreferrer"><img src={source} onError={() => setFailedRemoteUrl(mediaUrl)} alt={message.contentType === 'GIF' ? 'Shared GIF' : message.contentType === 'STICKER' ? 'Shared sticker' : 'Message attachment'} className={`mb-2 rounded-xl object-cover ${message.contentType === 'STICKER' ? 'max-h-40 max-w-40' : 'max-h-64'}`} /></a>
+  if (message.contentType === 'VIDEO') return <video controls src={source} onError={() => setFailedRemoteUrl(mediaUrl)} className="mb-2 max-h-64 rounded-xl" />
+  if (message.contentType === 'VOICE') return <audio controls src={source} onError={() => setFailedRemoteUrl(mediaUrl)} className="mb-2 max-w-full" />
   if (message.contentType === 'DOCUMENT') {
     const filename = mediaUrl.toLowerCase().endsWith('.pdf') ? 'attachment.pdf' : 'attachment.docx'
     return <div className="mb-2 flex flex-wrap gap-3">
@@ -158,6 +166,22 @@ export function MessagesPage() {
   const [recordingSeconds, setRecordingSeconds] = useState(0)
   const [voiceUploading, setVoiceUploading] = useState(false)
   const [typingUsers, setTypingUsers] = useState<string[]>([])
+  const [recordingUsers, setRecordingUsers] = useState<string[]>([])
+  const [presence, setPresence] = useState<{ online: boolean; lastSeenAt: string | null } | null>(null)
+  const [receiptInfoTarget, setReceiptInfoTarget] = useState('')
+  const [receiptInfoRows, setReceiptInfoRows] = useState<MessageReceiptInfo[]>([])
+  const [privateReplyContext, setPrivateReplyContext] = useState<PrivateReplyContext | null>(null)
+  const [privateReplyLoading, setPrivateReplyLoading] = useState(false)
+  const privateReplyContextKey = useRef('')
+  const [pickerType, setPickerType] = useState<'gif' | 'sticker' | null>(null)
+  const [pickerQuery, setPickerQuery] = useState('')
+  const [pickerItems, setPickerItems] = useState<MediaPickerItem[]>([])
+  const [pickerCategories, setPickerCategories] = useState<Array<{ name: string; query: string }>>([])
+  const [pickerLoading, setPickerLoading] = useState(false)
+  const [pickerError, setPickerError] = useState('')
+  const [pickerAttribution, setPickerAttribution] = useState('')
+  const [selectedMediaUnavailable, setSelectedMediaUnavailable] = useState(false)
+  const [chatMenuId, setChatMenuId] = useState('')
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const recordingStreamRef = useRef<MediaStream | null>(null)
@@ -167,6 +191,7 @@ export function MessagesPage() {
   const recordingPointerRef = useRef<{ id: number; origin: PointerPosition } | null>(null)
   const recordingStartedAtRef = useRef(0)
   const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const recordingPresenceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const mediaPreviewUrlRef = useRef('')
   const [contactName, setContactName] = useState('')
   const [contactPhone, setContactPhone] = useState('')
@@ -206,9 +231,20 @@ export function MessagesPage() {
     setMediaFileState(file)
   }
 
+  const updatePeerRecording = (conversationId: string, active: boolean) => {
+    if (!conversationId) return
+    void apiRequest(`/api/conversations/${encodeURIComponent(conversationId)}/recording`, {
+      method: 'POST',
+      body: JSON.stringify({ recording: active }),
+    }).catch((recordingError) => {
+      if (active) setError(recordingError instanceof Error ? `Other members may not see the recording indicator: ${recordingError.message}` : 'The recording indicator could not be shared.')
+    })
+  }
+
   useEffect(() => () => {
     recordingIntentRef.current = 'cancel'
     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+    if (recordingPresenceTimerRef.current) clearInterval(recordingPresenceTimerRef.current)
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
       recorderRef.current.onstop = null
       recorderRef.current.stop()
@@ -293,6 +329,10 @@ export function MessagesPage() {
         if (payload.message) {
           if (payload.conversationId === selectedIdRef.current) {
             setMessages((current) => upsertMessageById(current, payload.message!))
+            if (payload.message.senderId !== userIdRef.current) {
+              void apiRequest(`/api/conversations/${encodeURIComponent(payload.conversationId)}/read`, { method: 'POST' })
+                .catch((readError) => setError(readError instanceof Error ? readError.message : 'The incoming message could not be marked as read.'))
+            }
           }
           setConversations((current) => updateConversationPreviewFromMessage(current, payload.message!, userIdRef.current, selectedIdRef.current, payload.deleted))
           if (payload.deleted) void loadConversations()
@@ -305,16 +345,31 @@ export function MessagesPage() {
     }
     const onRead = (event: MessageEvent<string>) => {
       try {
-        const payload = JSON.parse(event.data) as { messageId: string; readAt: string }
-        setMessages((current) => current.map((message) => message.id === payload.messageId ? { ...message, readAt: payload.readAt, status: 'READ' } : message))
+        const payload = JSON.parse(event.data) as { messageId: string; recipientId: string; readAt: string }
+        setMessages((current) => current.map((message) => {
+          if (message.id !== payload.messageId) return message
+          const receipts = (message.receipts ?? []).map((receipt) => receipt.recipientId === payload.recipientId
+            ? { ...receipt, readAt: payload.readAt, deliveredAt: receipt.deliveredAt ?? payload.readAt }
+            : receipt)
+          const complete = receipts.length > 0 && receipts.every((receipt) => Boolean(receipt.readAt))
+          const delivered = receipts.length > 0 && receipts.every((receipt) => Boolean(receipt.deliveredAt))
+          return { ...message, receipts, readAt: complete ? payload.readAt : null, status: complete ? 'READ' : delivered ? 'DELIVERED' : 'SENT' }
+        }))
       } catch {
         setError('A read status update could not be read.')
       }
     }
     const onDelivered = (event: MessageEvent<string>) => {
       try {
-        const payload = JSON.parse(event.data) as { messageId: string }
-        setMessages((current) => current.map((message) => message.id === payload.messageId ? { ...message, status: 'DELIVERED' } : message))
+        const payload = JSON.parse(event.data) as { messageId: string; recipientId: string; deliveredAt: string }
+        setMessages((current) => current.map((message) => {
+          if (message.id !== payload.messageId) return message
+          const receipts = (message.receipts ?? []).map((receipt) => receipt.recipientId === payload.recipientId
+            ? { ...receipt, deliveredAt: payload.deliveredAt }
+            : receipt)
+          const delivered = receipts.length > 0 && receipts.every((receipt) => Boolean(receipt.deliveredAt))
+          return { ...message, receipts, status: delivered ? 'DELIVERED' : 'SENT' }
+        }))
       } catch {
         setError('A delivery status update could not be read.')
       }
@@ -339,12 +394,41 @@ export function MessagesPage() {
         setError('A typing status update could not be read.')
       }
     }
+    const onPresence = (event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as { conversationId: string; userId: string; visible?: boolean; online?: boolean; lastSeenAt?: string | null }
+        if (payload.conversationId !== selectedIdRef.current || payload.userId === userIdRef.current) return
+        setPresence(payload.visible === false ? null : { online: Boolean(payload.online), lastSeenAt: payload.lastSeenAt ?? null })
+      } catch {
+        setError('A presence update could not be read.')
+      }
+    }
+    const onRecording = (event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as { conversationId: string; userId: string; recording: boolean }
+        if (payload.conversationId !== selectedIdRef.current || payload.userId === userIdRef.current) return
+        setRecordingUsers((current) => payload.recording
+          ? current.includes(payload.userId) ? current : [...current, payload.userId]
+          : current.filter((id) => id !== payload.userId))
+      } catch {
+        setError('A recording status update could not be read.')
+      }
+    }
+    const onConversationState = () => {
+      void apiRequest<{ conversations: ConversationListItem[] }>('/api/conversations')
+        .then((response) => setConversations(response.conversations))
+        .catch((loadError) => setError(loadError instanceof Error ? loadError.message : 'Unread conversations could not be refreshed.'))
+    }
     source.addEventListener('message:new', onMessage)
     source.addEventListener('message:read', onRead)
     source.addEventListener('message:delivered', onDelivered)
     source.addEventListener('message:pinned', onPinned)
     source.addEventListener('typing:start', (event) => onTyping(event, true))
     source.addEventListener('typing:stop', (event) => onTyping(event, false))
+    source.addEventListener('presence:change', onPresence)
+    source.addEventListener('recording:change', onRecording)
+    source.addEventListener('conversation:read', onConversationState)
+    source.addEventListener('conversation:unread', onConversationState)
     return () => source.close()
   }, [])
 
@@ -352,9 +436,12 @@ export function MessagesPage() {
     if (!selectedId) {
       setMessages([])
       setTypingUsers([])
+      setRecordingUsers([])
+      setPresence(null)
       return
     }
     setTypingUsers([])
+    setRecordingUsers([])
 
     const loadMessages = async () => {
       try {
@@ -413,6 +500,88 @@ export function MessagesPage() {
   const activeConversation = useMemo(() => conversations.find((conversation) => conversation.id === selectedId) ?? null, [conversations, selectedId])
   const activePeer = useMemo(() => activeConversation?.participants.find((participant) => participant.userId !== user?.id)?.user ?? null, [activeConversation, user])
   const currentParticipant = activeConversation?.participants.find((participant) => participant.userId === user?.id)
+  const replyPrivately = async (message: MessageItem) => {
+    if (!activeConversation?.isGroup || message.senderId === user?.id || privateReplyLoading) return
+    const sender = activeConversation.participants.find((participant) => participant.userId === message.senderId)
+    if (!sender) return
+    setPrivateReplyLoading(true)
+    try {
+      const response = await apiRequest<{ conversation: { id: string } }>('/api/conversations', {
+        method: 'POST',
+        body: JSON.stringify({ participantId: message.senderId }),
+      })
+      await loadConversations()
+      setPrivateReplyContext({
+        groupId: activeConversation.id,
+        groupName: activeConversation.name ?? 'Group conversation',
+        messageId: message.id,
+        senderName: sender.user?.name ?? 'Group member',
+        text: message.text || `[${message.contentType?.toLowerCase() ?? 'message'}]`,
+      })
+      privateReplyContextKey.current = `${activeConversation.id}:${message.id}`
+      setSearchParams((current) => {
+        const next = new URLSearchParams(current)
+        next.set('conversationId', response.conversation.id)
+        next.set('replyGroupId', activeConversation.id)
+        next.set('replyMessageId', message.id)
+        return next
+      }, { replace: true })
+      setSelectedId(response.conversation.id)
+    } catch (replyError) {
+      setError(replyError instanceof Error ? replyError.message : 'Private reply could not be opened.')
+    } finally {
+      setPrivateReplyLoading(false)
+    }
+  }
+  const returnToGroupContext = () => {
+    if (!privateReplyContext) return
+    const groupId = privateReplyContext.groupId
+    setPrivateReplyContext(null)
+    privateReplyContextKey.current = ''
+    setSelectedId(groupId)
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      next.set('conversationId', groupId)
+      next.delete('replyGroupId')
+      next.delete('replyMessageId')
+      return next
+    }, { replace: true })
+  }
+  useEffect(() => {
+    const groupId = searchParams.get('replyGroupId')
+    const messageId = searchParams.get('replyMessageId')
+    const key = groupId && messageId ? `${groupId}:${messageId}` : ''
+    if (!key || privateReplyContextKey.current === key) return
+    if (!groupId || !messageId) return
+    let active = true
+    privateReplyContextKey.current = key
+    apiRequest<{ conversation: { id: string; name: string | null; participants: ConversationParticipant[]; messages: MessageItem[] } }>(`/api/conversations/${encodeURIComponent(groupId)}`)
+      .then(({ conversation }) => {
+        if (!active) return
+        const message = conversation.messages.find((item) => item.id === messageId)
+        if (!message) throw new Error('The original group message is no longer available.')
+        const senderName = conversation.participants.find((participant) => participant.userId === message.senderId)?.user?.name ?? 'Group member'
+        setPrivateReplyContext({
+          groupId,
+          groupName: conversation.name ?? 'Group conversation',
+          messageId,
+          senderName,
+          text: message.text || `[${message.contentType?.toLowerCase() ?? 'message'}]`,
+        })
+      })
+      .catch((replyError) => { if (active) setError(replyError instanceof Error ? replyError.message : 'Original group context could not be loaded.') })
+    return () => { active = false }
+  }, [searchParams])
+
+  useEffect(() => {
+    let active = true
+    setPresence(null)
+    if (!activePeer?.id || activeConversation?.isGroup) return () => { active = false }
+    apiRequest<{ presence: { online: boolean; lastSeenAt: string | null } }>(`/api/presence/${encodeURIComponent(activePeer.id)}`)
+      .then((response) => { if (active) setPresence(response.presence) })
+      .catch(() => { if (active) setPresence(null) })
+    return () => { active = false }
+  }, [activeConversation?.isGroup, activePeer?.id])
   const canManageActiveMembers = Boolean(activeConversation?.isGroup && (
     activeConversation.isChannel
       ? currentParticipant?.role === 'OWNER'
@@ -559,6 +728,7 @@ export function MessagesPage() {
           : composeType === 'POLL' ? Boolean(pollQuestion.trim() && pollOptions.filter((option) => option.trim()).length >= 2)
             : composeType === 'EVENT' ? Boolean(eventTitle.trim() && eventDate)
               : false
+  const canSendCurrent = canSend && !selectedMediaUnavailable
 
   const selectMediaFile = (file?: File, type = composeType) => {
     if (!file) {
@@ -652,6 +822,9 @@ export function MessagesPage() {
         const conversationId = recordingConversationRef.current
         if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
         recordingTimerRef.current = null
+        if (recordingPresenceTimerRef.current) clearInterval(recordingPresenceTimerRef.current)
+        recordingPresenceTimerRef.current = null
+        updatePeerRecording(conversationId, false)
         if (recorded.size > 10 * 1024 * 1024) {
           setError('The recording is larger than 10 MB. Record a shorter voice message.')
           setMediaFile(null)
@@ -693,6 +866,8 @@ export function MessagesPage() {
         setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000))
       }, 250)
       setRecording(true)
+      updatePeerRecording(recordingConversationRef.current, true)
+      recordingPresenceTimerRef.current = setInterval(() => updatePeerRecording(recordingConversationRef.current, true), 10_000)
       const pendingAction = recordingPendingActionRef.current
       if (pendingAction) stopVoiceRecording(pendingAction === 'send')
     } catch (recordingError) {
@@ -751,7 +926,7 @@ export function MessagesPage() {
 
   const handleSendMessage = async (event?: FormEvent) => {
     event?.preventDefault()
-    if (!canSend || !selectedId || sending) return
+    if (!canSendCurrent || !selectedId || sending) return
     const metadata = composeType === 'CONTACT' ? { name: contactName.trim(), phone: contactPhone.trim() }
       : composeType === 'LOCATION' ? { label: locationLabel.trim(), latitude: Number(latitude), longitude: Number(longitude) }
         : composeType === 'POLL' ? { question: pollQuestion.trim(), options: pollOptions.filter((option) => option.trim()).map((text, index) => ({ id: `option-${index + 1}`, text: text.trim() })), votes: {} }
@@ -906,6 +1081,60 @@ export function MessagesPage() {
     }
   }
 
+  const loadMediaPicker = async (kind: 'gif' | 'sticker', query = pickerQuery) => {
+    setPickerLoading(true)
+    setPickerError('')
+    try {
+      const response = await apiRequest<{ items: MediaPickerItem[]; categories?: Array<{ name: string; query: string }>; attribution?: string }>(
+        `/api/media-picker/${kind}?q=${encodeURIComponent(query.trim())}`,
+      )
+      setPickerItems(response.items ?? [])
+      setPickerAttribution(response.attribution ?? '')
+      if (kind === 'sticker' && !pickerCategories.length) {
+        const categoryResponse = await apiRequest<{ categories: Array<{ name: string; query: string }> }>('/api/media-picker/sticker?categories=true')
+        setPickerCategories(categoryResponse.categories)
+      }
+    } catch (pickerError) {
+      setPickerItems([])
+      setPickerError(pickerError instanceof Error ? pickerError.message : 'Media search is unavailable.')
+    } finally {
+      setPickerLoading(false)
+    }
+  }
+
+  const openMediaPicker = (kind: 'gif' | 'sticker') => {
+    setPickerType(kind)
+    setPickerQuery('')
+    setComposeType(kind.toUpperCase())
+    setMediaUrl('')
+    setMediaFile(null)
+    setShowAttachmentSheet(false)
+    void loadMediaPicker(kind, '')
+  }
+
+  const showMessageInfo = async (message: MessageItem) => {
+    setReceiptInfoTarget(message.id)
+    setReceiptInfoRows([])
+    try {
+      const response = await apiRequest<{ receipts: MessageReceiptInfo[] }>(`/api/messages/${encodeURIComponent(message.id)}/receipts`)
+      setReceiptInfoRows(response.receipts)
+    } catch (infoError) {
+      setReceiptInfoTarget('')
+      setError(infoError instanceof Error ? infoError.message : 'Message receipt information could not be loaded.')
+    }
+  }
+
+  const markConversationUnread = async (conversationId: string) => {
+    try {
+      await apiRequest(`/api/conversations/${encodeURIComponent(conversationId)}/unread`, { method: 'POST' })
+      setChatMenuId('')
+      await loadConversations()
+      if (selectedIdRef.current === conversationId) selectConversation('')
+    } catch (unreadError) {
+      setError(unreadError instanceof Error ? unreadError.message : 'Conversation could not be marked unread.')
+    }
+  }
+
   const copyMessage = async (message: MessageItem) => {
     if (!navigator.clipboard?.writeText) {
       setError('Copy is unavailable because clipboard access is not supported.')
@@ -1032,7 +1261,8 @@ export function MessagesPage() {
               const isGroupConversation = conversation.isGroup || conversation.participants.length > 2
               const time = lastMessage?.createdAt ?? conversation.lastMessageAt ?? conversation.updatedAt
               return (
-                        <button key={conversation.id} type="button" onClick={() => { selectConversation(conversation.id); setSearchResults(null); setShowGroupProfile(false); setShowAddMembers(false); setShowManageMembers(false) }} className={`flex w-full items-center gap-3 px-2 py-3 text-left transition ${selectedId === conversation.id ? 'bg-[#f2f8f3]' : 'hover:bg-slate-50'}`}>
+                <div key={conversation.id} className="relative">
+                  <button type="button" onContextMenu={(event) => { event.preventDefault(); setChatMenuId(conversation.id) }} onClick={() => { selectConversation(conversation.id); setSearchResults(null); setShowGroupProfile(false); setShowAddMembers(false); setShowManageMembers(false); setChatMenuId('') }} className={`flex w-full items-center gap-3 px-2 py-3 pr-10 text-left transition ${selectedId === conversation.id ? 'bg-[#f2f8f3]' : 'hover:bg-slate-50'}`}>
                     <Avatar src={peer?.avatar ?? ''} alt={title} size="md" />
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center justify-between gap-2">
@@ -1051,14 +1281,19 @@ export function MessagesPage() {
                     </span>
                   </span>
                   {conversation.unreadCount ? <span aria-label={`${conversation.unreadCount} unread messages`} className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[#078744] px-1 text-[10px] font-semibold text-white">{conversation.unreadCount > 99 ? '99+' : conversation.unreadCount}</span> : null}
-                </button>
+                  </button>
+                  <button type="button" aria-label={`Chat options for ${title}`} aria-expanded={chatMenuId === conversation.id} onClick={() => setChatMenuId((current) => current === conversation.id ? '' : conversation.id)} className="absolute right-1 top-3 rounded-full p-1.5 text-slate-500 hover:bg-slate-200"><MoreVertical className="h-4 w-4" aria-hidden="true" /></button>
+                  {chatMenuId === conversation.id ? <div className="absolute right-2 top-10 z-20 w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
+                    <button type="button" onClick={() => void markConversationUnread(conversation.id)} className="w-full rounded-lg px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">Mark as unread</button>
+                  </div> : null}
+                </div>
               )
             })}
           </div>
         </aside>
 
         <section className={`${selectedId ? 'flex' : 'hidden lg:flex'} h-full min-h-0 min-w-0 flex-col bg-[#efeae2] bg-[radial-gradient(#d8d4ca_0.7px,transparent_0.7px)] [background-size:20px_20px] p-0`}>
-          {error && selectedId ? <div className="mx-2 mb-2 flex items-center justify-between gap-2 rounded-xl border border-rose-200 bg-white p-2.5 text-xs text-rose-700" role="alert"><span className="min-w-0">{error}</span>{sendFailed ? <button type="button" onClick={() => void handleSendMessage()} disabled={sending || !canSend} className="shrink-0 font-semibold underline disabled:opacity-50">Retry send</button> : null}</div> : null}
+          {error && selectedId ? <div className="mx-2 mb-2 flex items-center justify-between gap-2 rounded-xl border border-rose-200 bg-white p-2.5 text-xs text-rose-700" role="alert"><span className="min-w-0">{error}</span>{sendFailed ? <button type="button" onClick={() => void handleSendMessage()} disabled={sending || !canSendCurrent} className="shrink-0 font-semibold underline disabled:opacity-50">Retry send</button> : null}</div> : null}
                       {!selectedId && error ? <div role="alert" className="flex items-center justify-between gap-2 px-2 py-3 text-xs text-rose-700"><span>{error}</span><button type="button" onClick={() => void loadConversations()} className="shrink-0 font-semibold underline">Retry</button></div> : null}
           {activeConversation ? (
             <>
@@ -1072,7 +1307,13 @@ export function MessagesPage() {
                     {activeConversation.isGroup && !activeConversation.isChannel
                       ? <button type="button" onClick={() => openGroupProfile()} className="truncate text-left font-semibold text-slate-900 hover:text-indigo-700">{activeConversation.name ?? 'Group conversation'}</button>
                       : <p className="truncate font-semibold text-slate-900">{activeConversation.name ?? activePeer?.name ?? 'Group conversation'}</p>}
-                    {activePeer && !activeConversation.isGroup ? <div className="flex items-center gap-2"><Link to={`/profile/${encodeURIComponent(activePeer.id)}`} className="text-xs text-indigo-700">View profile</Link>{typingUsers.length ? <span className="text-xs text-[#078744]" role="status">{typingUsers.length > 1 ? 'Several people are typing…' : 'typing…'}</span> : null}</div> : <p className="text-xs text-slate-500">{typingUsers.length ? 'Someone is typing…' : `${activeConversation.participants.length} members`}</p>}
+                    {activePeer && !activeConversation.isGroup
+                      ? <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <Link to={`/profile/${encodeURIComponent(activePeer.id)}`} className="text-xs text-indigo-700">View profile</Link>
+                        {presence ? <span className="text-xs text-slate-500" role="status">{presence.online ? 'Online' : presence.lastSeenAt ? `Last seen ${new Date(presence.lastSeenAt).toLocaleString()}` : ''}</span> : null}
+                        {recordingUsers.length ? <span className="text-xs text-[#078744]" role="status">Recording a voice message…</span> : typingUsers.length ? <span className="text-xs text-[#078744]" role="status">{typingUsers.length > 1 ? 'Several people are typing…' : 'typing…'}</span> : null}
+                      </div>
+                      : <p className="text-xs text-slate-500">{recordingUsers.length ? 'A member is recording a voice message…' : typingUsers.length ? 'Someone is typing…' : `${activeConversation.participants.length} members`}</p>}
                   </div>
                 </div>
                 <div className="relative flex shrink-0 items-center gap-0.5 overflow-visible">
@@ -1085,6 +1326,7 @@ export function MessagesPage() {
                   {(activePeer || activeConversation.isGroup) ? <Link to={activeConversation.isGroup ? `/calls?conversation=${encodeURIComponent(activeConversation.id)}&type=voice` : `/calls?user=${encodeURIComponent(activePeer!.id)}&type=voice`} title="Start voice call" aria-label="Start voice call" className="rounded-full p-1.5 text-slate-600 hover:bg-slate-100"><Phone className="h-4 w-4" aria-hidden="true" /></Link> : null}
                   <button type="button" title="More conversation options" aria-label="More conversation options" aria-expanded={showConversationMenu} onClick={() => setShowConversationMenu((open) => !open)} className="rounded-full p-1.5 text-slate-500 hover:bg-slate-100"><MoreVertical className="h-4 w-4" /></button>
                   {showConversationMenu ? <div className="absolute right-0 top-full z-30 mt-1 w-56 rounded-xl border border-slate-200 bg-white p-1 text-slate-700 shadow-xl">
+                    <button type="button" onClick={() => { setShowConversationMenu(false); void markConversationUnread(activeConversation.id) }} className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-50">Mark as unread</button>
                     <button type="button" onClick={() => { setShowConversationMenu(false); void updatePreference('pinned') }} className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-50">{activeConversation.pinnedAt ? 'Unpin conversation' : 'Pin conversation'}</button>
                     <button type="button" onClick={() => { setShowConversationMenu(false); void updatePreference('starred') }} className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-50">{activeConversation.starredAt ? 'Remove from favorites' : 'Add to favorites'}</button>
                     <button type="button" onClick={() => { setShowConversationMenu(false); void updatePreference('mutedUntil') }} className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-50">{activeConversation.mutedUntil && new Date(activeConversation.mutedUntil).getTime() > Date.now() ? 'Unmute conversation' : 'Mute for 24 hours'}</button>
@@ -1098,6 +1340,14 @@ export function MessagesPage() {
                   </div> : null}
                 </div>
               </header>
+
+              {privateReplyContext && selectedId !== privateReplyContext.groupId ? <section aria-label="Original group message context" className="mx-2 mt-2 flex items-center gap-3 rounded-xl border border-emerald-200 bg-white p-3 shadow-sm">
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-semibold text-[#087b43]">Private reply to {privateReplyContext.senderName} · {privateReplyContext.groupName}</p>
+                  <p className="truncate text-sm text-slate-600">{privateReplyContext.text}</p>
+                </div>
+                <button type="button" onClick={returnToGroupContext} className="shrink-0 rounded-lg px-3 py-2 text-xs font-semibold text-[#087b43] hover:bg-[#e8f5e9]">Return to group</button>
+              </section> : null}
 
               {showManageMembers && activeConversation.isGroup && activeConversation.isChannel && canManageActiveMembers ? <section aria-label="Manage channel members" className="mx-2 mt-2 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
                 <div className="flex items-center justify-between"><h3 className="text-sm font-semibold text-slate-900">Channel admins and members</h3><button type="button" onClick={() => setShowManageMembers(false)} aria-label="Close member management" className="rounded-full p-1 text-slate-500 hover:bg-slate-100"><X className="h-4 w-4" /></button></div>
@@ -1172,6 +1422,8 @@ export function MessagesPage() {
                           <button type="button" onClick={() => setReactionTargetId(reactionTargetId === message.id ? '' : message.id)} className="hover:underline" aria-expanded={reactionTargetId === message.id}>React</button>
                           <button type="button" onClick={() => { setForwardingId(forwardingId === message.id ? '' : message.id); setForwardTargetId('') }} className="hover:underline">Forward</button>
                           <button type="button" onClick={() => void copyMessage(message)} className="hover:underline">Copy</button>
+                          {isOwn ? <button type="button" onClick={() => void showMessageInfo(message)} className="hover:underline">Info</button> : null}
+                          {activeConversation.isGroup && !isOwn ? <button type="button" disabled={privateReplyLoading} onClick={() => void replyPrivately(message)} className="hover:underline disabled:opacity-50">Reply privately</button> : null}
                           <button type="button" onClick={() => void updateMessagePreference(message, 'starred')} className="hover:underline">{message.starredAt ? 'Unstar' : 'Star'}</button>
                           <button type="button" onClick={() => void updateMessagePreference(message, 'pinned')} className="hover:underline">{message.pinnedAt ? 'Unpin' : 'Pin'}</button>
                           {!isOwn ? <button type="button" onClick={() => void reportMessage(message)} className="hover:underline">Report</button> : null}
@@ -1181,6 +1433,15 @@ export function MessagesPage() {
                         {reactionTargetId === message.id ? <div aria-label="Choose a reaction" className="mt-2 flex gap-1 rounded-full bg-white/80 p-1">{['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => <button key={emoji} type="button" onClick={() => void toggleReaction(message, emoji)} aria-label={`React ${emoji}`} className="rounded-full px-1.5 py-1 text-base hover:bg-slate-100">{emoji}</button>)}</div> : null}
                         {editingId === message.id ? <div className="mt-2 flex gap-2"><input value={editDraft} onChange={(event) => setEditDraft(event.target.value)} className="min-w-0 flex-1 rounded-lg px-2 py-1 text-slate-900" /><button type="button" onClick={() => void saveMessageEdit(message)} className="font-semibold">Save</button><button type="button" onClick={() => setEditingId('')}>Cancel</button></div> : null}
                         {forwardingId === message.id ? <div className="mt-2 flex gap-2"><select aria-label="Forward to conversation" value={forwardTargetId} onChange={(event) => setForwardTargetId(event.target.value)} className="min-w-0 flex-1 rounded-lg px-2 py-1 text-slate-900"><option value="">Choose chat</option>{conversations.filter((item) => item.id !== selectedId).map((item) => <option key={item.id} value={item.id}>{item.name ?? item.participants.find((participant) => participant.userId !== user?.id)?.user?.name ?? 'Group chat'}</option>)}</select><button type="button" disabled={!forwardTargetId} onClick={() => void forwardMessage(message)} className="font-semibold disabled:opacity-50">Send</button></div> : null}
+                        {receiptInfoTarget === message.id ? <section aria-label="Message information" className="mt-2 min-w-48 rounded-lg border border-slate-200 bg-white p-2 text-slate-700">
+                          <div className="flex items-center justify-between gap-2"><p className="text-xs font-semibold">Message information</p><button type="button" aria-label="Close message information" onClick={() => setReceiptInfoTarget('')}><X className="h-3.5 w-3.5" /></button></div>
+                          {receiptInfoRows.map((receipt) => <div key={receipt.recipientId} className="mt-2 border-t border-slate-100 pt-2 text-[10px]">
+                            <p className="font-semibold">{receipt.name}</p>
+                            <p>Delivered {receipt.deliveredAt ? new Date(receipt.deliveredAt).toLocaleString() : 'Not yet'}</p>
+                            <p>Read {receipt.readAt ? new Date(receipt.readAt).toLocaleString() : 'Not yet'}</p>
+                          </div>)}
+                          {!receiptInfoRows.length ? <p className="mt-2 text-[10px] text-slate-500">No other recipients.</p> : null}
+                        </section> : null}
                       </div>
                     </div>
                     </Fragment>
@@ -1194,6 +1455,24 @@ export function MessagesPage() {
                   {voiceLocked ? <span className="flex shrink-0 gap-2"><button type="button" onClick={() => stopVoiceRecording(false)} className="rounded-lg px-3 py-1 font-semibold hover:bg-rose-100">Cancel</button><button type="button" onClick={() => stopVoiceRecording(true)} className="rounded-lg bg-[#078744] px-3 py-1 font-semibold text-white hover:bg-[#066d39]">Send</button></span> : null}
                 </div> : null}
                 {showEmojiPicker ? <section aria-label="Choose emoji" className="absolute bottom-full left-2 z-30 mb-2 flex gap-2 rounded-xl border border-slate-200 bg-white p-2 shadow-lg">{['😀', '😂', '❤️', '👍', '🎉', '🙏'].map((emoji) => <button key={emoji} type="button" onClick={() => { setDraft((current) => `${current}${emoji}`); setShowEmojiPicker(false) }} aria-label={`Insert ${emoji}`} className="rounded-lg p-2 text-xl hover:bg-slate-100">{emoji}</button>)}</section> : null}
+                {pickerType ? <section aria-label={pickerType === 'gif' ? 'GIF picker' : 'Sticker picker'} className="absolute inset-x-2 bottom-full z-30 mb-2 max-h-[min(70vh,34rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-3 shadow-xl sm:inset-x-3 sm:p-4">
+                  <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold text-slate-900">{pickerType === 'gif' ? 'Choose a GIF' : 'Choose a sticker'}</h3><button type="button" aria-label="Close media picker" onClick={() => setPickerType(null)} className="rounded-full p-1 text-slate-500 hover:bg-slate-100"><X className="h-4 w-4" /></button></div>
+                  <div className="mt-3 flex gap-2">
+                    <input aria-label={`Search ${pickerType === 'gif' ? 'GIFs' : 'stickers'}`} value={pickerQuery} onChange={(event) => setPickerQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void loadMediaPicker(pickerType, pickerQuery) } }} placeholder={`Search ${pickerType === 'gif' ? 'GIFs' : 'stickers'}`} className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+                    <button type="button" onClick={() => void loadMediaPicker(pickerType, pickerQuery)} disabled={pickerLoading} className="rounded-lg bg-[#078744] px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">Search</button>
+                  </div>
+                  {pickerType === 'sticker' && pickerCategories.length ? <div className="mt-2 flex gap-2 overflow-x-auto pb-1">{pickerCategories.map((category) => <button key={category.query} type="button" onClick={() => { setPickerQuery(category.query); void loadMediaPicker('sticker', category.query) }} className="shrink-0 rounded-full bg-[#e8f5e9] px-3 py-1.5 text-xs font-medium text-[#087b43]">{category.name}</button>)}</div> : null}
+                  {pickerError ? <p role="alert" className="mt-3 rounded-lg bg-rose-50 p-2 text-xs text-rose-700">{pickerError}</p> : null}
+                  {pickerLoading ? <p role="status" className="mt-3 text-xs text-slate-500">Searching…</p> : null}
+                  {!pickerLoading && !pickerError && !pickerItems.length ? <p className="mt-3 text-xs text-slate-500">No media found. Try another search.</p> : null}
+                  <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    {pickerItems.map((item) => <button key={item.id} type="button" aria-label={`Choose ${pickerType} ${item.title || item.id}`} onClick={() => { setComposeType(pickerType.toUpperCase()); setMediaUrl(item.mediaUrl); setMediaFile(null); setSelectedMediaUnavailable(false); setPickerType(null); setError('') }} className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50 text-left hover:border-[#078744] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#078744]">
+                      <img src={item.previewUrl} alt={item.title || `Preview ${pickerType}`} onError={() => setPickerError('Some media previews could not be loaded. Search again to choose another item.')} className="aspect-square w-full object-cover" />
+                      <span className="block truncate px-2 py-1.5 text-[10px] text-slate-600">{item.title || 'GIPHY'}</span>
+                    </button>)}
+                  </div>
+                  {pickerAttribution ? <p className="mt-2 text-right text-[10px] text-slate-500">{pickerAttribution}</p> : null}
+                </section> : null}
                 {showAttachmentSheet ? <section aria-label="Choose attachment" className="absolute inset-x-2 bottom-full z-30 mb-2 rounded-2xl border border-slate-200 bg-white p-4 shadow-xl sm:inset-x-3">
                   <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300" aria-hidden="true" />
                   <div className="grid grid-cols-4 gap-3">
@@ -1203,8 +1482,8 @@ export function MessagesPage() {
                       { label: 'Location', icon: MapPin, action: shareCurrentLocation },
                       { label: 'Contact', icon: UsersRound, action: () => { setComposeType('CONTACT'); setShowAttachmentSheet(false) } },
                       { label: 'Document', icon: FileText, action: () => { setComposeType('DOCUMENT'); setShowAttachmentSheet(false); documentInputRef.current?.click() } },
-                      { label: 'GIF', icon: Images, action: () => { setComposeType('GIF'); setMediaUrl(''); setShowAttachmentSheet(false) } },
-                      { label: 'Sticker', icon: Smile, action: () => { setComposeType('STICKER'); setMediaUrl(''); setShowAttachmentSheet(false) } },
+                      { label: 'GIF', icon: Images, action: () => openMediaPicker('gif') },
+                      { label: 'Sticker', icon: Smile, action: () => openMediaPicker('sticker') },
                       { label: 'Poll', icon: ListChecks, action: () => { setComposeType('POLL'); setShowAttachmentSheet(false) } },
                       { label: 'Event', icon: CalendarDays, action: () => { setComposeType('EVENT'); setShowAttachmentSheet(false) } },
                       { label: 'AI Images', icon: Image, action: () => { setShowAttachmentSheet(false); setError('AI image generation is not configured in this app. No image was created.') } },
@@ -1216,7 +1495,11 @@ export function MessagesPage() {
                 <input ref={cameraInputRef} type="file" accept="image/jpeg,image/png,image/webp" capture="environment" className="hidden" aria-label="Capture an image" onChange={(event) => { setComposeType('IMAGE'); selectMediaFile(event.target.files?.[0], 'IMAGE'); event.target.value = '' }} />
                 <input ref={documentInputRef} type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="hidden" aria-label="Choose a document" onChange={(event) => { setComposeType('DOCUMENT'); selectMediaFile(event.target.files?.[0], 'DOCUMENT'); event.target.value = '' }} />
                 {replyTarget ? <div className="mb-2 flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600"><span className="truncate">Replying to: {replyTarget.text || replyTarget.contentType}</span><button type="button" onClick={() => setReplyTarget(null)} aria-label="Cancel reply"><X className="h-4 w-4" /></button></div> : null}
-                {['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'GIF', 'STICKER'].includes(composeType) ? <div className="mb-2 flex items-center gap-2"><input type="url" aria-label={composeType === 'GIF' ? 'GIF URL' : composeType === 'STICKER' ? 'Sticker URL' : 'Attachment URL'} value={mediaUrl} onChange={(event) => { setMediaUrl(event.target.value); setMediaFile(null) }} placeholder={composeType === 'GIF' ? 'Paste an HTTPS GIF link' : composeType === 'STICKER' ? 'Paste an HTTPS sticker link' : 'Paste an HTTPS attachment link'} className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-xs" />{mediaFile ? <span className="max-w-32 truncate text-xs text-slate-500">{mediaFile.name}</span> : null}</div> : null}
+                {['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'GIF', 'STICKER'].includes(composeType) ? <div className="mb-2 flex items-center gap-2"><input type="url" aria-label={composeType === 'GIF' ? 'GIF URL' : composeType === 'STICKER' ? 'Sticker URL' : 'Attachment URL'} value={mediaUrl} onChange={(event) => { setMediaUrl(event.target.value); setMediaFile(null); setSelectedMediaUnavailable(false) }} placeholder={composeType === 'GIF' ? 'Paste an HTTPS GIF link' : composeType === 'STICKER' ? 'Paste an HTTPS sticker link' : 'Paste an HTTPS attachment link'} className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-xs" />{mediaFile ? <span className="max-w-32 truncate text-xs text-slate-500">{mediaFile.name}</span> : null}</div> : null}
+                {['GIF', 'STICKER'].includes(composeType) && mediaUrl ? <div className="mb-2 flex items-center gap-2 rounded-lg bg-slate-50 p-2">
+                  <img src={resolveMediaUrl(mediaUrl)} alt={composeType === 'GIF' ? 'Selected GIF preview' : 'Selected sticker preview'} onError={() => setSelectedMediaUnavailable(true)} className="max-h-24 max-w-32 rounded-lg object-contain" />
+                  {selectedMediaUnavailable ? <p role="alert" className="text-xs text-rose-700">This media is unavailable. Choose a different item.</p> : null}
+                </div> : null}
                 {composeType === 'VIDEO' ? <p className="mb-2 text-xs text-slate-500">Video uploads up to 100 MB.</p> : null}
                 {mediaFile && mediaPreviewUrl ? <div className="mb-2 flex items-center justify-between rounded-lg bg-slate-50 p-2 text-xs text-slate-600">{composeType === 'IMAGE' ? <img src={mediaPreviewUrl} alt="Attachment preview" className="h-14 w-14 rounded-lg object-cover" /> : composeType === 'VIDEO' ? <video controls src={mediaPreviewUrl} className="max-h-16 rounded-lg" /> : composeType === 'VOICE' ? <audio controls src={mediaPreviewUrl} className="max-w-full" /> : <span className="truncate">{mediaFile.name}</span>}<button type="button" onClick={() => setMediaFile(null)} aria-label="Remove attachment" className="rounded-full p-1 text-slate-500 hover:bg-slate-200"><X className="h-4 w-4" /></button></div> : null}
                 {composeType === 'CONTACT' ? <div className="mb-2 flex gap-2"><input aria-label="Contact name" value={contactName} onChange={(event) => setContactName(event.target.value)} placeholder="Contact name" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" /><input aria-label="Contact phone" value={contactPhone} onChange={(event) => setContactPhone(event.target.value)} placeholder="Phone number" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" /></div> : null}
@@ -1228,7 +1511,7 @@ export function MessagesPage() {
                   <button type="button" onClick={() => setShowAttachmentSheet((open) => !open)} aria-label="Attach" aria-expanded={showAttachmentSheet} title="Attach" className="rounded-full p-2 text-slate-500 hover:bg-white"><Paperclip className="h-5 w-5" /></button>
                   <textarea aria-label="Type message" rows={1} value={draft} onChange={(event) => handleDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && composeType === 'TEXT') { event.preventDefault(); void handleSendMessage() } }} placeholder={composeType === 'TEXT' ? 'Message' : 'Add a caption'} className="max-h-24 min-w-0 flex-1 resize-none border-0 bg-transparent py-2 text-sm text-slate-800 placeholder:text-slate-500 focus:outline-none" />
                   <button type="button" onClick={() => { setComposeType('IMAGE'); cameraInputRef.current?.click() }} aria-label="Take a photo" title="Camera" className="rounded-full p-2 text-slate-500 hover:bg-white"><Camera className="h-5 w-5" /></button>
-                  {composeType === 'TEXT' && !draft.trim() || composeType === 'VOICE' && !canSend ? <button
+                  {composeType === 'TEXT' && !draft.trim() || composeType === 'VOICE' && !canSendCurrent ? <button
                     type="button"
                     disabled={sending || voiceUploading || voiceLocked}
                     onPointerDown={handleVoicePointerDown}
@@ -1244,7 +1527,7 @@ export function MessagesPage() {
                     aria-label={recording ? 'Recording voice message' : 'Hold to record voice message'}
                     title={recording ? 'Release to send · slide up to lock' : 'Hold to record'}
                     className={`flex h-10 w-10 shrink-0 touch-none select-none items-center justify-center rounded-full ${recording ? 'bg-red-600' : 'bg-[#078744]'} text-white disabled:opacity-60`}
-                  >{recording ? <Square className="h-4 w-4" /> : <Mic className="h-5 w-5" />}</button> : <button type="submit" disabled={sending || voiceUploading || !canSend} aria-label={sending || voiceUploading ? 'Sending message' : 'Send message'} title="Send" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#078744] text-white disabled:opacity-40"><SendHorizontal className="h-5 w-5" /></button>}
+                  >{recording ? <Square className="h-4 w-4" /> : <Mic className="h-5 w-5" />}</button> : <button type="submit" disabled={sending || voiceUploading || !canSendCurrent} aria-label={sending || voiceUploading ? 'Sending message' : 'Send message'} title="Send" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#078744] text-white disabled:opacity-40"><SendHorizontal className="h-5 w-5" /></button>}
                 </div>
               </form>
             </>

@@ -33,6 +33,10 @@ type Session = {
   lastSeenAt: string | null
   expiresAt: string
 }
+type MessagingPreferences = {
+  readReceiptsEnabled: boolean
+  presenceVisibility: 'EVERYONE' | 'MY_CONTACTS' | 'NOBODY'
+}
 
 export function SettingsPage() {
   const navigate = useNavigate()
@@ -48,6 +52,10 @@ export function SettingsPage() {
   const [pushBusy, setPushBusy] = useState(false)
   const [pushStatus, setPushStatus] = useState('')
   const [pushError, setPushError] = useState('')
+  const [messagingPreferences, setMessagingPreferences] = useState<MessagingPreferences | null>(null)
+  const [messagingPreferencesLoading, setMessagingPreferencesLoading] = useState(true)
+  const [messagingPreferencesBusy, setMessagingPreferencesBusy] = useState(false)
+  const [messagingPreferencesError, setMessagingPreferencesError] = useState('')
 
   useEffect(() => {
     let mounted = true
@@ -57,6 +65,31 @@ export function SettingsPage() {
       .finally(() => { if (mounted) setSessionsLoading(false) })
     return () => { mounted = false }
   }, [])
+
+  useEffect(() => {
+    let mounted = true
+    apiRequest<{ preferences: MessagingPreferences }>('/api/messaging/preferences')
+      .then((response) => { if (mounted) setMessagingPreferences(response.preferences) })
+      .catch((error) => { if (mounted) setMessagingPreferencesError(error instanceof Error ? error.message : 'Messaging preferences could not be loaded.') })
+      .finally(() => { if (mounted) setMessagingPreferencesLoading(false) })
+    return () => { mounted = false }
+  }, [])
+
+  const updateMessagingPreference = async (update: Partial<MessagingPreferences>) => {
+    setMessagingPreferencesBusy(true)
+    setMessagingPreferencesError('')
+    try {
+      const response = await apiRequest<{ preferences: MessagingPreferences }>('/api/messaging/preferences', {
+        method: 'PATCH',
+        body: JSON.stringify(update),
+      })
+      setMessagingPreferences(response.preferences)
+    } catch (error) {
+      setMessagingPreferencesError(error instanceof ApiError ? error.message : 'Messaging preference could not be updated.')
+    } finally {
+      setMessagingPreferencesBusy(false)
+    }
+  }
 
   useEffect(() => {
     let mounted = true
@@ -201,6 +234,46 @@ export function SettingsPage() {
             ))}
             {!sessionsLoading && !sessionError && sessions.length === 0 ? <li className="py-4 text-sm text-slate-500">No active sessions found.</li> : null}
           </ul>
+        </section>
+
+        <section className="mt-6 border-t border-slate-200 pt-5">
+          <div>
+            <h3 className="font-semibold text-slate-900">Messaging privacy</h3>
+            <p className="text-sm text-slate-500">Control read receipts and who can see your online status and last seen.</p>
+          </div>
+          {messagingPreferencesError ? <p role="alert" className="mt-3 text-sm text-rose-700">{messagingPreferencesError}</p> : null}
+          {messagingPreferencesLoading ? <p role="status" className="mt-3 text-sm text-slate-500">Loading messaging preferences…</p> : null}
+          {messagingPreferences ? <>
+            <div className="mt-3 flex items-center justify-between gap-4 py-3">
+              <div><p className="text-sm font-medium text-slate-800">Read receipts</p><p className="text-xs text-slate-500">When off, other people won’t see when you’ve read their messages.</p></div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={messagingPreferences.readReceiptsEnabled}
+                aria-label="Read receipts"
+                disabled={messagingPreferencesBusy}
+                onClick={() => void updateMessagingPreference({ readReceiptsEnabled: !messagingPreferences.readReceiptsEnabled })}
+                className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50 ${messagingPreferences.readReceiptsEnabled ? 'bg-indigo-600' : 'bg-slate-300'}`}
+              >
+                <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${messagingPreferences.readReceiptsEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+              </button>
+            </div>
+            <label className="mt-2 block border-t border-slate-100 pt-3 text-sm font-medium text-slate-800">
+              Who can see my presence
+              <select
+                aria-label="Who can see my presence"
+                value={messagingPreferences.presenceVisibility}
+                disabled={messagingPreferencesBusy}
+                onChange={(event) => void updateMessagingPreference({ presenceVisibility: event.target.value as MessagingPreferences['presenceVisibility'] })}
+                className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm disabled:opacity-60 sm:max-w-sm"
+              >
+                <option value="EVERYONE">Everyone I share a conversation with</option>
+                <option value="MY_CONTACTS">My contacts (people with a direct chat)</option>
+                <option value="NOBODY">Nobody</option>
+              </select>
+              <span className="mt-1 block text-xs font-normal text-slate-500">Presence is never available to people outside your conversations or to blocked accounts.</span>
+            </label>
+          </> : null}
         </section>
 
         <section className="mt-6 border-t border-slate-200 pt-5">

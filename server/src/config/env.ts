@@ -45,6 +45,7 @@ export const envSchema = z.object({
   VAPID_PUBLIC_KEY: optionalLiveKitString.refine((value) => !value || /^[A-Za-z0-9_-]{80,90}$/.test(value), 'VAPID_PUBLIC_KEY must be a URL-safe base64 public key.'),
   VAPID_PRIVATE_KEY: optionalLiveKitString.refine((value) => !value || /^[A-Za-z0-9_-]{40,50}$/.test(value), 'VAPID_PRIVATE_KEY must be a URL-safe base64 private key.'),
   VAPID_SUBJECT: z.string().trim().min(1).default('mailto:admin@example.com'),
+  GIPHY_API_KEY: optionalEgressString,
   LIVEKIT_EGRESS_WEBHOOK_URL: z.preprocess(
     (value) => value === '' ? undefined : value,
     z.string().url().optional(),

@@ -44,6 +44,12 @@ enum MessageStatus {
   DELETED
 }
 
+enum PresenceVisibility {
+  EVERYONE
+  MY_CONTACTS
+  NOBODY
+}
+
 enum ReportCategory {
   SPAM
   HARASSMENT
@@ -127,6 +133,9 @@ model User {
   passwordHash             String
   role                     UserRole   @default(USER)
   status                   UserStatus @default(ACTIVE)
+  presenceVisibility      PresenceVisibility @default(EVERYONE)
+  readReceiptsEnabled     Boolean    @default(true)
+  lastSeenAt              DateTime?
   communityRulesAccepted   Boolean    @default(false)
   communityRulesAcceptedAt DateTime?
   rulesVersion             String?
@@ -160,6 +169,7 @@ model User {
   messageSent              Message[]                 @relation("MessageSender")
   messageReactions         MessageReaction[]
   messagePreferences       MessagePreference[]
+  messageReceipts          MessageReceipt[] @relation("MessageReceiptRecipient")
   conversationParticipants ConversationParticipant[]
   subscriptions            Subscription[]
   entitlements             Entitlement[]
@@ -420,6 +430,7 @@ model ConversationParticipant {
   archivedAt     DateTime?
   starredAt      DateTime?
   mutedUntil     DateTime?
+  unreadMarkedAt DateTime?
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -455,6 +466,7 @@ model Message {
   sender       User              @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
   reactions    MessageReaction[]
   preferences  MessagePreference[]
+  receipts     MessageReceipt[]
   reports      Report[]
 
   @@index([conversationId, createdAt])
@@ -462,6 +474,20 @@ model Message {
   @@index([readAt])
   @@index([status])
   @@index([expiresAt])
+}
+
+model MessageReceipt {
+  id          String    @id @default(cuid())
+  messageId   String
+  recipientId String
+  deliveredAt DateTime?
+  readAt      DateTime?
+  message     Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  recipient   User      @relation("MessageReceiptRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, recipientId])
+  @@index([recipientId, deliveredAt])
+  @@index([recipientId, readAt])
 }
 
 model MessagePreference {

@@ -33,7 +33,15 @@ See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rule
 
 ## Messaging and real-time media
 
-Group conversations created from the Messages page are persisted with an explicit group flag. Owners and moderators can add directory members from the group header; direct one-to-one conversations cannot be expanded this way. Apply the schema changes before deploying:
+Group conversations created from the Messages page are persisted with an explicit group flag. Owners and moderators can add directory members from the group header; direct one-to-one conversations cannot be expanded this way. Message delivery/read receipts are persisted per recipient; read timestamps are only shared when that recipient has read receipts enabled. Unread markers, presence privacy, and last-seen timestamps are persisted per user. “My contacts” means people in a direct one-to-one NOVACHAT conversation; per-contact exceptions are not currently supported.
+
+**NOVACHAT is not end-to-end encrypted.** Messages and attachments are transmitted over the configured HTTPS/API and stored as ordinary message content in PostgreSQL/media storage. The server can read message text and metadata; the application does not implement sender/recipient key agreement, device key storage, ciphertext-only message persistence, or client-side decryption. This is not equivalent to E2EE, and the UI must not claim that it is. A real E2EE rollout requires a separately designed and reviewed protocol, identity/device-key verification and recovery, multi-device/group key distribution, encrypted attachment handling, and a compatible migration strategy for existing plaintext messages. No partial encryption is applied.
+
+GIF and sticker search uses the GIPHY API from the server. Set `GIPHY_API_KEY` in the API deployment environment; the key is never sent to the browser. The picker reports an explicit configuration error if this credential is missing.
+
+Authenticated server-sent events, connection presence, recording indicators, and transient typing state are process-local. Unexpected connection closure and recording heartbeats clear stale local state, but multi-instance deployment still requires shared realtime/pub-sub infrastructure for accurate cross-instance presence and event fan-out.
+
+Apply the schema changes before deploying:
 
 ```sh
 cd server

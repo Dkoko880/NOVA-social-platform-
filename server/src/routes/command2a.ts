@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { TrackSource } from 'livekit-server-sdk';
 import { z } from 'zod';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
-import { CALL_RING_TIMEOUT_MS, createCallSession, createLiveSession, createNotification, getCallSession, getLiveSession, getNotificationPreferences, listCallHistory, listLiveSessions, markAllNotificationsRead, markNotificationRead, restoreLiveSession, setNotificationPreferences, setPresence, setTypingState, updateCallSession, updateLiveSession, type LiveComment, type LiveReaction, type LiveViewer } from '../lib/platform.js';
+import { CALL_RING_TIMEOUT_MS, createCallSession, createLiveSession, createNotification, getCallSession, getLiveSession, getNotificationPreferences, listCallHistory, listLiveSessions, markAllNotificationsRead, markNotificationRead, restoreLiveSession, setNotificationPreferences, setTypingState, updateCallSession, updateLiveSession, type LiveComment, type LiveReaction, type LiveViewer } from '../lib/platform.js';
 import { socialStore } from '../lib/socialStore.js';
 import { fallbackStore, findUserById } from '../lib/fallbackStore.js';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
@@ -26,12 +26,6 @@ const notificationPreferenceSchema = z.object({
   key: z.enum(['social', 'messages', 'security', 'live', 'calls', 'mentions']),
   enabled: z.boolean().optional(),
   channel: z.enum(['in_app', 'email', 'push']).optional(),
-});
-
-const updatePresenceSchema = z.object({
-  online: z.boolean().optional(),
-  status: z.string().trim().min(1).max(64).optional(),
-  lastSeen: z.string().datetime().nullable().optional(),
 });
 
 const typingSchema = z.object({
@@ -556,23 +550,6 @@ command2aRouter.put('/notifications/preferences', requireAuth, async (req, res) 
   const payload = notificationPreferenceSchema.parse(req.body ?? {});
   const next = await setNotificationPreferences(req.user!.id, { [payload.key]: { enabled: payload.enabled, channel: payload.channel } });
   return res.json({ preferences: next });
-});
-
-command2aRouter.post('/presence', requireAuth, async (req, res) => {
-  const payload = updatePresenceSchema.parse(req.body ?? {});
-  const state = setPresence(req.user!.id, payload);
-  return res.json({ presence: state });
-});
-
-command2aRouter.get('/presence/:userId', requireAuth, async (req, res) => {
-  const userId = String(req.params.userId);
-  const target = findUserById(userId);
-  if (!target) {
-    return res.status(404).json({ message: 'User not found.' });
-  }
-
-  const presence = (await import('../lib/platform.js')).getPresenceState(userId);
-  return res.json({ userId, presence });
 });
 
 command2aRouter.post('/conversations/:id/typing', requireAuth, async (req, res) => {

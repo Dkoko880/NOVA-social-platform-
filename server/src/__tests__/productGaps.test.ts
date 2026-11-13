@@ -41,9 +41,11 @@ describe('product area gaps', () => {
     expect(gif.body.message.contentType).toBe('GIF');
     expect(sticker.body.message.contentType).toBe('STICKER');
     const aliceEvents: Array<Record<string, unknown>> = [];
-    const stopListening = subscribeToUserEvents(alice.user.id, (event) => aliceEvents.push(event as Record<string, unknown>));
+    const stopListening = subscribeToUserEvents(alice.user.id, (event) => { aliceEvents.push(event as Record<string, unknown>); });
     const received = await request(app).get(`/api/conversations/${conversationId}/messages`).set('Cookie', bob.auth);
-    expect(received.body.messages.find((message: { id: string }) => message.id === image.body.message.id).status).toBe('DELIVERED');
+    expect(received.status).toBe(200);
+    const senderMessages = await request(app).get(`/api/conversations/${conversationId}/messages`).set('Cookie', alice.auth);
+    expect(senderMessages.body.messages.find((message: { id: string }) => message.id === image.body.message.id).status).toBe('DELIVERED');
     expect(aliceEvents).toContainEqual(expect.objectContaining({ event: 'message:delivered', messageId: image.body.message.id }));
     stopListening();
     const reply = await request(app).post(`/api/conversations/${conversationId}/messages`).set('Cookie', bob.auth).send({ text: 'Nice photo', replyToId: image.body.message.id });

@@ -5,9 +5,10 @@ import { socialStore, type MessageRecord } from '../lib/socialStore.js';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
 import { attachmentMediaKeyFromUrl, mediaKeyFromUrl, uploadedMediaBelongsTo, getMediaStorage } from '../lib/mediaStorage.js';
 import { reviewContentForSafety } from '../lib/moderation.js';
-import { emitConversationEvent, subscribeToUserEvents } from '../lib/realtime.js';
+import { emitConversationEvent, isUserConnected, realtimeHub, registerRealtimeConnection, subscribeToUserEvents, updateRecordingState } from '../lib/realtime.js';
 import { findUserById } from '../lib/fallbackStore.js';
 import type { Prisma } from '@prisma/client';
+import env from '../config/env.js';
 
 const createConversationSchema = z.object({
   participantId: z.string().min(1).optional(),
@@ -37,7 +38,6 @@ const messageSchema = z.object({
   mediaUrl: z.string().trim().max(2000).refine(isAllowedMessageMediaUrl, 'Use an HTTPS URL or an uploaded novachat image.').optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   replyToId: z.string().min(1).optional(),
-  status: z.enum(['SENT', 'DELIVERED', 'READ', 'FAILED']).optional(),
 }).refine((payload) => payload.contentType !== 'TEXT' || Boolean(payload.text?.trim()), { message: 'Text messages need content.' })
   .refine((payload) => !['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'GIF', 'STICKER'].includes(payload.contentType) || Boolean(payload.mediaUrl), { message: 'Media messages need a media URL.' })
   .refine((payload) => !['CONTACT', 'LOCATION', 'POLL', 'EVENT'].includes(payload.contentType) || Boolean(payload.metadata), { message: 'This message type needs metadata.' })
@@ -96,6 +96,11 @@ const reportSchema = z.object({
   category: z.enum(['SPAM', 'HARASSMENT', 'SEXUAL_CONTENT', 'HATE', 'VIOLENCE', 'SCAM', 'OTHER']),
   reason: z.string().trim().min(4).max(500),
 });
+const messagingPreferenceSchema = z.object({
+  readReceiptsEnabled: z.boolean().optional(),
+  presenceVisibility: z.enum(['EVERYONE', 'MY_CONTACTS', 'NOBODY']).optional(),
+}).refine((payload) => Object.keys(payload).length > 0, { message: 'Choose a messaging preference to update.' });
+const recordingSchema = z.object({ recording: z.boolean() });
 
 const canViewConversation = async (conversationId: string, userId: string) => {
   const dbAvailable = await isDatabaseAvailable();
@@ -140,16 +145,137 @@ const isBlocked = async (userId: string, targetUserId: string) => {
   );
 };
 
-const messageToPublicShape = (message: any) => ({
+type PresenceVisibility = 'EVERYONE' | 'MY_CONTACTS' | 'NOBODY';
+
+async function messagingPreferencesFor(userId: string) {
+  if (await isDatabaseAvailable()) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { readReceiptsEnabled: true, presenceVisibility: true },
+    });
+    if (!user) return null;
+    return { readReceiptsEnabled: user.readReceiptsEnabled, presenceVisibility: user.presenceVisibility as PresenceVisibility };
+  }
+  return socialStore.state.messagingPreferences[userId] ?? { readReceiptsEnabled: true, presenceVisibility: 'EVERYONE' as const };
+}
+
+async function setLastSeenAt(userId: string, lastSeenAt: Date) {
+  if (await isDatabaseAvailable()) {
+    await prisma.user.update({ where: { id: userId }, data: { lastSeenAt } });
+  } else {
+    socialStore.state.messagingLastSeenAt[userId] = lastSeenAt.toISOString();
+  }
+}
+
+async function sharedPresenceConversations(viewerId: string, targetId: string) {
+  if (await isDatabaseAvailable()) {
+    const shared = await prisma.conversation.findMany({
+      where: {
+        participants: { some: { userId: viewerId, leftAt: null } },
+        AND: [{ participants: { some: { userId: targetId, leftAt: null } } }],
+      },
+      select: { id: true, isGroup: true },
+    });
+    return shared;
+  }
+  const viewerConversationIds = new Set(socialStore.state.conversationParticipants
+    .filter((participant) => participant.userId === viewerId && !participant.leftAt)
+    .map((participant) => participant.conversationId));
+  return socialStore.state.conversations
+    .filter((conversation) => viewerConversationIds.has(conversation.id)
+      && socialStore.state.conversationParticipants.some((participant) =>
+        participant.conversationId === conversation.id && participant.userId === targetId && !participant.leftAt))
+    .map((conversation) => ({ id: conversation.id, isGroup: conversation.isGroup ?? false }));
+}
+
+async function canViewPresence(viewerId: string, targetId: string) {
+  if (viewerId === targetId) return true;
+  if (await isBlocked(viewerId, targetId)) return false;
+  const [conversations, preferences] = await Promise.all([
+    sharedPresenceConversations(viewerId, targetId),
+    messagingPreferencesFor(targetId),
+  ]);
+  if (!conversations.length || !preferences || preferences.presenceVisibility === 'NOBODY') return false;
+  return preferences.presenceVisibility === 'EVERYONE' || conversations.some((conversation) => !conversation.isGroup);
+}
+
+async function publishPresenceChange(userId: string, online: boolean, lastSeenAt?: Date) {
+  if (!online && lastSeenAt) await setLastSeenAt(userId, lastSeenAt);
+  const dbAvailable = await isDatabaseAvailable();
+  const shared = dbAvailable
+    ? await prisma.conversation.findMany({
+      where: { participants: { some: { userId, leftAt: null } } },
+      select: { id: true, isGroup: true, participants: { where: { leftAt: null }, select: { userId: true } } },
+    })
+    : socialStore.state.conversations
+      .filter((conversation) => socialStore.state.conversationParticipants.some((participant) => participant.conversationId === conversation.id && participant.userId === userId && !participant.leftAt))
+      .map((conversation) => ({
+        id: conversation.id,
+        isGroup: conversation.isGroup ?? false,
+        participants: socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversation.id && !participant.leftAt).map((participant) => ({ userId: participant.userId })),
+      }));
+
+  for (const conversation of shared) {
+    const allowedUserIds: string[] = [];
+    for (const participant of conversation.participants) {
+      if (participant.userId === userId || await isBlocked(userId, participant.userId)) continue;
+      const preferences = await messagingPreferencesFor(userId);
+      if (!preferences || preferences.presenceVisibility === 'NOBODY') continue;
+      if (preferences.presenceVisibility === 'MY_CONTACTS' && conversation.isGroup) continue;
+      allowedUserIds.push(participant.userId);
+    }
+    if (allowedUserIds.length) {
+      emitConversationEvent('presence:change', conversation.id, {
+        userId,
+        online,
+        lastSeenAt: online ? null : lastSeenAt?.toISOString() ?? null,
+      }, allowedUserIds);
+    }
+  }
+}
+
+async function revokePresenceVisibility(userId: string) {
+  const dbAvailable = await isDatabaseAvailable();
+  const shared = dbAvailable
+    ? await prisma.conversation.findMany({
+      where: { participants: { some: { userId, leftAt: null } } },
+      select: { id: true, participants: { where: { leftAt: null }, select: { userId: true } } },
+    })
+    : socialStore.state.conversations
+      .filter((conversation) => socialStore.state.conversationParticipants.some((participant) => participant.conversationId === conversation.id && participant.userId === userId && !participant.leftAt))
+      .map((conversation) => ({
+        id: conversation.id,
+        participants: socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversation.id && !participant.leftAt).map((participant) => ({ userId: participant.userId })),
+      }));
+  for (const conversation of shared) {
+    const allowedUserIds: string[] = [];
+    for (const participant of conversation.participants) {
+      if (participant.userId !== userId && !(await isBlocked(userId, participant.userId))) allowedUserIds.push(participant.userId);
+    }
+    if (allowedUserIds.length) emitConversationEvent('presence:change', conversation.id, { userId, visible: false }, allowedUserIds);
+  }
+}
+
+const messageToPublicShape = (message: any, viewerUserId?: string) => ({
   id: message.id,
   conversationId: message.conversationId,
   senderId: message.senderId,
   text: message.deletedAt ? '[deleted]' : message.moderationHiddenAt ? '[removed by moderators]' : message.text,
   createdAt: message.createdAt,
   updatedAt: message.updatedAt,
-  readAt: message.readAt,
+  readAt: viewerUserId === message.senderId && Array.isArray(message.receipts)
+    ? message.receipts.length > 0 && message.receipts.every((receipt: { readAt?: Date | string | null; recipient?: { readReceiptsEnabled?: boolean } }) => Boolean(receipt.readAt) && receipt.recipient?.readReceiptsEnabled !== false)
+      ? message.receipts.find((receipt: { readAt?: Date | string | null }) => receipt.readAt)?.readAt ?? null
+      : null
+    : message.readAt,
   deletedAt: message.deletedAt,
-  status: message.status,
+  status: viewerUserId === message.senderId && Array.isArray(message.receipts) && message.receipts.length
+    ? message.receipts.every((receipt: { readAt?: Date | string | null; recipient?: { readReceiptsEnabled?: boolean } }) => Boolean(receipt.readAt) && receipt.recipient?.readReceiptsEnabled !== false)
+      ? 'READ'
+      : message.receipts.every((receipt: { deliveredAt?: Date | string | null }) => Boolean(receipt.deliveredAt))
+        ? 'DELIVERED'
+        : 'SENT'
+    : message.status,
   contentType: message.contentType ?? 'TEXT',
   mediaUrl: message.deletedAt || message.moderationHiddenAt ? null : message.mediaUrl ?? null,
   metadata: message.deletedAt || message.moderationHiddenAt ? null : message.metadata ?? null,
@@ -160,11 +286,78 @@ const messageToPublicShape = (message: any) => ({
   pinnedAt: message.pinnedAt ?? null,
   starredAt: (message.preferences ?? []).some((preference: { starredAt?: Date | string | null }) => Boolean(preference.starredAt)),
   reactions: message.reactions ?? [],
+  ...(viewerUserId === message.senderId && Array.isArray(message.receipts) ? {
+    receipts: message.receipts.map((receipt: { recipientId: string; deliveredAt?: Date | string | null; readAt?: Date | string | null; recipient?: { readReceiptsEnabled?: boolean } }) => ({
+      recipientId: receipt.recipientId,
+      deliveredAt: receipt.deliveredAt ?? null,
+      readAt: receipt.recipient?.readReceiptsEnabled === false ? null : receipt.readAt ?? null,
+    })),
+  } : {}),
 });
+
+function giphyMediaUrl(value: unknown) {
+  if (typeof value !== 'string') return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && (url.hostname === 'giphy.com' || url.hostname.endsWith('.giphy.com')) ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchGiphy(path: string, search: Record<string, string>) {
+  if (!env.GIPHY_API_KEY) return null;
+  const url = new URL(`https://api.giphy.com/v1/${path}`);
+  url.search = new URLSearchParams({ api_key: env.GIPHY_API_KEY, ...search }).toString();
+  const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!response.ok) throw new Error(`GIPHY returned status ${response.status}.`);
+  return response.json() as Promise<{ data?: unknown }>;
+}
 
 export const messagesRouter = Router();
 
 messagesRouter.use(requireActiveAccountIfAuthenticated);
+
+messagesRouter.get('/media-picker/:kind', requireAuth, async (req, res) => {
+  const kind = z.enum(['gif', 'sticker']).safeParse(req.params.kind);
+  if (!kind.success) return res.status(400).json({ message: 'Choose gif or sticker media.' });
+  if (!env.GIPHY_API_KEY) return res.status(503).json({ message: 'GIF and sticker search is not configured. Set GIPHY_API_KEY on the server.' });
+  const query = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
+  const categoriesOnly = kind.data === 'sticker' && req.query.categories === 'true';
+  try {
+    const response = categoriesOnly
+      ? await fetchGiphy('stickers/categories', {})
+      : await fetchGiphy(`${kind.data === 'gif' ? 'gifs' : 'stickers'}/${query ? 'search' : 'trending'}`, {
+        ...(query ? { q: query } : {}),
+        limit: '24',
+        rating: 'g',
+        lang: 'en',
+      });
+    const data = Array.isArray(response?.data) ? response.data : [];
+    if (categoriesOnly) {
+      return res.json({ categories: data.flatMap((entry) => {
+        if (typeof entry !== 'object' || entry === null) return [];
+        const category = entry as { name?: unknown; name_encoded?: unknown };
+        return typeof category.name === 'string' && typeof category.name_encoded === 'string'
+          ? [{ name: category.name, query: category.name_encoded }]
+          : [];
+      }) });
+    }
+    const items = data.flatMap((entry) => {
+      if (typeof entry !== 'object' || entry === null) return [];
+      const item = entry as { id?: unknown; title?: unknown; images?: Record<string, { url?: unknown } | undefined> };
+      const images = item.images ?? {};
+      const mediaUrl = giphyMediaUrl(images.original?.url) ?? giphyMediaUrl(images.fixed_height?.url);
+      const previewUrl = giphyMediaUrl(images.fixed_height_still?.url) ?? giphyMediaUrl(images.original?.url);
+      return typeof item.id === 'string' && mediaUrl && previewUrl
+        ? [{ id: item.id, title: typeof item.title === 'string' ? item.title : '', mediaUrl, previewUrl }]
+        : [];
+    });
+    return res.json({ items, attribution: 'Powered by GIPHY' });
+  } catch (error) {
+    return res.status(502).json({ message: error instanceof Error ? `GIPHY search failed: ${error.message}` : 'GIPHY search failed.' });
+  }
+});
 
 messagesRouter.post('/conversations', requireAuth, async (req, res) => {
   const payload = createConversationSchema.parse(req.body ?? {});
@@ -302,8 +495,8 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
       where: { participants: { some: { userId, leftAt: null } } },
       include: {
         participants: { where: { leftAt: null }, include: { user: { select: { id: true, name: true, profile: { select: { avatarUrl: true } } } } } },
-        messages: { orderBy: { createdAt: 'desc' }, take: 1, include: { preferences: { where: { userId }, select: { starredAt: true } } } },
-        _count: { select: { messages: { where: { senderId: { not: userId }, readAt: null, deletedAt: null, moderationHiddenAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] } } } },
+        messages: { orderBy: { createdAt: 'desc' }, take: 1, include: { preferences: { where: { userId }, select: { starredAt: true } }, receipts: { include: { recipient: { select: { readReceiptsEnabled: true } } } } } },
+        _count: { select: { messages: { where: { senderId: { not: userId }, deletedAt: null, moderationHiddenAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }], receipts: { some: { recipientId: userId, readAt: null } } } } } },
       },
       orderBy: { updatedAt: 'desc' },
     });
@@ -311,7 +504,7 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
     return res.json({ conversations: conversations.map((conversation) => {
       const currentParticipant = conversation.participants.find((participant) => participant.userId === userId);
       const lastMessage = conversation.messages[0];
-      const publicLastMessage = lastMessage ? messageToPublicShape(lastMessage) : null;
+      const publicLastMessage = lastMessage ? messageToPublicShape(lastMessage, userId) : null;
       return {
         id: conversation.id,
         name: conversation.name,
@@ -326,7 +519,7 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
         archivedAt: currentParticipant?.archivedAt ?? null,
         starredAt: currentParticipant?.starredAt ?? null,
         mutedUntil: currentParticipant?.mutedUntil ?? null,
-        unreadCount: conversation._count.messages,
+        unreadCount: Math.max(conversation._count.messages, currentParticipant?.unreadMarkedAt ? 1 : 0),
         participants: conversation.participants.map((participant) => ({ id: participant.id, userId: participant.userId, role: conversation.ownerId === participant.userId ? 'OWNER' : participant.role, user: { id: participant.user.id, name: participant.user.name, avatar: participant.user.profile?.avatarUrl ?? '' } })),
         lastMessage: publicLastMessage,
       };
@@ -352,13 +545,19 @@ messagesRouter.get('/conversations', requireAuth, async (_req, res) => {
       archivedAt: currentParticipant?.archivedAt ?? null,
       starredAt: currentParticipant?.starredAt ?? null,
       mutedUntil: currentParticipant?.mutedUntil ?? null,
-      unreadCount: socialStore.state.messages.filter((message) => message.conversationId === conversation.id && message.senderId !== userId && !message.readAt && !message.deletedAt && !message.moderationHiddenAt && (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now())).length,
+      unreadCount: Math.max(socialStore.state.messages.filter((message) => message.conversationId === conversation.id && message.senderId !== userId && !message.deletedAt && !message.moderationHiddenAt && (!message.expiresAt || new Date(message.expiresAt).getTime() > Date.now()) && (!socialStore.state.messageReceipts.some((receipt) => receipt.messageId === message.id && receipt.recipientId === userId) || !socialStore.state.messageReceipts.find((receipt) => receipt.messageId === message.id && receipt.recipientId === userId)?.readAt)).length, currentParticipant?.unreadMarkedAt ? 1 : 0),
       participants: participants.map((participant) => ({
         ...participant,
         role: conversation.ownerId === participant.userId ? 'OWNER' : participant.role,
         user: findUserById(participant.userId) ? { id: participant.userId, name: findUserById(participant.userId)!.name, avatar: socialStore.state.profiles.find((profile) => profile.userId === participant.userId)?.avatarUrl ?? '' } : undefined,
       })),
-      lastMessage: lastMessage ? messageToPublicShape(lastMessage) : null,
+      lastMessage: lastMessage ? messageToPublicShape({
+        ...lastMessage,
+        receipts: socialStore.state.messageReceipts.filter((receipt) => receipt.messageId === lastMessage.id).map((receipt) => ({
+          ...receipt,
+          recipient: { readReceiptsEnabled: socialStore.state.messagingPreferences[receipt.recipientId]?.readReceiptsEnabled ?? true },
+        })),
+      }, userId) : null,
       lastMessagePreview: lastMessage ? messageToPublicShape(lastMessage).text : conversation.lastMessagePreview,
     };
   }) });
@@ -378,7 +577,7 @@ messagesRouter.get('/conversations/:id', requireAuth, async (req, res) => {
       where: { id: conversationId },
       include: {
         participants: { include: { user: { select: { id: true, name: true, profile: { select: { avatarUrl: true } } } } } },
-        messages: { where: { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, include: { reactions: true, preferences: { where: { userId }, select: { starredAt: true } } }, orderBy: { createdAt: 'asc' } },
+        messages: { where: { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, include: { reactions: true, preferences: { where: { userId }, select: { starredAt: true } }, receipts: { include: { recipient: { select: { readReceiptsEnabled: true } } } } }, orderBy: { createdAt: 'asc' } },
       },
     });
 
@@ -398,7 +597,7 @@ messagesRouter.get('/conversations/:id', requireAuth, async (req, res) => {
       isChannel: conversation.isChannel,
       disappearingAfterSeconds: conversation.disappearingAfterSeconds,
       participants: conversation.participants.map((participant) => ({ id: participant.id, userId: participant.userId, role: participant.role, user: { id: participant.user.id, name: participant.user.name, avatar: participant.user.profile?.avatarUrl ?? '' } })),
-      messages: conversation.messages.filter((message) => !message.deletedAt).map(messageToPublicShape),
+      messages: conversation.messages.filter((message) => !message.deletedAt).map((message) => messageToPublicShape(message, userId)),
     } });
   }
 
@@ -420,7 +619,11 @@ messagesRouter.get('/conversations/:id', requireAuth, async (req, res) => {
       messages: conversationMessages.map((message) => messageToPublicShape({
         ...message,
         preferences: socialStore.state.messagePreferences.filter((preference) => preference.messageId === message.id && preference.userId === userId),
-      })),
+        receipts: socialStore.state.messageReceipts.filter((receipt) => receipt.messageId === message.id).map((receipt) => ({
+          ...receipt,
+          recipient: { readReceiptsEnabled: socialStore.state.messagingPreferences[receipt.recipientId]?.readReceiptsEnabled ?? true },
+        })),
+      }, userId)),
     },
   });
 });
@@ -482,13 +685,13 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
 
     if (dbAvailable) {
       const participants = await prisma.conversationParticipant.findMany({
-        where: { conversationId },
+        where: { conversationId, leftAt: null },
         select: { userId: true },
       });
       return participants.filter((participant) => participant.userId !== userId).map((participant) => participant.userId);
     }
 
-    const participants = socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversationId);
+    const participants = socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversationId && !participant.leftAt);
     return participants.filter((participant) => participant.userId !== userId).map((participant) => participant.userId);
   })();
 
@@ -516,13 +719,15 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
         conversationId,
         senderId: userId,
         text: payload.text ?? '',
-        status: (payload.status ?? 'SENT') as 'SENT' | 'DELIVERED' | 'READ' | 'FAILED',
+        status: 'SENT',
         contentType: payload.contentType,
         mediaUrl: payload.mediaUrl,
         metadata: payload.metadata as Prisma.InputJsonValue | undefined,
         replyToId: payload.replyToId,
         expiresAt,
+        receipts: { create: recipients.map((recipientId) => ({ recipientId })) },
       },
+      include: { receipts: { include: { recipient: { select: { readReceiptsEnabled: true } } } } },
     });
 
     const preview = payload.text || `[${payload.contentType.toLowerCase()}]`;
@@ -538,10 +743,10 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
 
     emitConversationEvent('message:new', conversationId, { message: messageToPublicShape(created), senderId: userId }, [userId, ...recipients]);
 
-    return res.status(201).json({ message: messageToPublicShape(created) });
+    return res.status(201).json({ message: messageToPublicShape(created, userId) });
   }
 
-  const created = {
+  const created: MessageRecord = {
     id: `message_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     conversationId,
     senderId: userId,
@@ -550,7 +755,7 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
     updatedAt: new Date().toISOString(),
     readAt: null,
     deletedAt: null,
-    status: payload.status ?? 'SENT',
+    status: 'SENT',
     contentType: payload.contentType,
     mediaUrl: payload.mediaUrl ?? null,
     metadata: payload.metadata ?? null,
@@ -563,6 +768,13 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
   };
 
   socialStore.state.messages.push(created);
+  socialStore.state.messageReceipts.push(...recipients.map((recipientId, index) => ({
+    id: `receipt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${index}`,
+    messageId: created.id,
+    recipientId,
+    deliveredAt: null,
+    readAt: null,
+  })));
 
   const fallbackConversation = socialStore.state.conversations.find((entry) => entry.id === conversationId);
   if (fallbackConversation) {
@@ -573,7 +785,13 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
 
   emitConversationEvent('message:new', conversationId, { message: messageToPublicShape(created), senderId: userId }, [userId, ...recipients]);
 
-  return res.status(201).json({ message: messageToPublicShape(created) });
+  return res.status(201).json({ message: messageToPublicShape({
+    ...created,
+    receipts: socialStore.state.messageReceipts.filter((receipt) => receipt.messageId === created.id).map((receipt) => ({
+      ...receipt,
+      recipient: { readReceiptsEnabled: socialStore.state.messagingPreferences[receipt.recipientId]?.readReceiptsEnabled ?? true },
+    })),
+  }, userId) });
 });
 
 messagesRouter.post('/messages/:id/interactive-response', requireAuth, async (req, res) => {
@@ -622,18 +840,31 @@ messagesRouter.get('/conversations/:id/messages', requireAuth, async (req, res) 
   if (dbAvailable) {
     const messages = await prisma.message.findMany({
       where: { conversationId, deletedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }], ...(before && !Number.isNaN(before.getTime()) ? { createdAt: { lt: before } } : {}) },
-      include: { reactions: true, preferences: { where: { userId }, select: { starredAt: true } } },
+      include: { reactions: true, preferences: { where: { userId }, select: { starredAt: true } }, receipts: { include: { recipient: { select: { readReceiptsEnabled: true } } } } },
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
 
-    const newlyDelivered = messages.filter((message) => message.senderId !== userId && message.status === 'SENT');
+    const newlyDelivered = messages.filter((message) => message.senderId !== userId
+      && !(message.receipts ?? []).some((receipt) => receipt.recipientId === userId && receipt.deliveredAt));
     if (newlyDelivered.length) {
-      await prisma.message.updateMany({ where: { id: { in: newlyDelivered.map((message) => message.id) }, status: 'SENT' }, data: { status: 'DELIVERED' } });
-      for (const message of newlyDelivered) emitConversationEvent('message:delivered', conversationId, { messageId: message.id }, [message.senderId]);
+      const deliveredAt = new Date();
+      await prisma.messageReceipt.updateMany({
+        where: { messageId: { in: newlyDelivered.map((message) => message.id) }, recipientId: userId, deliveredAt: null },
+        data: { deliveredAt },
+      });
+      for (const message of newlyDelivered) {
+        emitConversationEvent('message:delivered', conversationId, { messageId: message.id, recipientId: userId, deliveredAt }, [message.senderId]);
+      }
     }
     const deliveredIds = new Set(newlyDelivered.map((message) => message.id));
-    return res.json({ messages: messages.reverse().map((message) => messageToPublicShape(deliveredIds.has(message.id) ? { ...message, status: 'DELIVERED' } : message)), hasMore: messages.length === limit });
+    return res.json({ messages: messages.reverse().map((message) => {
+      const receipts = (message.receipts ?? []).map((receipt) =>
+        receipt.recipientId === userId && deliveredIds.has(message.id)
+          ? { ...receipt, deliveredAt: receipt.deliveredAt ?? new Date() }
+          : receipt);
+      return messageToPublicShape({ ...message, receipts }, userId);
+    }), hasMore: messages.length === limit });
   }
 
   const messages = socialStore.state.messages
@@ -642,9 +873,15 @@ messagesRouter.get('/conversations/:id/messages', requireAuth, async (req, res) 
     .filter((message) => !before || new Date(message.createdAt) < before)
     .slice(0, limit)
     .map((message) => {
-      if (message.senderId === userId || message.status !== 'SENT') return message;
-      message.status = 'DELIVERED';
-      emitConversationEvent('message:delivered', conversationId, { messageId: message.id }, [message.senderId]);
+      if (message.senderId === userId) return message;
+      let receipt = socialStore.state.messageReceipts.find((entry) => entry.messageId === message.id && entry.recipientId === userId);
+      if (!receipt) {
+        receipt = { id: `receipt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, messageId: message.id, recipientId: userId, deliveredAt: null, readAt: null };
+        socialStore.state.messageReceipts.push(receipt);
+      }
+      if (receipt.deliveredAt) return message;
+      receipt.deliveredAt = new Date().toISOString();
+      emitConversationEvent('message:delivered', conversationId, { messageId: message.id, recipientId: userId, deliveredAt: receipt.deliveredAt }, [message.senderId]);
       return message;
     })
     .reverse();
@@ -652,7 +889,11 @@ messagesRouter.get('/conversations/:id/messages', requireAuth, async (req, res) 
   return res.json({ messages: messages.map((message) => messageToPublicShape({
     ...message,
     preferences: socialStore.state.messagePreferences.filter((preference) => preference.messageId === message.id && preference.userId === userId),
-  })), hasMore: messages.length === limit });
+    receipts: socialStore.state.messageReceipts.filter((receipt) => receipt.messageId === message.id).map((receipt) => ({
+      ...receipt,
+      recipient: { readReceiptsEnabled: socialStore.state.messagingPreferences[receipt.recipientId]?.readReceiptsEnabled ?? true },
+    })),
+  }, userId)), hasMore: messages.length === limit });
 });
 
 messagesRouter.post('/conversations/:id/read', requireAuth, async (req, res) => {
@@ -667,28 +908,129 @@ messagesRouter.post('/conversations/:id/read', requireAuth, async (req, res) => 
   if (dbAvailable) {
     await prisma.conversationParticipant.update({
       where: { conversationId_userId: { conversationId, userId } },
-      data: { lastReadAt: readAt },
+      data: { lastReadAt: readAt, unreadMarkedAt: null },
     });
     const unreadMessages = await prisma.message.findMany({
-      where: { conversationId, senderId: { not: userId }, readAt: null },
+      where: { conversationId, senderId: { not: userId }, deletedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: readAt } }], receipts: { none: { recipientId: userId, readAt: { not: null } } } },
       select: { id: true, senderId: true },
     });
     if (unreadMessages.length) {
-      await prisma.message.updateMany({ where: { id: { in: unreadMessages.map((message) => message.id) } }, data: { readAt, status: 'READ' } });
-      for (const message of unreadMessages) {
-        emitConversationEvent('message:read', conversationId, { messageId: message.id, readAt }, [message.senderId]);
+      await prisma.messageReceipt.createMany({
+        data: unreadMessages.map((message) => ({ messageId: message.id, recipientId: userId })),
+        skipDuplicates: true,
+      });
+      await prisma.messageReceipt.updateMany({
+        where: { messageId: { in: unreadMessages.map((message) => message.id) }, recipientId: userId, readAt: null },
+        data: { deliveredAt: readAt, readAt },
+      });
+      const readReceiptsEnabled = (await messagingPreferencesFor(userId))?.readReceiptsEnabled ?? true;
+      if (readReceiptsEnabled) for (const message of unreadMessages) {
+        emitConversationEvent('message:read', conversationId, { messageId: message.id, recipientId: userId, readAt }, [message.senderId]);
       }
     }
   } else {
-    const participant = socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === userId);
-    if (participant) participant.lastReadAt = readAt.toISOString();
-    socialStore.state.messages.filter((message) => message.conversationId === conversationId && message.senderId !== userId && !message.readAt).forEach((message) => {
-      message.readAt = readAt.toISOString();
-      message.status = 'READ';
-      emitConversationEvent('message:read', conversationId, { messageId: message.id, readAt: message.readAt }, [message.senderId]);
+    const participant = socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === userId && !entry.leftAt);
+    if (participant) {
+      participant.lastReadAt = readAt.toISOString();
+      participant.unreadMarkedAt = null;
+    }
+    const readReceiptsEnabled = (await messagingPreferencesFor(userId))?.readReceiptsEnabled ?? true;
+    socialStore.state.messages.filter((message) => message.conversationId === conversationId && message.senderId !== userId && !message.deletedAt && (!message.expiresAt || new Date(message.expiresAt).getTime() > readAt.getTime())).forEach((message) => {
+      let receipt = socialStore.state.messageReceipts.find((entry) => entry.messageId === message.id && entry.recipientId === userId);
+      if (!receipt) {
+        receipt = { id: `receipt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, messageId: message.id, recipientId: userId, deliveredAt: readAt.toISOString(), readAt: null };
+        socialStore.state.messageReceipts.push(receipt);
+      }
+      const wasUnread = !receipt.readAt;
+      if (wasUnread) receipt.readAt = readAt.toISOString();
+      receipt.deliveredAt ??= readAt.toISOString();
+      if (wasUnread && readReceiptsEnabled) emitConversationEvent('message:read', conversationId, { messageId: message.id, recipientId: userId, readAt }, [message.senderId]);
     });
   }
+  realtimeHub.emit('conversation:read', { conversationId, allowedUserIds: [userId] });
   return res.json({ readAt });
+});
+
+messagesRouter.get('/messaging/preferences', requireAuth, async (req, res) => {
+  const preferences = await messagingPreferencesFor(req.user!.id);
+  if (!preferences) return res.status(404).json({ message: 'User not found.' });
+  return res.json({ preferences });
+});
+
+messagesRouter.patch('/messaging/preferences', requireAuth, async (req, res) => {
+  const payload = messagingPreferenceSchema.parse(req.body ?? {});
+  const userId = req.user!.id;
+  const dbAvailable = await isDatabaseAvailable();
+  const preferences: { readReceiptsEnabled: boolean; presenceVisibility: PresenceVisibility } = dbAvailable
+    ? await prisma.user.update({
+      where: { id: userId },
+      data: payload,
+      select: { readReceiptsEnabled: true, presenceVisibility: true },
+    })
+    : (socialStore.state.messagingPreferences[userId] = Object.assign(
+      socialStore.state.messagingPreferences[userId] ?? { readReceiptsEnabled: true, presenceVisibility: 'EVERYONE' as const },
+      payload,
+    ));
+  if (payload.presenceVisibility !== undefined) {
+    await revokePresenceVisibility(userId);
+    if (isUserConnected(userId)) await publishPresenceChange(userId, true);
+  }
+  return res.json({ preferences });
+});
+
+messagesRouter.get('/presence/:userId', requireAuth, async (req, res) => {
+  const targetId = String(req.params.userId);
+  const dbAvailable = await isDatabaseAvailable();
+  let lastSeenAt: Date | string | null;
+  if (dbAvailable) {
+    const target = await prisma.user.findUnique({ where: { id: targetId }, select: { lastSeenAt: true } });
+    if (!target) return res.status(404).json({ message: 'User not found.' });
+    lastSeenAt = target.lastSeenAt;
+  } else {
+    if (!findUserById(targetId)) return res.status(404).json({ message: 'User not found.' });
+    lastSeenAt = socialStore.state.messagingLastSeenAt[targetId] ?? null;
+  }
+  if (!(await canViewPresence(req.user!.id, targetId))) {
+    return res.status(404).json({ message: 'Presence is unavailable.' });
+  }
+  return res.json({ presence: {
+    online: isUserConnected(targetId),
+    lastSeenAt: isUserConnected(targetId) ? null : lastSeenAt,
+  } });
+});
+
+messagesRouter.post('/presence', requireAuth, (_req, res) =>
+  res.status(410).json({ message: 'Presence is managed by authenticated real-time connections.' }));
+
+messagesRouter.post('/conversations/:id/recording', requireAuth, async (req, res) => {
+  const conversationId = String(req.params.id);
+  const { recording } = recordingSchema.parse(req.body ?? {});
+  const userId = req.user!.id;
+  if (!(await canViewConversation(conversationId, userId))) return res.status(403).json({ message: 'You do not have access to this conversation.' });
+  const participantIds = await listConversationParticipantIds(conversationId);
+  if (!participantIds.includes(userId)) return res.status(403).json({ message: 'You do not have access to this conversation.' });
+  updateRecordingState(conversationId, userId, recording, participantIds.filter((participantId) => participantId !== userId));
+  return res.json({ recording });
+});
+
+messagesRouter.post('/conversations/:id/unread', requireAuth, async (req, res) => {
+  const conversationId = String(req.params.id);
+  const userId = req.user!.id;
+  if (!(await canViewConversation(conversationId, userId))) return res.status(403).json({ message: 'You do not have access to this conversation.' });
+  const dbAvailable = await isDatabaseAvailable();
+  const markedAt = new Date();
+  if (dbAvailable) {
+    await prisma.conversationParticipant.update({
+      where: { conversationId_userId: { conversationId, userId } },
+      data: { unreadMarkedAt: markedAt },
+    });
+  } else {
+    const participant = socialStore.state.conversationParticipants.find((entry) => entry.conversationId === conversationId && entry.userId === userId && !entry.leftAt);
+    if (!participant) return res.status(404).json({ message: 'Conversation membership not found.' });
+    participant.unreadMarkedAt = markedAt.toISOString();
+  }
+  realtimeHub.emit('conversation:unread', { conversationId, allowedUserIds: [userId] });
+  return res.json({ unread: true });
 });
 
 messagesRouter.get('/realtime', requireAuth, (req, res) => {
@@ -700,10 +1042,16 @@ messagesRouter.get('/realtime', requireAuth, (req, res) => {
   res.write(`event: ready\ndata: ${JSON.stringify({ userId })}\n\n`);
   const unsubscribe = subscribeToUserEvents(userId, (payload) => {
     const event = typeof payload === 'object' && payload !== null && 'event' in payload ? String((payload as { event: string }).event) : 'update';
-    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+    if (!res.destroyed && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
   });
-  const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 25000);
-  req.on('close', () => { clearInterval(heartbeat); unsubscribe(); });
+  const unregisterConnection = registerRealtimeConnection(userId, (online) => {
+    if (online) void publishPresenceChange(userId, true);
+    else void publishPresenceChange(userId, false, new Date());
+  });
+  const heartbeat = setInterval(() => {
+    if (!res.destroyed && !res.writableEnded) res.write(': heartbeat\n\n');
+  }, 25000);
+  res.on('close', () => { clearInterval(heartbeat); unsubscribe(); unregisterConnection(); });
 });
 
 messagesRouter.post('/messages/:id/read', requireAuth, async (req, res) => {
@@ -724,14 +1072,17 @@ messagesRouter.post('/messages/:id/read', requireAuth, async (req, res) => {
     if (!(await canViewConversation(message.conversationId, userId))) {
       return res.status(403).json({ message: 'You do not have access to this message.' });
     }
+    if (message.senderId === userId) return res.status(400).json({ message: 'You cannot mark your own message as read.' });
 
-    const updated = await prisma.message.update({
-      where: { id: messageId },
-      data: { readAt: new Date(), status: 'READ' },
+    const readAt = new Date();
+    const receipt = await prisma.messageReceipt.upsert({
+      where: { messageId_recipientId: { messageId, recipientId: userId } },
+      create: { messageId, recipientId: userId, deliveredAt: readAt, readAt },
+      update: { deliveredAt: readAt, readAt },
     });
-
-    emitConversationEvent('message:read', message.conversationId, { messageId: updated.id, readAt: updated.readAt }, [userId]);
-    return res.json({ message: messageToPublicShape(updated) });
+    const preferences = await messagingPreferencesFor(userId);
+    if (preferences?.readReceiptsEnabled) emitConversationEvent('message:read', message.conversationId, { messageId, recipientId: userId, readAt }, [message.senderId]);
+    return res.json({ receipt: { deliveredAt: receipt.deliveredAt, readAt: preferences?.readReceiptsEnabled ? receipt.readAt : null } });
   }
 
   const message = socialStore.state.messages.find((entry) => entry.id === messageId);
@@ -742,12 +1093,59 @@ messagesRouter.post('/messages/:id/read', requireAuth, async (req, res) => {
   if (!(await canViewConversation(message.conversationId, userId))) {
     return res.status(403).json({ message: 'You do not have access to this message.' });
   }
+  if (message.senderId === userId) return res.status(400).json({ message: 'You cannot mark your own message as read.' });
 
-  message.readAt = new Date().toISOString();
-  message.status = 'READ';
+  const readAt = new Date().toISOString();
+  let receipt = socialStore.state.messageReceipts.find((entry) => entry.messageId === messageId && entry.recipientId === userId);
+  if (!receipt) {
+    receipt = { id: `receipt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, messageId, recipientId: userId, deliveredAt: readAt, readAt };
+    socialStore.state.messageReceipts.push(receipt);
+  } else {
+    receipt.deliveredAt ??= readAt;
+    receipt.readAt = readAt;
+  }
+  const preferences = await messagingPreferencesFor(userId);
+  if (preferences?.readReceiptsEnabled) emitConversationEvent('message:read', message.conversationId, { messageId, recipientId: userId, readAt }, [message.senderId]);
+  return res.json({ receipt: { deliveredAt: receipt.deliveredAt, readAt: preferences?.readReceiptsEnabled ? receipt.readAt : null } });
+});
 
-  emitConversationEvent('message:read', message.conversationId, { messageId: message.id, readAt: message.readAt }, [userId]);
-  return res.json({ message: messageToPublicShape(message) });
+messagesRouter.get('/messages/:id/receipts', requireAuth, async (req, res) => {
+  const messageId = String(req.params.id);
+  const userId = req.user!.id;
+  const dbAvailable = await isDatabaseAvailable();
+  if (dbAvailable) {
+    const message = await prisma.message.findUnique({
+      where: { id: messageId },
+      select: { id: true, senderId: true, conversationId: true, deletedAt: true, moderationHiddenAt: true },
+    });
+    if (!message || message.deletedAt || message.moderationHiddenAt) return res.status(404).json({ message: 'Message not found.' });
+    if (message.senderId !== userId) return res.status(403).json({ message: 'Only the message sender can view receipt details.' });
+    const [participants, receipts] = await Promise.all([
+      prisma.conversationParticipant.findMany({ where: { conversationId: message.conversationId, userId: { not: userId }, leftAt: null }, include: { user: { select: { id: true, name: true } } } }),
+      prisma.messageReceipt.findMany({ where: { messageId }, include: { recipient: { select: { id: true, name: true, readReceiptsEnabled: true } } } }),
+    ]);
+    const receiptByRecipient = new Map(receipts.map((receipt) => [receipt.recipientId, receipt]));
+    return res.json({ receipts: participants.map((participant) => {
+      const receipt = receiptByRecipient.get(participant.userId);
+      return {
+        recipientId: participant.userId,
+        name: participant.user.name,
+        deliveredAt: receipt?.deliveredAt ?? null,
+        readAt: receipt?.recipient.readReceiptsEnabled === false ? null : receipt?.readAt ?? null,
+      };
+    }) });
+  }
+
+  const message = socialStore.state.messages.find((entry) => entry.id === messageId);
+  if (!message || message.deletedAt || message.moderationHiddenAt) return res.status(404).json({ message: 'Message not found.' });
+  if (message.senderId !== userId) return res.status(403).json({ message: 'Only the message sender can view receipt details.' });
+  const recipients = socialStore.state.conversationParticipants.filter((entry) => entry.conversationId === message.conversationId && entry.userId !== userId && !entry.leftAt);
+  return res.json({ receipts: recipients.map((recipient) => {
+    const user = findUserById(recipient.userId);
+    const receipt = socialStore.state.messageReceipts.find((entry) => entry.messageId === messageId && entry.recipientId === recipient.userId);
+    const enabled = socialStore.state.messagingPreferences[recipient.userId]?.readReceiptsEnabled ?? true;
+    return { recipientId: recipient.userId, name: user?.name ?? 'Unknown', deliveredAt: receipt?.deliveredAt ?? null, readAt: enabled ? receipt?.readAt ?? null : null };
+  }) });
 });
 
 messagesRouter.delete('/messages/:id', requireAuth, async (req, res) => {
@@ -836,8 +1234,8 @@ messagesRouter.post('/messages/:id/forward', requireAuth, async (req, res) => {
     if (!member || !['OWNER', 'MODERATOR'].includes(member.role)) return res.status(403).json({ message: 'Only channel admins and moderators can post.' });
   }
   const recipients = dbAvailable
-    ? (await prisma.conversationParticipant.findMany({ where: { conversationId: targetConversationId }, select: { userId: true } })).map((entry) => entry.userId)
-    : socialStore.state.conversationParticipants.filter((entry) => entry.conversationId === targetConversationId).map((entry) => entry.userId);
+    ? (await prisma.conversationParticipant.findMany({ where: { conversationId: targetConversationId, leftAt: null }, select: { userId: true } })).map((entry) => entry.userId)
+    : socialStore.state.conversationParticipants.filter((entry) => entry.conversationId === targetConversationId && !entry.leftAt).map((entry) => entry.userId);
   for (const recipientId of recipients) {
     if (recipientId !== userId && await isBlocked(userId, recipientId)) return res.status(403).json({ message: 'You cannot forward messages to a blocked user.' });
   }
@@ -854,7 +1252,8 @@ messagesRouter.post('/messages/:id/forward', requireAuth, async (req, res) => {
       metadata: (source.metadata ?? undefined) as Prisma.InputJsonValue | undefined,
       forwardedFromId: source.id,
       expiresAt: expiresAt ?? undefined,
-    } })
+      receipts: { create: recipients.filter((recipientId) => recipientId !== userId).map((recipientId) => ({ recipientId })) },
+    }, include: { receipts: { include: { recipient: { select: { readReceiptsEnabled: true } } } } } })
     : {
       id: `message_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       conversationId: targetConversationId,
@@ -874,7 +1273,16 @@ messagesRouter.post('/messages/:id/forward', requireAuth, async (req, res) => {
       editedAt: null,
       expiresAt: expiresAt?.toISOString() ?? null,
     };
-  if (!dbAvailable) socialStore.state.messages.push(forwarded as MessageRecord);
+    if (!dbAvailable) {
+      socialStore.state.messages.push(forwarded as MessageRecord);
+      socialStore.state.messageReceipts.push(...recipients.filter((recipientId) => recipientId !== userId).map((recipientId) => ({
+        id: `receipt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        messageId: forwarded.id,
+        recipientId,
+        deliveredAt: null,
+        readAt: null,
+      })));
+    }
   const preview = forwarded.text || `[${forwarded.contentType.toLowerCase()}]`;
   if (dbAvailable) await prisma.conversation.update({ where: { id: targetConversationId }, data: { lastMessageAt: forwarded.createdAt, lastMessagePreview: preview } });
   else {
@@ -886,7 +1294,13 @@ messagesRouter.post('/messages/:id/forward', requireAuth, async (req, res) => {
     }
   }
   emitConversationEvent('message:new', targetConversationId, { message: messageToPublicShape(forwarded), senderId: userId }, [userId, ...recipients]);
-  return res.status(201).json({ message: messageToPublicShape(forwarded) });
+  return res.status(201).json({ message: messageToPublicShape(dbAvailable ? forwarded : {
+    ...forwarded,
+    receipts: socialStore.state.messageReceipts.filter((receipt) => receipt.messageId === forwarded.id).map((receipt) => ({
+      ...receipt,
+      recipient: { readReceiptsEnabled: socialStore.state.messagingPreferences[receipt.recipientId]?.readReceiptsEnabled ?? true },
+    })),
+  }, userId) });
 });
 
 messagesRouter.post('/messages/:id/reactions', requireAuth, async (req, res) => {
@@ -991,7 +1405,7 @@ messagesRouter.get('/messages/search', requireAuth, async (req, res) => {
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
-    return res.json({ messages: messages.map(messageToPublicShape) });
+    return res.json({ messages: messages.map((message) => messageToPublicShape(message, req.user!.id)) });
   }
   const allowedConversationIds = new Set(socialStore.state.conversationParticipants.filter((entry) => entry.userId === req.user!.id).map((entry) => entry.conversationId));
   const messages = socialStore.state.messages.filter((message) =>

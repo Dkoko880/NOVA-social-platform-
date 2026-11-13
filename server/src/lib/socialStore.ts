@@ -171,6 +171,7 @@ export type ConversationParticipantRecord = {
   archivedAt?: string | null;
   starredAt?: string | null;
   mutedUntil?: string | null;
+  unreadMarkedAt?: string | null;
 };
 
 export type MessageRecord = {
@@ -201,6 +202,14 @@ export type MessagePreferenceRecord = {
   messageId: string;
   userId: string;
   starredAt: string | null;
+};
+
+export type MessageReceiptRecord = {
+  id: string;
+  messageId: string;
+  recipientId: string;
+  deliveredAt: string | null;
+  readAt: string | null;
 };
 
 export type MessageReactionRecord = {
@@ -277,6 +286,9 @@ const globalStore = globalThis as typeof globalThis & {
     conversationParticipants: ConversationParticipantRecord[];
     messages: MessageRecord[];
     messagePreferences: MessagePreferenceRecord[];
+    messageReceipts: MessageReceiptRecord[];
+    messagingPreferences: Record<string, { presenceVisibility: 'EVERYONE' | 'MY_CONTACTS' | 'NOBODY'; readReceiptsEnabled: boolean }>;
+    messagingLastSeenAt: Record<string, string>;
     messageReactions: MessageReactionRecord[];
     communities: CommunityRecord[];
     communityMembers: CommunityMemberRecord[];
@@ -307,6 +319,9 @@ if (!globalStore.__novaSocialStore) {
     conversationParticipants: [],
     messages: [],
     messagePreferences: [],
+    messageReceipts: [],
+    messagingPreferences: {},
+    messagingLastSeenAt: {},
     messageReactions: [],
     communities: [],
     communityMembers: [],
@@ -347,6 +362,9 @@ export const socialStore = {
       conversationParticipants: [],
       messages: [],
       messagePreferences: [],
+      messageReceipts: [],
+      messagingPreferences: {},
+      messagingLastSeenAt: {},
       messageReactions: [],
       communities: [],
       communityMembers: [],

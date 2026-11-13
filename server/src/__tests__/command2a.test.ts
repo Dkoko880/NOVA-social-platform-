@@ -5,7 +5,7 @@ import { app } from '../app.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { getLiveKitParticipants, removeLiveKitParticipant } from '../lib/livekit.js';
 import { CALL_RING_TIMEOUT_MS, clearCommand2AStores, createCallSession, getCallSession, updateLiveSession } from '../lib/platform.js';
-import { subscribeToUserEvents } from '../lib/realtime.js';
+import { registerRealtimeConnection, subscribeToUserEvents } from '../lib/realtime.js';
 import { socialStore } from '../lib/socialStore.js';
 
 vi.mock('../lib/livekit.js', async (importOriginal) => {
@@ -204,14 +204,30 @@ describe('command 2a foundation', () => {
       .send({ participantId: bobUser.id });
 
     const bobEvents: Array<Record<string, unknown>> = [];
-    const stopListening = subscribeToUserEvents(bobUser.id, (event) => bobEvents.push(event as Record<string, unknown>));
-    const presence = await request(app)
+    const stopListening = subscribeToUserEvents(bobUser.id, (event) => { bobEvents.push(event as Record<string, unknown>); });
+    const spoofedPresence = await request(app)
       .post('/api/presence')
       .set('Cookie', getCookieHeader(aliceLogin))
       .send({ online: true, status: 'available' });
-
-    expect(presence.status).toBe(200);
-    expect(presence.body.presence.online).toBe(true);
+    expect(spoofedPresence.status).toBe(410);
+    const presenceTransitions: boolean[] = [];
+    const disconnect = registerRealtimeConnection(aliceLogin.body.user.id, (online) => { presenceTransitions.push(online); });
+    const livePresence = await request(app)
+      .get(`/api/presence/${aliceLogin.body.user.id}`)
+      .set('Cookie', getCookieHeader(await request(app).post('/api/auth/login').send({ email: 'bob@example.com', password: 'Password123' })));
+    expect(livePresence.status).toBe(200);
+    expect(livePresence.body.presence).toMatchObject({ online: true, lastSeenAt: null });
+    const privatePresence = await request(app)
+      .patch('/api/messaging/preferences')
+      .set('Cookie', getCookieHeader(aliceLogin))
+      .send({ presenceVisibility: 'NOBODY' });
+    expect(privatePresence.status).toBe(200);
+    const hiddenPresence = await request(app)
+      .get(`/api/presence/${aliceLogin.body.user.id}`)
+      .set('Cookie', getCookieHeader(await request(app).post('/api/auth/login').send({ email: 'bob@example.com', password: 'Password123' })));
+    expect(hiddenPresence.status).toBe(404);
+    disconnect();
+    expect(presenceTransitions).toEqual([true, false]);
 
     const typingResponse = await request(app)
       .post(`/api/conversations/${convo.body.conversation.id}/typing`)
