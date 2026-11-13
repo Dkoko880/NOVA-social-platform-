@@ -5,6 +5,7 @@ import { signAccessToken, hashSessionToken } from '../lib/auth.js';
 import { fallbackStore } from '../lib/fallbackStore.js';
 import { isDatabaseAvailable, prisma } from '../lib/prisma.js';
 import { socialStore } from '../lib/socialStore.js';
+import type { Prisma } from '@prisma/client';
 
 vi.mock('../lib/prisma.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/prisma.js')>();
@@ -21,6 +22,113 @@ describe('messaging database responses', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('creates a direct conversation inside a transaction with an advisory lock', async () => {
+    const userId = 'database-user';
+    const peerId = 'database-peer';
+    const token = signAccessToken({ sub: userId, email: 'user@example.com', role: 'USER' });
+    const conversation = {
+      id: 'database-direct-conversation',
+      name: null,
+      updatedAt: new Date(),
+      lastMessageAt: null,
+      lastMessagePreview: null,
+    };
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const create = vi.fn().mockResolvedValue(conversation);
+    const queryRaw = vi.fn().mockResolvedValue([{ '?column?': 1 }]);
+    const transaction = { $queryRaw: queryRaw, conversation: { findFirst, create } };
+
+    vi.spyOn(prisma.session, 'findFirst').mockResolvedValue({ id: 'database-session' } as never);
+    vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+      id: userId,
+      email: 'user@example.com',
+      name: 'Database User',
+      role: 'USER',
+      status: 'ACTIVE',
+    } as never);
+    vi.spyOn(prisma.user, 'findMany').mockResolvedValue([{ id: peerId }] as never);
+    vi.spyOn(prisma.block, 'findUnique').mockResolvedValue(null as never);
+    const runTransaction = vi.spyOn(prisma, '$transaction').mockImplementation(async (callback) =>
+      callback(transaction as Prisma.TransactionClient) as never,
+    );
+
+    const response = await request(app)
+      .post('/api/conversations')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ participantId: peerId });
+
+    expect(response.status).toBe(201);
+    expect(response.body.conversation.id).toBe(conversation.id);
+    expect(runTransaction).toHaveBeenCalledOnce();
+    expect(queryRaw).toHaveBeenCalledOnce();
+    expect(queryRaw.mock.calls[0]?.[0].join('')).toContain('SELECT 1 FROM pg_advisory_xact_lock');
+    expect(queryRaw.mock.calls[0]?.[1]).toBe(`${peerId}:${userId}`);
+    expect(findFirst).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it('returns one conversation for concurrent direct-chat creation requests', async () => {
+    const userId = 'database-user';
+    const peerId = 'database-peer';
+    const token = signAccessToken({ sub: userId, email: 'user@example.com', role: 'USER' });
+    const conversations: Array<{ id: string; name: null; updatedAt: Date; lastMessageAt: null; lastMessagePreview: null }> = [];
+    const findFirst = vi.fn().mockImplementation(async () => conversations[0] ?? null);
+    const create = vi.fn().mockImplementation(async () => {
+      const conversation = {
+        id: `database-direct-conversation-${conversations.length + 1}`,
+        name: null,
+        updatedAt: new Date(),
+        lastMessageAt: null,
+        lastMessagePreview: null,
+      };
+      conversations.push(conversation);
+      return conversation;
+    });
+    let lockTail = Promise.resolve();
+    const runTransaction = vi.spyOn(prisma, '$transaction').mockImplementation(async (callback) => {
+      let releaseLock: (() => void) | undefined;
+      const transaction = {
+        $queryRaw: async () => {
+          const previousLock = lockTail;
+          lockTail = new Promise<void>((resolve) => {
+            releaseLock = resolve;
+          });
+          await previousLock;
+          return [{ '?column?': 1 }];
+        },
+        conversation: { findFirst, create },
+      };
+
+      try {
+        return await callback(transaction as Prisma.TransactionClient) as never;
+      } finally {
+        releaseLock?.();
+      }
+    });
+
+    vi.spyOn(prisma.session, 'findFirst').mockResolvedValue({ id: 'database-session' } as never);
+    vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+      id: userId,
+      email: 'user@example.com',
+      name: 'Database User',
+      role: 'USER',
+      status: 'ACTIVE',
+    } as never);
+    vi.spyOn(prisma.user, 'findMany').mockResolvedValue([{ id: peerId }] as never);
+    vi.spyOn(prisma.block, 'findUnique').mockResolvedValue(null as never);
+
+    const responses = await Promise.all([
+      request(app).post('/api/conversations').set('Authorization', `Bearer ${token}`).send({ participantId: peerId }),
+      request(app).post('/api/conversations').set('Authorization', `Bearer ${token}`).send({ participantId: peerId }),
+    ]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 201]);
+    expect(responses[0]?.body.conversation.id).toBe(responses[1]?.body.conversation.id);
+    expect(runTransaction).toHaveBeenCalledTimes(2);
+    expect(findFirst).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenCalledOnce();
   });
 
   it('excludes moderator-hidden content from database-backed message search', async () => {

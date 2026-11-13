@@ -393,7 +393,7 @@ messagesRouter.post('/conversations', requireAuth, async (req, res) => {
       const peerId = participantIds[0];
       const pairKey = [userId, peerId].sort().join(':');
       const result = await prisma.$transaction(async (transaction) => {
-        await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${pairKey}))`;
+        await transaction.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtext(${pairKey}))`;
         const existing = await transaction.conversation.findFirst({
           where: {
             isGroup: false,

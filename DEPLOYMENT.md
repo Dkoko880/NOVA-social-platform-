@@ -26,7 +26,7 @@ Use the existing Vercel project and configure it to deploy the repository's `mai
 
 ## Render
 
-Use the existing Render API service; do not create a second service. The API is a Docker service with `server/` as its root directory and `Dockerfile` as its Dockerfile path. The image build runs `npm run build` to generate Prisma and compile production TypeScript without test files or production database access. Container startup runs `npm run db:migrate:deploy` before `npm start`, applying committed migrations without resetting application data. The server listens on `0.0.0.0` and uses Render's `PORT` when provided.
+Use the existing Render API service; do not create a second service. The API is a Docker service with `server/` as its root directory and `Dockerfile` as its Dockerfile path. The image build runs `npm run build` to generate Prisma and compile production TypeScript without test files or production database access. Set the service's **Pre-Deploy Command** to `npm run db:migrate:deploy` (run from `server/`) so committed migrations are applied once per deployment before new instances start. Container startup only runs `npm start`; migrations must not run independently in each API instance. The server listens on `0.0.0.0` and uses Render's `PORT` when provided.
 
 Configure the Render service environment with the required variable names listed below and in `server/.env.example`. Set `CORS_ORIGIN` to the exact HTTPS Vercel production origin(s), comma-separated if there is more than one. The API also explicitly permits the known Vercel production hostnames in `server/src/app.ts`. Store database URLs and signing keys only in Render's environment settings, never in this repository.
 
@@ -55,7 +55,7 @@ npm run db:migrate:deploy
 npm run db:migrate:status
 ```
 
-`db:migrate:deploy` applies committed migrations without resetting data. The production container runs this command before starting the API. Do not use `db:push` or `migrate dev` against production.
+`db:migrate:deploy` applies committed migrations without resetting data. On Render, run it as the single pre-deploy command, not during each container startup. Do not use `db:push` or `migrate dev` against production.
 
 For the NOVACHAT account-appeal and moderation changes, the latest migrations are ordered as:
 
@@ -76,7 +76,7 @@ These are additive, forward-only Prisma migrations. Take a database backup and e
 ## Manual Render and Vercel release sequence
 
 1. Confirm the intended commit is on `main` and that the Render and Vercel projects are connected to this repository. Back up PostgreSQL before a schema-changing release.
-2. Deploy that commit to the existing Render API service first. The Docker container runs `npm run db:migrate:deploy` before `npm start`, so pending migrations are applied before the new API accepts traffic. Check Render startup logs for migration completion and verify `https://nova-social-platform-api.onrender.com/api/health` reports `status: ok` and `database: ok`. If the service does not auto-deploy, select the intended commit in Render's dashboard and trigger a manual deploy. Do not run `db:push` or `migrate dev`.
+2. Deploy that commit to the existing Render API service first. The service's single pre-deploy command, `npm run db:migrate:deploy`, applies pending migrations before the new API instances start. Check Render deployment logs for migration completion and verify `https://nova-social-platform-api.onrender.com/api/health` reports `status: ok` and `database: ok`. If the service does not auto-deploy, select the intended commit in Render's dashboard and trigger a manual deploy. Do not run `db:push` or `migrate dev`.
 3. After the API and database health checks pass, deploy the same commit to the existing Vercel frontend project using the repository root, `npm ci`, `npm run build`, and `dist`. Do not set `VITE_API_BASE_URL` for production; the checked-in Vercel rewrite forwards API requests to Render.
 4. Verify the frontend at `https://nova-social-platform.vercel.app/`, then test authentication, account appeals/moderation, messaging, and media using non-production test accounts/data where appropriate. Do not change production credentials as part of the deploy.
 
@@ -92,7 +92,7 @@ npm --prefix server run build
 npm --prefix server start
 ```
 
-`npm --prefix server run build` never applies migrations. Run `npm --prefix server run db:migrate:deploy` against the intended database as a deployment/release step, then verify it with `npm --prefix server run db:migrate:status`. The production Docker container runs the deploy command on startup.
+`npm --prefix server run build` never applies migrations. Run `npm --prefix server run db:migrate:deploy` against the intended database as a deployment/release step, then verify it with `npm --prefix server run db:migrate:status`. The production Docker container does not run migrations at startup; configure Render's Pre-Deploy Command to run them once per deployment.
 
 Frontend:
 
