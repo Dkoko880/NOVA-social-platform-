@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { Camera, ImagePlus, MoreVertical, PencilLine, Plus, Search, X } from 'lucide-react'
 import { Avatar } from '../components/ui/Avatar'
@@ -6,6 +6,7 @@ import { Button } from '../components/ui/Button'
 import { useAuth } from '../context/AuthContext'
 import { apiRequest, resolveMediaUrl, uploadMedia, uploadVideo } from '../lib/api'
 import { postMediaFileType, POST_IMAGE_MAX_BYTES, POST_VIDEO_MAX_BYTES } from '../lib/postMedia'
+import { sendTimedUpdateReply, type TimedUpdateReaction } from '../lib/storyReplies'
 
 type StatusRecord = {
   id: string
@@ -36,6 +37,10 @@ export function UpdatesPage() {
   const [previewUrl, setPreviewUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [activeStatus, setActiveStatus] = useState<StatusRecord | null>(null)
+  const [statusReplyDraft, setStatusReplyDraft] = useState('')
+  const [statusReplyBusy, setStatusReplyBusy] = useState(false)
+  const [statusReplyError, setStatusReplyError] = useState('')
+  const [statusReplyNotice, setStatusReplyNotice] = useState('')
   const [filter, setFilter] = useState<'recent' | 'unviewed' | 'viewed'>('recent')
   const [searchOpen, setSearchOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -156,7 +161,7 @@ export function UpdatesPage() {
     }
   }
 
-  const openStatus = async (status: StatusRecord) => {
+  const openStatus = useCallback(async (status: StatusRecord) => {
     try {
       await apiRequest<{ viewed: boolean; viewCount: number }>(`/api/statuses/${encodeURIComponent(status.id)}/view`, { method: 'POST' })
       const opened = { ...status, viewedByMe: true, viewCount: status.viewCount + (status.viewedByMe || status.authorId === user?.id ? 0 : 1) }
@@ -164,6 +169,61 @@ export function UpdatesPage() {
       setActiveStatus(opened)
     } catch (viewError) {
       setError(viewError instanceof Error ? viewError.message : 'Unable to open this status.')
+    }
+  }, [user?.id])
+
+  useEffect(() => {
+    const statusId = searchParams.get('status')
+    if (!statusId || loading) return
+    const status = statuses.find((item) => item.id === statusId)
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      next.delete('status')
+      return next
+    }, { replace: true })
+    if (status) void openStatus(status)
+    else setError('This Status has expired or is no longer available.')
+  }, [loading, openStatus, searchParams, setSearchParams, statuses])
+
+  const submitStatusReply = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!activeStatus || statusReplyBusy || !statusReplyDraft.trim()) return
+    setStatusReplyBusy(true)
+    setStatusReplyError('')
+    setStatusReplyNotice('')
+    try {
+      await sendTimedUpdateReply({
+        kind: 'STATUS',
+        updateId: activeStatus.id,
+        ownerId: activeStatus.authorId,
+        text: statusReplyDraft,
+      }, apiRequest)
+      setStatusReplyDraft('')
+      setStatusReplyNotice('Reply sent to their private chat.')
+    } catch (replyError) {
+      setStatusReplyError(replyError instanceof Error ? replyError.message : 'Unable to send your Status reply.')
+    } finally {
+      setStatusReplyBusy(false)
+    }
+  }
+
+  const sendStatusReaction = async (reaction: TimedUpdateReaction) => {
+    if (!activeStatus || statusReplyBusy) return
+    setStatusReplyBusy(true)
+    setStatusReplyError('')
+    setStatusReplyNotice('')
+    try {
+      await sendTimedUpdateReply({
+        kind: 'STATUS',
+        updateId: activeStatus.id,
+        ownerId: activeStatus.authorId,
+        reaction,
+      }, apiRequest)
+      setStatusReplyNotice(`Reaction ${reaction} sent to their private chat.`)
+    } catch (replyError) {
+      setStatusReplyError(replyError instanceof Error ? replyError.message : 'Unable to send your Status reaction.')
+    } finally {
+      setStatusReplyBusy(false)
     }
   }
 
@@ -240,9 +300,18 @@ export function UpdatesPage() {
 
       {activeStatus ? <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" role="dialog" aria-modal="true" aria-label={`${activeStatus.author.name}'s status`}>
         <article className="relative flex max-h-[90dvh] w-full max-w-md flex-col overflow-hidden rounded-xl bg-slate-950 text-white">
-          <div className="flex items-center justify-between p-3"><div className="flex items-center gap-2"><Avatar src={activeStatus.author.avatar} alt={activeStatus.author.name} size="sm" /><div><p className="text-sm font-semibold">{activeStatus.author.name}</p><time className="text-[11px] text-slate-300">{new Date(activeStatus.createdAt).toLocaleString()}</time></div></div><button type="button" onClick={() => setActiveStatus(null)} aria-label="Close status" className="rounded-full p-2 hover:bg-white/10"><X className="h-5 w-5" /></button></div>
+          <div className="flex items-center justify-between p-3"><div className="flex items-center gap-2"><Avatar src={activeStatus.author.avatar} alt={activeStatus.author.name} size="sm" /><div><p className="text-sm font-semibold">{activeStatus.author.name}</p><time className="text-[11px] text-slate-300">{new Date(activeStatus.createdAt).toLocaleString()}</time></div></div><button type="button" onClick={() => { setActiveStatus(null); setStatusReplyDraft(''); setStatusReplyError(''); setStatusReplyNotice('') }} aria-label="Close status" className="rounded-full p-2 hover:bg-white/10"><X className="h-5 w-5" /></button></div>
           {activeStatus.mediaUrl ? activeStatus.mediaUrl.match(/\.(mp4|webm|ogg)(?:$|[?#])/i) ? <video controls autoPlay src={resolveMediaUrl(activeStatus.mediaUrl)} crossOrigin={activeStatus.mediaUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} className="max-h-[65dvh] w-full object-contain" /> : <img src={resolveMediaUrl(activeStatus.mediaUrl)} crossOrigin={activeStatus.mediaUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="Status image" className="max-h-[65dvh] w-full object-contain" /> : null}
           {activeStatus.text ? <p className="whitespace-pre-wrap p-4 text-sm">{activeStatus.text}</p> : null}
+          {activeStatus.authorId !== user?.id ? <div className="mt-auto space-y-2 border-t border-white/10 p-3">
+            {statusReplyNotice ? <p role="status" className="text-center text-sm text-emerald-200">{statusReplyNotice}</p> : null}
+            {statusReplyError ? <p role="alert" className="text-center text-sm text-rose-200">{statusReplyError}</p> : null}
+            <form onSubmit={(event) => void submitStatusReply(event)} className="flex items-center gap-2 rounded-full border border-white/40 bg-white/10 p-1.5 pl-4">
+              <input aria-label={`Reply to ${activeStatus.author.name}'s status`} value={statusReplyDraft} onChange={(event) => setStatusReplyDraft(event.target.value)} maxLength={1000} placeholder="Reply to status…" className="min-w-0 flex-1 bg-transparent py-2 text-sm text-white outline-none placeholder:text-white/70" />
+              <button type="submit" aria-label="Send status reply" disabled={statusReplyBusy || !statusReplyDraft.trim()} className="rounded-full bg-[#078744] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{statusReplyBusy ? 'Sending…' : 'Send'}</button>
+            </form>
+            <div className="flex justify-center gap-2" aria-label="React to status">{(['👍', '❤️', '😂', '😮', '😢', '🙏'] as const).map((reaction) => <button key={reaction} type="button" aria-label={`React ${reaction} to status`} disabled={statusReplyBusy} onClick={() => void sendStatusReaction(reaction)} className="rounded-full bg-white/10 px-2.5 py-1.5 text-lg hover:bg-white/20 disabled:opacity-50">{reaction}</button>)}</div>
+          </div> : null}
           {activeStatus.authorId === user?.id ? <div className="flex items-center justify-between border-t border-white/10 px-4 py-3 text-xs text-slate-300"><span>{activeStatus.viewCount} views</span><button type="button" onClick={() => void deleteStatus(activeStatus)} className="font-semibold text-white">Delete status</button></div> : null}
         </article>
       </div> : null}

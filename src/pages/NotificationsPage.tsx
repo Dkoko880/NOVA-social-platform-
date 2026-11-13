@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Button } from '../components/ui/Button'
 import { useEffect, useState } from 'react'
 import { apiRequest } from '../lib/api'
+import { openAuthenticatedEventStream } from '../lib/eventStream'
 
 type ApiNotification = { id: string; type: string; message: string; link?: string | null; readAt?: string | null; createdAt: string }
 
@@ -12,6 +13,8 @@ const typeMap = {
   follow: { label: 'Follow', icon: UserPlus },
   mention: { label: 'Mention', icon: BellRing },
   live_started: { label: 'Live', icon: Radio },
+  message_story_reply: { label: 'Story reply', icon: MessageSquareText },
+  message_status_reply: { label: 'Status reply', icon: MessageSquareText },
   system: { label: 'System', icon: ShieldAlert },
 }
 
@@ -22,10 +25,29 @@ export function NotificationsPage() {
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
+    let active = true
     void apiRequest<{ notifications: ApiNotification[] }>('/api/notifications')
-      .then((response) => setNotifications(response.notifications))
-      .catch((loadError) => setError(loadError instanceof Error ? loadError.message : 'Unable to load notifications.'))
-      .finally(() => setLoading(false))
+      .then((response) => { if (active) setNotifications(response.notifications) })
+      .catch((loadError) => { if (active) setError(loadError instanceof Error ? loadError.message : 'Unable to load notifications.') })
+      .finally(() => { if (active) setLoading(false) })
+    const source = openAuthenticatedEventStream('/api/realtime')
+    source.addEventListener('notification:new', (event) => {
+      try {
+        const payload = JSON.parse(event.data) as { notification?: ApiNotification }
+        const notification = payload.notification
+        if (active && notification) {
+          setNotifications((current) => current.some((item) => item.id === notification.id)
+            ? current
+            : [notification, ...current])
+        }
+      } catch {
+        if (active) setError('A realtime notification could not be read. Refresh to try again.')
+      }
+    })
+    return () => {
+      active = false
+      source.close()
+    }
   }, [])
 
   const markRead = async (id: string) => {
@@ -90,6 +112,7 @@ export function NotificationsPage() {
                 <div className="min-w-0 flex-1">
                   <p className="text-sm text-slate-700"><span className="font-semibold text-slate-900">novachat</span> {item.message}</p>
                   {item.type === 'live_started' && item.link ? <Link to={item.link} className="mt-2 inline-flex min-h-10 items-center rounded-lg px-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-100">Watch live</Link> : null}
+                  {item.type.startsWith('message_') && item.link ? <Link to={item.link} className="mt-2 inline-flex min-h-10 items-center rounded-lg px-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-100">Open conversation</Link> : null}
                   <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
                     <span>{config.label}</span>
                     <span>•</span>

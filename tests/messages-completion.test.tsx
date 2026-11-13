@@ -204,6 +204,40 @@ describe('NOVACHAT messaging completion UI', () => {
     expect(host.textContent).toContain('Weekend group')
   })
 
+  it('renders persisted Story and Status context links in the private chat', async () => {
+    const storyMessage = {
+      ...originalMessage,
+      id: 'story-reply',
+      metadata: {
+        timedUpdate: { kind: 'STORY', id: 'story-context', text: 'Original story text' },
+        timedUpdateReaction: null,
+      },
+    }
+    const statusMessage = {
+      ...originalMessage,
+      id: 'status-reply',
+      metadata: {
+        timedUpdate: { kind: 'STATUS', id: 'status-context', text: 'Original status text' },
+        timedUpdateReaction: '❤️',
+      },
+    }
+    state.apiRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/conversations') return { conversations: state.conversations }
+      if (path === '/api/conversations/group-chat/messages?limit=50') return { messages: [storyMessage, statusMessage], hasMore: false }
+      if (path.endsWith('/read') || path.endsWith('/typing') || path.endsWith('/recording')) return {}
+      return {}
+    })
+    await renderPage()
+
+    const storyLink = host.querySelector<HTMLAnchorElement>('a[href="/?story=story-context"]')
+    expect(storyLink?.textContent).toContain('Story reply')
+    expect(storyLink?.textContent).toContain('Original story text')
+    expect(storyLink?.textContent).toContain('Open original while available')
+    const statusLink = host.querySelector<HTMLAnchorElement>('a[href="/updates?status=status-context"]')
+    expect(statusLink?.textContent).toContain('Status reply')
+    expect(statusLink?.textContent).toContain('Original status text')
+  })
+
   it('searches and previews stickers before sending the selected media', async () => {
     state.apiRequest.mockImplementation(async (path: string, options?: RequestInit) => {
       if (path === '/api/conversations') return { conversations: state.conversations }

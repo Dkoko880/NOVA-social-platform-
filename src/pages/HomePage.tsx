@@ -1,13 +1,13 @@
 import { ArrowRight, ChevronLeft, ChevronRight, Plus, Send, X } from 'lucide-react'
-import { Link, useNavigate } from 'react-router-dom'
-import { Fragment, useEffect, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { PostCard } from '../components/PostCard'
 import { FeedAdSlot } from '../components/FeedAdSlot'
 import { Avatar } from '../components/ui/Avatar'
 import { useAuth } from '../context/AuthContext'
 import { apiRequest, resolveMediaUrl, uploadMedia } from '../lib/api'
 import { openAuthenticatedEventStream } from '../lib/eventStream'
-import { isVideoStoryMedia, sendStoryReply } from '../lib/storyReplies'
+import { isVideoStoryMedia, sendTimedUpdateReply } from '../lib/storyReplies'
 import type { Post } from '../types'
 
 type StoryRecord = {
@@ -43,6 +43,7 @@ function toPost(record: any): Post {
 
 export function HomePage() {
   const { user } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [posts, setPosts] = useState<Post[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -59,6 +60,7 @@ export function HomePage() {
   const [storyProgress, setStoryProgress] = useState(0)
   const [storyReplyDraft, setStoryReplyDraft] = useState('')
   const [storyReplyBusy, setStoryReplyBusy] = useState(false)
+  const [storyReactionBusy, setStoryReactionBusy] = useState(false)
   const [storyReplyError, setStoryReplyError] = useState('')
   const [storyReplyNotice, setStoryReplyNotice] = useState('')
   const [storyViewerError, setStoryViewerError] = useState('')
@@ -142,7 +144,7 @@ export function HomePage() {
     }
   }
 
-  const openStory = async (story: StoryRecord) => {
+  const openStory = useCallback(async (story: StoryRecord) => {
     setStoryViewerError('')
     try {
       const response = await apiRequest<{ viewed: boolean; viewCount: number }>(`/api/stories/${encodeURIComponent(story.id)}/view`, { method: 'POST' })
@@ -155,7 +157,20 @@ export function HomePage() {
       setStoriesError(message)
       setStoryViewerError(message)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    const storyId = searchParams.get('story')
+    if (!storyId || storiesLoading) return
+    const story = stories.find((item) => item.id === storyId)
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      next.delete('story')
+      return next
+    }, { replace: true })
+    if (story) void openStory(story)
+    else setStoriesError('This Story has expired or is no longer available.')
+  }, [openStory, searchParams, setSearchParams, stories, storiesLoading])
 
   const closeStory = () => {
     setActiveStory(null)
@@ -164,6 +179,7 @@ export function HomePage() {
     setStoryReplyError('')
     setStoryReplyNotice('')
     setStoryViewerError('')
+    setStoryReactionBusy(false)
   }
 
   const stepStory = (direction: -1 | 1) => {
@@ -180,13 +196,38 @@ export function HomePage() {
     setStoryReplyError('')
     setStoryReplyNotice('')
     try {
-      await sendStoryReply(activeStory.authorId, storyReplyDraft, apiRequest)
+      await sendTimedUpdateReply({
+        kind: 'STORY',
+        updateId: activeStory.id,
+        ownerId: activeStory.authorId,
+        text: storyReplyDraft,
+      }, apiRequest)
       setStoryReplyDraft('')
-      setStoryReplyNotice('Reply sent to your conversation.')
+      setStoryReplyNotice('Reply sent to their private chat.')
     } catch (replyError) {
       setStoryReplyError(replyError instanceof Error ? replyError.message : 'Unable to send your story reply.')
     } finally {
       setStoryReplyBusy(false)
+    }
+  }
+
+  const sendStoryReaction = async (reaction: '👍' | '❤️' | '😂' | '😮' | '😢' | '🙏') => {
+    if (!activeStory || storyReactionBusy) return
+    setStoryReactionBusy(true)
+    setStoryReplyError('')
+    setStoryReplyNotice('')
+    try {
+      await sendTimedUpdateReply({
+        kind: 'STORY',
+        updateId: activeStory.id,
+        ownerId: activeStory.authorId,
+        reaction,
+      }, apiRequest)
+      setStoryReplyNotice(`Reaction ${reaction} sent to their private chat.`)
+    } catch (replyError) {
+      setStoryReplyError(replyError instanceof Error ? replyError.message : 'Unable to send your Story reaction.')
+    } finally {
+      setStoryReactionBusy(false)
     }
   }
 
@@ -316,7 +357,9 @@ export function HomePage() {
                   <input aria-label={`Reply to ${activeStory.author.name}'s story`} value={storyReplyDraft} onChange={(event) => setStoryReplyDraft(event.target.value)} maxLength={1000} placeholder="Reply to story…" className="min-w-0 flex-1 bg-transparent py-2 text-sm text-white outline-none placeholder:text-white/70" />
                   <button type="submit" aria-label="Send story reply" disabled={storyReplyBusy || !storyReplyDraft.trim()} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white disabled:opacity-50"><Send className="h-4 w-4" aria-hidden="true" /></button>
                 </form>
+                <div className="mt-2 flex justify-center gap-2" aria-label="React to story">{(['👍', '❤️', '😂', '😮', '😢', '🙏'] as const).map((reaction) => <button key={reaction} type="button" aria-label={`React ${reaction} to story`} disabled={storyReactionBusy} onClick={() => void sendStoryReaction(reaction)} className="rounded-full bg-black/40 px-2.5 py-1.5 text-lg hover:bg-white/20 disabled:opacity-50">{reaction}</button>)}</div>
                 {storyReplyBusy ? <p className="mt-2 text-center text-xs text-white/80">Sending reply…</p> : null}
+                {storyReactionBusy ? <p className="mt-2 text-center text-xs text-white/80">Sending reaction…</p> : null}
               </div> : null}
             </div>
           </section>

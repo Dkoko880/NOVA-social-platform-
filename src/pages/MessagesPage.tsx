@@ -9,6 +9,7 @@ import { apiRequest, fetchMediaBlob, resolveMediaUrl, uploadMedia, uploadMessage
 import { openAuthenticatedEventStream } from '../lib/eventStream'
 import { updateConversationPreviewFromMessage, upsertMessageById } from '../lib/messageList'
 import { formatRecordingDuration, getVoiceRecordingGesture, type PointerPosition } from '../lib/voiceRecordingGesture'
+import { isVideoStoryMedia } from '../lib/storyReplies'
 
 type ConversationParticipant = { userId: string; role?: string; user?: { id: string; name: string; avatar?: string } }
 type ConversationListItem = {
@@ -56,6 +57,19 @@ type DirectoryUser = { id: string; name: string }
 type MessageReceiptInfo = { recipientId: string; name: string; deliveredAt: string | null; readAt: string | null }
 type PrivateReplyContext = { groupId: string; groupName: string; messageId: string; senderName: string; text: string }
 type MediaPickerItem = { id: string; title: string; mediaUrl: string; previewUrl: string }
+type TimedUpdatePreview = { kind: 'STORY' | 'STATUS'; id: string; text?: string; mediaUrl?: string }
+
+function getTimedUpdatePreview(value: unknown): TimedUpdatePreview | null {
+  if (typeof value !== 'object' || value === null) return null
+  const record = value as Record<string, unknown>
+  if ((record.kind !== 'STORY' && record.kind !== 'STATUS') || typeof record.id !== 'string') return null
+  return {
+    kind: record.kind,
+    id: record.id,
+    ...(typeof record.text === 'string' ? { text: record.text } : {}),
+    ...(typeof record.mediaUrl === 'string' ? { mediaUrl: record.mediaUrl } : {}),
+  }
+}
 
 function MessageMediaAttachment({ message, isOwn }: { message: MessageItem; isOwn: boolean }) {
   const [loadedMedia, setLoadedMedia] = useState<{ url: string; source: string; error: string }>({ url: '', source: '', error: '' })
@@ -1393,6 +1407,7 @@ export function MessagesPage() {
                   const pollVotes = message.metadata?.votes && typeof message.metadata.votes === 'object' ? message.metadata.votes as Record<string, string> : {}
                   const eventResponses = message.metadata?.responses && typeof message.metadata.responses === 'object' ? message.metadata.responses as Record<string, string> : {}
                   const pollVoteCount = Object.keys(pollVotes).length
+                  const timedUpdate = getTimedUpdatePreview(message.metadata?.timedUpdate)
                   return (
                     <Fragment key={message.id}>
                     {startsNewDate ? <div className="my-3 flex justify-center"><span className="rounded-lg bg-white/90 px-3 py-1 text-[11px] font-medium text-slate-600 shadow-sm">{dateLabel}</span></div> : null}
@@ -1400,6 +1415,15 @@ export function MessagesPage() {
                       <div className={`max-w-[86%] rounded-2xl px-3 py-2 text-sm shadow-sm sm:max-w-[70%] ${isOwn ? 'rounded-tr-sm bg-[#d9fdd3] text-slate-800' : 'rounded-tl-sm bg-white text-slate-700'}`}>
                         {message.forwardedFromId ? <p className={`mb-1 text-[10px] ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>Forwarded</p> : null}
                         {reply ? <p className={`mb-2 border-l-2 pl-2 text-xs ${isOwn ? 'border-indigo-200 text-indigo-100' : 'border-indigo-400 text-slate-500'}`}>{reply.text}</p> : null}
+                        {timedUpdate ? <Link to={timedUpdate.kind === 'STORY' ? `/?story=${encodeURIComponent(timedUpdate.id)}` : `/updates?status=${encodeURIComponent(timedUpdate.id)}`} className={`mb-2 block max-w-xs rounded-xl border p-2 ${isOwn ? 'border-emerald-700/30 bg-white/50' : 'border-slate-200 bg-slate-50'}`}>
+                          <span className="block text-[10px] font-bold uppercase tracking-wide">{timedUpdate.kind === 'STORY' ? 'Story' : 'Status'} reply</span>
+                          {timedUpdate.mediaUrl ? isVideoStoryMedia(timedUpdate.mediaUrl)
+                            ? <video src={resolveMediaUrl(timedUpdate.mediaUrl)} crossOrigin={timedUpdate.mediaUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} muted playsInline preload="metadata" className="mt-1 max-h-24 w-full rounded-lg object-cover" />
+                            : <img src={resolveMediaUrl(timedUpdate.mediaUrl)} crossOrigin={timedUpdate.mediaUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} alt="" className="mt-1 max-h-24 w-full rounded-lg object-cover" />
+                            : null}
+                          {timedUpdate.text ? <span className="mt-1 block line-clamp-2 whitespace-pre-wrap text-xs">{timedUpdate.text}</span> : null}
+                          <span className="mt-1 block text-[10px] font-semibold underline">Open original while available</span>
+                        </Link> : null}
                         {['IMAGE', 'VIDEO', 'VOICE', 'DOCUMENT', 'GIF', 'STICKER'].includes(message.contentType ?? '') && message.mediaUrl ? <MessageMediaAttachment message={message} isOwn={isOwn} /> : null}
                         {message.text ? <p className="whitespace-pre-wrap">{message.text}</p> : null}
                         {message.contentType === 'CONTACT' && message.metadata ? <p><strong>{String(message.metadata.name ?? 'Contact')}</strong><br /><a href={`tel:${encodeURIComponent(String(message.metadata.phone ?? ''))}`} className="underline">{String(message.metadata.phone ?? '')}</a></p> : null}

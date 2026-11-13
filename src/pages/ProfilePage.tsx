@@ -1,6 +1,6 @@
-import { Link2, MapPin, PencilLine, UserRoundCheck, UserRoundPlus, UserRoundX } from 'lucide-react'
+import { Link2, MapPin, MessageSquareText, PencilLine, UserRoundCheck, UserRoundPlus, UserRoundX } from 'lucide-react'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { Avatar } from '../components/ui/Avatar'
 import { Button } from '../components/ui/Button'
 import { PostCard } from '../components/PostCard'
@@ -38,6 +38,7 @@ function toPost(record: any): Post {
 
 export function ProfilePage() {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const { id } = useParams()
   const profileId = id ?? user?.id
   const isOwnProfile = profileId === user?.id
@@ -48,6 +49,7 @@ export function ProfilePage() {
   const [editing, setEditing] = useState(false)
   const [editDraft, setEditDraft] = useState({ displayName: '', username: '', bio: '', avatarUrl: '', coverUrl: '', website: '', location: '' })
   const [busy, setBusy] = useState(false)
+  const [openingMessage, setOpeningMessage] = useState(false)
   const [notice, setNotice] = useState('')
   const profileRequestId = useRef(0)
 
@@ -91,6 +93,7 @@ export function ProfilePage() {
   const displayName = profile?.profile?.displayName ?? profile?.name ?? 'novachat user'
   const avatar = profile?.profile?.avatarUrl ?? ''
   const relationship = profile?.relationship
+  const blockRelationship = Boolean(relationship?.blockedByMe || relationship?.blockedMe)
 
   const startEditing = () => {
     if (!profile) return
@@ -153,6 +156,23 @@ export function ProfilePage() {
     }
   }
 
+  const openMessage = async () => {
+    if (!profile || openingMessage || blockRelationship) return
+    setOpeningMessage(true)
+    setError('')
+    try {
+      const response = await apiRequest<{ conversation: { id: string } }>('/api/conversations', {
+        method: 'POST',
+        body: JSON.stringify({ participantId: profile.id }),
+      })
+      navigate(`/messages?conversationId=${encodeURIComponent(response.conversation.id)}`)
+    } catch (messageError) {
+      setError(messageError instanceof Error ? messageError.message : 'Unable to open this conversation.')
+    } finally {
+      setOpeningMessage(false)
+    }
+  }
+
   const toggleBlock = async () => {
     if (!profile || busy) return
     setBusy(true)
@@ -188,8 +208,6 @@ export function ProfilePage() {
   if (error && !profile) return <div className="m-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700" role="alert">{error}</div>
   if (!profile) return null
 
-  const blockRelationship = Boolean(relationship?.blockedByMe || relationship?.blockedMe)
-
   return (
     <div className="p-4 sm:p-6">
       <div className="mx-auto max-w-5xl space-y-6">
@@ -215,6 +233,9 @@ export function ProfilePage() {
                   <>
                     <Button variant={relationship?.isFollowing ? 'secondary' : 'primary'} size="sm" disabled={busy || blockRelationship} onClick={() => void toggleFollow()} icon={relationship?.isFollowing ? <UserRoundCheck className="h-4 w-4" aria-hidden="true" /> : <UserRoundPlus className="h-4 w-4" aria-hidden="true" />}>
                       {relationship?.isFollowing ? 'Following' : 'Follow'}
+                    </Button>
+                    <Button variant="primary" size="sm" disabled={openingMessage || blockRelationship} onClick={() => void openMessage()} icon={<MessageSquareText className="h-4 w-4" aria-hidden="true" />}>
+                      {openingMessage ? 'Opening…' : 'Message'}
                     </Button>
                     <Button variant="secondary" size="sm" disabled={busy || Boolean(relationship?.blockedMe)} onClick={() => void toggleBlock()} icon={<UserRoundX className="h-4 w-4" aria-hidden="true" />}>
                       {relationship?.blockedByMe ? 'Unblock' : relationship?.blockedMe ? 'Blocked you' : 'Block'}

@@ -7,6 +7,7 @@ import { attachmentMediaKeyFromUrl, mediaKeyFromUrl, uploadedMediaBelongsTo, get
 import { reviewContentForSafety } from '../lib/moderation.js';
 import { emitConversationEvent, isUserConnected, realtimeHub, registerRealtimeConnection, subscribeToUserEvents, updateRecordingState } from '../lib/realtime.js';
 import { findUserById } from '../lib/fallbackStore.js';
+import { createNotification } from '../lib/platform.js';
 import type { Prisma } from '@prisma/client';
 import env from '../config/env.js';
 
@@ -38,7 +39,7 @@ const messageSchema = z.object({
   mediaUrl: z.string().trim().max(2000).refine(isAllowedMessageMediaUrl, 'Use an HTTPS URL or an uploaded novachat image.').optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   replyToId: z.string().min(1).optional(),
-}).refine((payload) => payload.contentType !== 'TEXT' || Boolean(payload.text?.trim()), { message: 'Text messages need content.' })
+}).refine((payload) => payload.contentType !== 'TEXT' || Boolean(payload.text?.trim()) || Boolean(payload.metadata?.timedUpdateReply), { message: 'Text messages need content.' })
   .refine((payload) => !['IMAGE', 'VIDEO', 'DOCUMENT', 'VOICE', 'GIF', 'STICKER'].includes(payload.contentType) || Boolean(payload.mediaUrl), { message: 'Media messages need a media URL.' })
   .refine((payload) => !['CONTACT', 'LOCATION', 'POLL', 'EVENT'].includes(payload.contentType) || Boolean(payload.metadata), { message: 'This message type needs metadata.' })
   .refine((payload) => payload.contentType !== 'POLL' || (
@@ -53,6 +54,11 @@ const messageSchema = z.object({
     && typeof payload.metadata.startsAt === 'string'
     && !Number.isNaN(Date.parse(payload.metadata.startsAt))
   ), { message: 'Events need a title and a valid start time.' });
+const timedUpdateReplySchema = z.object({
+  kind: z.enum(['STORY', 'STATUS']),
+  id: z.string().min(1).max(128),
+  reaction: z.enum(['👍', '❤️', '😂', '😮', '😢', '🙏']).optional(),
+});
 
 const interactiveResponseSchema = z.object({
   optionId: z.string().min(1).optional(),
@@ -383,23 +389,44 @@ messagesRouter.post('/conversations', requireAuth, async (req, res) => {
       }
     }
 
-    if (participantIds.length === 1 && !payload.isChannel) {
-      const existing = await prisma.conversation.findFirst({
-        where: {
-          AND: conversationParticipantIds.map((participantId) => ({ participants: { some: { userId: participantId } } })),
-          participants: { every: { userId: { in: conversationParticipantIds } } },
-        },
+    if (participantIds.length === 1 && !payload.isChannel && !payload.isGroup && !payload.participantIds) {
+      const peerId = participantIds[0];
+      const pairKey = [userId, peerId].sort().join(':');
+      const result = await prisma.$transaction(async (transaction) => {
+        await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${pairKey}))`;
+        const existing = await transaction.conversation.findFirst({
+          where: {
+            isGroup: false,
+            isChannel: false,
+            AND: conversationParticipantIds.map((participantId) => ({
+              participants: { some: { userId: participantId, leftAt: null } },
+            })),
+            participants: { every: { userId: { in: conversationParticipantIds }, leftAt: null } },
+          },
+        });
+        if (existing) return { conversation: existing, created: false };
+        const conversation = await transaction.conversation.create({
+          data: {
+            ownerId: userId,
+            isChannel: false,
+            isGroup: false,
+            participants: {
+              create: conversationParticipantIds.map((participantId, index) => ({
+                userId: participantId,
+                role: index === 0 ? 'OWNER' : 'MEMBER',
+              })),
+            },
+          },
+        });
+        return { conversation, created: true };
       });
-
-      if (existing) {
-        return res.status(200).json({ conversation: {
-          id: existing.id,
-          name: existing.name,
-          updatedAt: existing.updatedAt,
-          lastMessageAt: existing.lastMessageAt,
-          lastMessagePreview: existing.lastMessagePreview,
-        } });
-      }
+      return res.status(result.created ? 201 : 200).json({ conversation: {
+        id: result.conversation.id,
+        name: result.conversation.name,
+        updatedAt: result.conversation.updatedAt,
+        lastMessageAt: result.conversation.lastMessageAt,
+        lastMessagePreview: result.conversation.lastMessagePreview,
+      } });
     }
 
     const conversation = await prisma.conversation.create({
@@ -444,9 +471,10 @@ messagesRouter.post('/conversations', requireAuth, async (req, res) => {
     }
   }
 
-  const existing = participantIds.length === 1 && !payload.isChannel ? socialStore.state.conversations.find((conversation) => {
+  const existing = participantIds.length === 1 && !payload.isChannel && !payload.isGroup && !payload.participantIds ? socialStore.state.conversations.find((conversation) => {
+    if (conversation.isGroup || conversation.isChannel) return false;
     const existingParticipantIds = socialStore.state.conversationParticipants
-      .filter((participant) => participant.conversationId === conversation.id)
+      .filter((participant) => participant.conversationId === conversation.id && !participant.leftAt)
       .map((participant) => participant.userId);
     return existingParticipantIds.length === 2 && conversationParticipantIds.every((participantId) => existingParticipantIds.includes(participantId));
   }) : undefined;
@@ -632,6 +660,16 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
   const conversationId = String(req.params.id);
   const userId = req.user!.id;
   const payload = messageSchema.parse(req.body ?? {});
+  const timedReplyResult = payload.metadata?.timedUpdateReply === undefined
+    ? null
+    : timedUpdateReplySchema.safeParse(payload.metadata.timedUpdateReply);
+  if (timedReplyResult && !timedReplyResult.success) {
+    return res.status(400).json({ message: 'Invalid Story or Status reply context.' });
+  }
+  const timedReply = timedReplyResult?.data ?? null;
+  if (timedReply && !payload.text?.trim() && !timedReply.reaction) {
+    return res.status(400).json({ message: 'Write a reply or choose a reaction.' });
+  }
 
   if (!(await canViewConversation(conversationId, userId))) {
     return res.status(403).json({ message: 'You do not have access to this conversation.' });
@@ -661,7 +699,7 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
 
   const dbAvailable = await isDatabaseAvailable();
   const conversation = dbAvailable
-    ? await prisma.conversation.findUnique({ where: { id: conversationId }, select: { isChannel: true, disappearingAfterSeconds: true } })
+    ? await prisma.conversation.findUnique({ where: { id: conversationId }, select: { isChannel: true, isGroup: true, disappearingAfterSeconds: true } })
     : socialStore.state.conversations.find((entry) => entry.id === conversationId);
   if (!conversation) return res.status(404).json({ message: 'Conversation not found.' });
   if (conversation.isChannel) {
@@ -701,6 +739,43 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
     }
   }
 
+  let timedUpdateContext: Record<string, unknown> | null = null;
+  if (timedReply) {
+    if (recipients.length !== 1 || conversation.isGroup || conversation.isChannel) {
+      return res.status(403).json({ message: 'Timed update replies must be sent in a private conversation.' });
+    }
+    const authorId = recipients[0];
+    const update = dbAvailable
+      ? await prisma.story.findFirst({
+        where: { id: timedReply.id, kind: timedReply.kind, expiresAt: { gt: new Date() } },
+        select: { id: true, authorId: true, kind: true, text: true, mediaUrl: true, createdAt: true, expiresAt: true },
+      })
+      : socialStore.state.stories.find((entry) => entry.id === timedReply.id
+        && (entry.kind ?? 'STORY') === timedReply.kind
+        && new Date(entry.expiresAt).getTime() > Date.now());
+    if (!update || update.authorId !== authorId || authorId === userId) {
+      return res.status(404).json({ message: 'This Story or Status has expired or is no longer available.' });
+    }
+    const followsAuthor = dbAvailable
+      ? Boolean(await prisma.follow.findUnique({
+        where: { followerId_followingId: { followerId: userId, followingId: authorId } },
+        select: { id: true },
+      }))
+      : socialStore.state.follows.some((follow) => follow.followerId === userId && follow.followingId === authorId);
+    if (!followsAuthor || await isBlocked(userId, authorId)) {
+      return res.status(404).json({ message: 'This Story or Status is no longer available.' });
+    }
+    timedUpdateContext = {
+      kind: timedReply.kind,
+      id: update.id,
+      text: update.text,
+      mediaUrl: update.mediaUrl,
+      createdAt: update.createdAt,
+      expiresAt: update.expiresAt,
+      authorId: update.authorId,
+    };
+  }
+
   const moderation = reviewContentForSafety({ type: 'message', text: payload.text ?? '', userId });
   if (moderation === 'REMOVE') {
     return res.status(400).json({ message: 'This message violates NOVA Community & Safety Rules.' });
@@ -714,15 +789,21 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
     const expiresAt = disappearingAfterSeconds > 0
       ? new Date(Date.now() + disappearingAfterSeconds * 1000)
       : undefined;
+    const messageText = timedReply && !payload.text?.trim()
+      ? `Reacted ${timedReply.reaction} to your ${timedReply.kind === 'STORY' ? 'Story' : 'Status'}`
+      : payload.text ?? '';
+    const messageMetadata = timedReply
+      ? { ...(payload.metadata ?? {}), timedUpdate: timedUpdateContext, timedUpdateReaction: timedReply.reaction ?? null } as Prisma.InputJsonValue
+      : payload.metadata as Prisma.InputJsonValue | undefined;
     const created = await prisma.message.create({
       data: {
         conversationId,
         senderId: userId,
-        text: payload.text ?? '',
+        text: messageText,
         status: 'SENT',
         contentType: payload.contentType,
         mediaUrl: payload.mediaUrl,
-        metadata: payload.metadata as Prisma.InputJsonValue | undefined,
+        metadata: messageMetadata,
         replyToId: payload.replyToId,
         expiresAt,
         receipts: { create: recipients.map((recipientId) => ({ recipientId })) },
@@ -730,7 +811,7 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
       include: { receipts: { include: { recipient: { select: { readReceiptsEnabled: true } } } } },
     });
 
-    const preview = payload.text || `[${payload.contentType.toLowerCase()}]`;
+    const preview = messageText || `[${payload.contentType.toLowerCase()}]`;
 
     await prisma.conversation.update({
       where: { id: conversationId },
@@ -742,6 +823,18 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
     });
 
     emitConversationEvent('message:new', conversationId, { message: messageToPublicShape(created), senderId: userId }, [userId, ...recipients]);
+    if (timedReply) {
+      const sender = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
+      await createNotification(
+        recipients[0],
+        userId,
+        `message_${timedReply.kind.toLowerCase()}_reply`,
+        `${sender?.name ?? 'Someone'} ${timedReply.reaction
+          ? `reacted ${timedReply.reaction} to your ${timedReply.kind === 'STORY' ? 'Story' : 'Status'}`
+          : `replied to your ${timedReply.kind === 'STORY' ? 'Story' : 'Status'}`}.`,
+        { link: `/messages?conversationId=${encodeURIComponent(conversationId)}`, dedupeKey: `timed-update-reply:${created.id}` },
+      );
+    }
 
     return res.status(201).json({ message: messageToPublicShape(created, userId) });
   }
@@ -750,7 +843,9 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
     id: `message_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     conversationId,
     senderId: userId,
-    text: payload.text ?? '',
+    text: timedReply && !payload.text?.trim()
+      ? `Reacted ${timedReply.reaction} to your ${timedReply.kind === 'STORY' ? 'Story' : 'Status'}`
+      : payload.text ?? '',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     readAt: null,
@@ -758,7 +853,9 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
     status: 'SENT',
     contentType: payload.contentType,
     mediaUrl: payload.mediaUrl ?? null,
-    metadata: payload.metadata ?? null,
+    metadata: timedReply
+      ? { ...(payload.metadata ?? {}), timedUpdate: timedUpdateContext, timedUpdateReaction: timedReply.reaction ?? null }
+      : payload.metadata ?? null,
     replyToId: payload.replyToId ?? null,
     forwardedFromId: null,
     editedAt: null,
@@ -780,10 +877,22 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
   if (fallbackConversation) {
     fallbackConversation.updatedAt = new Date().toISOString();
     fallbackConversation.lastMessageAt = new Date().toISOString();
-    fallbackConversation.lastMessagePreview = payload.text || `[${payload.contentType.toLowerCase()}]`;
+    fallbackConversation.lastMessagePreview = created.text || `[${payload.contentType.toLowerCase()}]`;
   }
 
   emitConversationEvent('message:new', conversationId, { message: messageToPublicShape(created), senderId: userId }, [userId, ...recipients]);
+  if (timedReply) {
+    const sender = findUserById(userId);
+    await createNotification(
+      recipients[0],
+      userId,
+      `message_${timedReply.kind.toLowerCase()}_reply`,
+      `${sender?.name ?? 'Someone'} ${timedReply.reaction
+        ? `reacted ${timedReply.reaction} to your ${timedReply.kind === 'STORY' ? 'Story' : 'Status'}`
+        : `replied to your ${timedReply.kind === 'STORY' ? 'Story' : 'Status'}`}.`,
+      { link: `/messages?conversationId=${encodeURIComponent(conversationId)}`, dedupeKey: `timed-update-reply:${created.id}` },
+    );
+  }
 
   return res.status(201).json({ message: messageToPublicShape({
     ...created,

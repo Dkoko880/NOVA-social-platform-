@@ -81,6 +81,106 @@ describe('completed NOVACHAT messaging features', () => {
     expect(sent.body.message.status).toBe('SENT');
   });
 
+  it('creates one private chat and persists Story and Status replies with preview metadata and realtime delivery', async () => {
+    const sender = await register('TimedReplySender');
+    const author = await register('TimedReplyAuthor');
+    await request(app).post(`/api/users/${author.user.id}/follow`).set('Cookie', sender.auth);
+    const story = await request(app).post('/api/stories').set('Cookie', author.auth).send({ text: 'Story context' });
+    const status = await request(app).post('/api/statuses').set('Cookie', author.auth).send({ text: 'Status context' });
+
+    const [firstConversation, secondConversation] = await Promise.all([
+      request(app).post('/api/conversations').set('Cookie', sender.auth).send({ participantId: author.user.id }),
+      request(app).post('/api/conversations').set('Cookie', sender.auth).send({ participantId: author.user.id }),
+    ]);
+    expect([firstConversation.status, secondConversation.status].sort()).toEqual([200, 201]);
+    expect(secondConversation.body.conversation.id).toBe(firstConversation.body.conversation.id);
+
+    const authorEvents: Array<Record<string, unknown>> = [];
+    const stopListening = subscribeToUserEvents(author.user.id, (event) => { authorEvents.push(event as Record<string, unknown>); });
+    const storyReply = await request(app)
+      .post(`/api/conversations/${firstConversation.body.conversation.id}/messages`)
+      .set('Cookie', sender.auth)
+      .send({ text: 'Lovely story!', metadata: { timedUpdateReply: { kind: 'STORY', id: story.body.story.id } } });
+    const statusReply = await request(app)
+      .post(`/api/conversations/${firstConversation.body.conversation.id}/messages`)
+      .set('Cookie', sender.auth)
+      .send({ text: 'Thanks for the update', metadata: { timedUpdateReply: { kind: 'STATUS', id: status.body.status.id } } });
+    const reactionReply = await request(app)
+      .post(`/api/conversations/${firstConversation.body.conversation.id}/messages`)
+      .set('Cookie', sender.auth)
+      .send({ metadata: { timedUpdateReply: { kind: 'STORY', id: story.body.story.id, reaction: '❤️' } } });
+
+    expect(storyReply.status).toBe(201);
+    expect(storyReply.body.message.metadata.timedUpdate).toMatchObject({
+      kind: 'STORY',
+      id: story.body.story.id,
+      text: 'Story context',
+      authorId: author.user.id,
+    });
+    expect(statusReply.status).toBe(201);
+    expect(statusReply.body.message.metadata.timedUpdate).toMatchObject({
+      kind: 'STATUS',
+      id: status.body.status.id,
+      text: 'Status context',
+      authorId: author.user.id,
+    });
+    expect(reactionReply.body.message).toMatchObject({
+      text: 'Reacted ❤️ to your Story',
+      metadata: { timedUpdateReaction: '❤️' },
+    });
+    expect(authorEvents).toContainEqual(expect.objectContaining({
+      event: 'message:new',
+      conversationId: firstConversation.body.conversation.id,
+      message: expect.objectContaining({ id: storyReply.body.message.id }),
+    }));
+    expect(authorEvents).toContainEqual(expect.objectContaining({ event: 'notification:new' }));
+
+    const refreshedMessages = await request(app)
+      .get(`/api/conversations/${firstConversation.body.conversation.id}/messages`)
+      .set('Cookie', author.auth);
+    expect(refreshedMessages.body.messages.map((message: { id: string }) => message.id)).toEqual(expect.arrayContaining([
+      storyReply.body.message.id,
+      statusReply.body.message.id,
+      reactionReply.body.message.id,
+    ]));
+    const notifications = await request(app).get('/api/notifications').set('Cookie', author.auth);
+    expect(notifications.body.notifications).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'message_story_reply',
+        link: `/messages?conversationId=${firstConversation.body.conversation.id}`,
+      }),
+      expect.objectContaining({ type: 'message_status_reply' }),
+    ]));
+    stopListening();
+  });
+
+  it('rejects timed-update replies to expired, deleted, private, or blocked content', async () => {
+    const sender = await register('TimedReplyBlockedSender');
+    const author = await register('TimedReplyBlockedAuthor');
+    const outsider = await register('TimedReplyOutsider');
+    await request(app).post(`/api/users/${author.user.id}/follow`).set('Cookie', sender.auth);
+    const story = await request(app).post('/api/stories').set('Cookie', author.auth).send({ text: 'Soon deleted' });
+    const conversation = await request(app).post('/api/conversations').set('Cookie', sender.auth).send({ participantId: author.user.id });
+    await request(app).delete(`/api/stories/${story.body.story.id}`).set('Cookie', author.auth);
+    expect((await request(app)
+      .post(`/api/conversations/${conversation.body.conversation.id}/messages`)
+      .set('Cookie', sender.auth)
+      .send({ text: 'Too late', metadata: { timedUpdateReply: { kind: 'STORY', id: story.body.story.id } } })).status).toBe(404);
+
+    const status = await request(app).post('/api/statuses').set('Cookie', author.auth).send({ text: 'Followers only' });
+    expect((await request(app)
+      .post(`/api/conversations/${conversation.body.conversation.id}/messages`)
+      .set('Cookie', outsider.auth)
+      .send({ text: 'Not a member', metadata: { timedUpdateReply: { kind: 'STATUS', id: status.body.status.id } } })).status).toBe(403);
+
+    await request(app).post(`/api/users/${sender.user.id}/block`).set('Cookie', author.auth);
+    const anotherStatus = await request(app).post('/api/statuses').set('Cookie', author.auth).send({ text: 'Blocked viewer' });
+    expect((await request(app)
+      .post(`/api/conversations/${conversation.body.conversation.id}/messages`)
+      .set('Cookie', sender.auth)
+      .send({ text: 'Blocked reply', metadata: { timedUpdateReply: { kind: 'STATUS', id: anotherStatus.body.status.id } } })).status).toBe(403);
+  });
+
   it('limits recording indicators to conversation members and clears them on stop or disconnect', async () => {
     const alice = await register('RecordingAlice');
     const bob = await register('RecordingBob');
