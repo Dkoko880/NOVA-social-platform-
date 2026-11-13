@@ -1,4 +1,4 @@
-import webPush from 'web-push';
+import { sendNotification, setVapidDetails } from 'web-push';
 import { env } from '../config/env.js';
 import { prisma, isDatabaseAvailable } from './prisma.js';
 import { getNotificationPreferences } from './platform.js';
@@ -143,7 +143,7 @@ export async function sendIncomingCallPush(
   const callsPreference = (await getNotificationPreferences(userId)).find((preference) => preference.key === 'calls');
   if (callsPreference?.enabled === false) return;
 
-  webPush.setVapidDetails(env.VAPID_SUBJECT, publicKey, privateKey);
+  setVapidDetails(env.VAPID_SUBJECT, publicKey, privateKey);
   const subscriptions = await getSubscriptionsForUser(userId);
   const payload = JSON.stringify({
     type: 'incoming-call',
@@ -157,7 +157,7 @@ export async function sendIncomingCallPush(
 
   await Promise.all(subscriptions.map(async (subscription) => {
     try {
-      await webPush.sendNotification({
+      await sendNotification({
         endpoint: subscription.endpoint,
         keys: subscription.keys,
       }, payload, { TTL: 45, urgency: 'high', topic });
