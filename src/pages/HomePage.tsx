@@ -29,6 +29,7 @@ function toPost(record: any): Post {
     time: new Date(record.createdAt).toLocaleString(),
     content: record.content,
     image: record.imageUrl ?? undefined,
+    background: record.background ?? undefined,
     likes: record.likes ?? 0,
     comments: record.comments ?? 0,
     shares: record.shares ?? 0,
@@ -252,7 +253,7 @@ export function HomePage() {
 
   return (
     <div className="min-h-[calc(100dvh-1px)] w-full bg-slate-100">
-      <div className="mx-auto w-full max-w-7xl px-2 py-3 sm:px-4 lg:px-6">
+      <div className="mx-auto w-full max-w-7xl px-0 py-0 sm:px-4 sm:py-4 lg:px-6">
         {/* Facebook-style quick navigation */}
         <div className="mb-3 flex w-full gap-2 overflow-x-auto pb-1">
           <Link to="/" className="shrink-0 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white">

@@ -8,6 +8,7 @@ import { LiveFeedPlayer } from './LiveFeedPlayer'
 import { useAuth } from '../context/AuthContext'
 import { apiRequest } from '../lib/api'
 import { canonicalPostUrl, sendPostToConversation, sharePostLink } from '../lib/postSharing'
+import { getPostBackground, postBackgrounds } from '../lib/postBackgrounds'
 import type { Post } from '../types'
 
 type CommentRecord = {
@@ -44,6 +45,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
   const [commentsLoading, setCommentsLoading] = useState(false)
   const [content, setContent] = useState(post.content)
   const [imageUrl, setImageUrl] = useState(post.image ?? '')
+  const [background, setBackground] = useState<string | null>(post.background ?? null)
   const [visibility, setVisibility] = useState<Post['visibility']>(post.visibility ?? 'PUBLIC')
   const [editing, setEditing] = useState(false)
   const [saved, setSaved] = useState(post.savedByCurrentUser ?? false)
@@ -67,11 +69,12 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     setAuthorFollowing(post.authorFollowing ?? false)
     setContent(post.content)
     setImageUrl(post.image ?? '')
+    setBackground(post.background ?? null)
     setVisibility(post.visibility ?? 'PUBLIC')
     setSaved(post.savedByCurrentUser ?? false)
     setSaveCount(post.saved)
     setShareCount(post.shares)
-  }, [post.authorFollowing, post.comments, post.content, post.currentUserReaction, post.image, post.likes, post.live?.viewerCount, post.saved, post.savedByCurrentUser, post.shares, post.visibility])
+  }, [post.authorFollowing, post.background, post.comments, post.content, post.currentUserReaction, post.image, post.likes, post.live?.viewerCount, post.saved, post.savedByCurrentUser, post.shares, post.visibility])
 
   const toggleLike = async () => {
     if (busy) return
@@ -231,12 +234,13 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     setBusy(true)
     setError('')
     try {
-      const response = await apiRequest<{ post: { content: string; imageUrl: string | null; visibility: NonNullable<Post['visibility']> } }>(`/api/posts/${post.id}`, {
+      const response = await apiRequest<{ post: { content: string; imageUrl: string | null; background: string | null; visibility: NonNullable<Post['visibility']> } }>(`/api/posts/${post.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ content: content.trim(), imageUrl: imageUrl.trim(), visibility }),
+        body: JSON.stringify({ content: content.trim(), imageUrl: imageUrl.trim(), background, visibility }),
       })
       setContent(response.post.content)
       setImageUrl(response.post.imageUrl ?? '')
+      setBackground(response.post.background)
       setVisibility(response.post.visibility)
       setEditing(false)
       setNotice('Post updated.')
@@ -294,6 +298,8 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     }
   }
 
+  const selectedBackground = getPostBackground(background)
+
   return (
     <article id={`post-${post.id}`} className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
       <div className="flex items-start justify-between gap-4">
@@ -321,6 +327,20 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
         <form onSubmit={(event) => void savePostEdits(event)} className="mt-4 space-y-3">
           <textarea aria-label="Edit post content" value={content} onChange={(event) => setContent(event.target.value)} maxLength={2500} required className="min-h-28 w-full rounded-xl border border-slate-200 p-3 text-sm text-slate-800 focus:border-indigo-400 focus:outline-none" />
           <input type="url" aria-label="Edit image URL" value={imageUrl} onChange={(event) => setImageUrl(event.target.value)} placeholder="Image URL (optional)" className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none" />
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Post background">
+            <button type="button" aria-pressed={!background} onClick={() => setBackground(null)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700">No background</button>
+            {postBackgrounds.map((option) => (
+              <button
+                key={option.label}
+                type="button"
+                aria-label={`${option.label} background`}
+                aria-pressed={background === option.value}
+                onClick={() => setBackground(option.value)}
+                className="h-9 w-9 rounded-lg border border-slate-300"
+                style={{ background: option.value }}
+              />
+            ))}
+          </div>
           <label className="flex items-center justify-between gap-3 text-sm text-slate-600">
             <span>Who can see this post?</span>
             <select aria-label="Post privacy" value={visibility} onChange={(event) => setVisibility(event.target.value as NonNullable<Post['visibility']>)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
@@ -336,7 +356,11 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
         </form>
       ) : (
         <>
-          {content ? <p className="mt-4 whitespace-pre-wrap text-[15px] leading-7 text-slate-700">{content}</p> : null}
+          {content && selectedBackground && !imageUrl && !post.live ? (
+            <div className="colored-post-content -mx-4 sm:-mx-5" style={{ background: selectedBackground.value, color: selectedBackground.text }}>
+              {content}
+            </div>
+          ) : content ? <p className="mt-4 whitespace-pre-wrap text-[15px] leading-7 text-slate-700">{content}</p> : null}
           {post.live ? <section className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3" aria-label="Live broadcast">
             <p className="flex items-center gap-2 text-sm font-semibold text-rose-800">
               <span className="rounded-full bg-rose-600 px-2 py-1 text-[10px] tracking-normal text-white">{post.live.status === 'live' ? 'LIVE' : 'ENDED'}</span>

@@ -80,8 +80,8 @@ export function AppShell({ children }: AppShellProps) {
   const conversationOpen = location.pathname === '/messages' && new URLSearchParams(location.search).has('conversationId')
 
   return (
-    <div className="min-h-screen text-slate-900">
-      <div className={cn('mx-auto flex min-h-screen max-w-[1600px] gap-4 p-3 pb-32 sm:p-4 lg:gap-6 lg:pb-4', isMessagingSurface && 'h-[100dvh] min-h-0 max-w-none gap-0 p-0 pb-0 lg:gap-4 lg:p-4', isVideoSurface && 'h-[100dvh] min-h-0 gap-0 p-0 pb-0 lg:gap-4 lg:p-4')}>
+    <div className="min-h-[calc(100dvh-env(safe-area-inset-top))] pt-[env(safe-area-inset-top)] text-slate-900">
+      <div className={cn('mx-auto flex min-h-[calc(100dvh-env(safe-area-inset-top))] w-full max-w-[1600px] gap-0 pb-32 sm:p-4 sm:pb-32 lg:gap-6 lg:pb-4', isMessagingSurface && 'h-[calc(100dvh-env(safe-area-inset-top))] min-h-0 max-w-none gap-0 p-0 pb-0 sm:p-0 lg:h-[100dvh] lg:gap-4 lg:p-4', isVideoSurface && 'h-[calc(100dvh-env(safe-area-inset-top))] min-h-0 gap-0 p-0 pb-0 sm:p-0 lg:h-[100dvh] lg:gap-4 lg:p-4')}>
         <aside className="hidden w-[250px] shrink-0 rounded-[28px] border border-blue-950 bg-gradient-to-b from-[#101d46] via-[#15285d] to-[#1b2862] p-4 text-white shadow-[0_24px_70px_-32px_rgba(18,35,87,.65)] lg:flex lg:flex-col">
           <div className="mb-8 flex items-center gap-3 px-2">
             <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-400 via-blue-500 to-violet-500 text-lg font-black text-white shadow-lg shadow-blue-950/40">
@@ -135,7 +135,7 @@ export function AppShell({ children }: AppShellProps) {
         </aside>
 
         <main className={cn('flex min-w-0 flex-1 flex-col', (isMessagingSurface || isVideoSurface) && 'h-full min-h-0')}>
-          <div className={cn('min-h-[calc(100vh-2rem)] overflow-hidden rounded-[28px] border border-white/80 bg-white/95 shadow-[0_20px_70px_-42px_rgba(18,35,87,.38)] backdrop-blur', (isMessagingSurface || isVideoSurface) && 'h-full min-h-0 rounded-none border-0 shadow-none')}>
+          <div className={cn('min-h-[calc(100dvh-env(safe-area-inset-top))] overflow-hidden bg-white/95 backdrop-blur sm:rounded-[28px] sm:border sm:border-white/80 sm:shadow-[0_20px_70px_-42px_rgba(18,35,87,.38)] lg:min-h-[calc(100vh-2rem)]', (isMessagingSurface || isVideoSurface) && 'h-full min-h-0 rounded-none border-0 shadow-none sm:rounded-none sm:border-0 sm:shadow-none')}>
             {!isMessagingSurface && !isVideoSurface ? <TopBar currentPath={location.pathname} /> : null}
             <div className={(isMessagingSurface || isVideoSurface) ? 'h-full min-h-0' : ''}>{children}</div>
           </div>
@@ -152,7 +152,7 @@ export function AppShell({ children }: AppShellProps) {
 export function MessagesNavigation() {
   return (
     <nav aria-label="Messages navigation" className="fixed inset-x-0 bottom-0 z-40 border-t border-indigo-100/80 bg-white/95 px-2 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur-xl">
-      <div className="mx-auto grid max-w-xl grid-cols-4 gap-1">
+      <div className="mx-auto grid w-full grid-cols-4 gap-1 lg:max-w-xl">
         {messagesNavigationItems.map(({ label, path, icon: Icon }) => (
           <NavLink
             key={path}
@@ -235,7 +235,7 @@ function MobileNavigation() {
   return (
     <>
       <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-indigo-100/80 bg-white/95 px-2 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur-xl lg:hidden">
-        <div className="mx-auto grid max-w-lg grid-cols-6 gap-1">
+        <div className="mx-auto grid w-full grid-cols-6 gap-1 lg:max-w-lg">
           {mobileItems.map(({ label, path, icon: Icon }) => (
             <NavLink
               key={path}
@@ -277,7 +277,7 @@ function MobileNavigation() {
             aria-label="Close account menu"
             onClick={() => setMenuOpen(false)}
           />
-          <div className="absolute inset-x-3 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] mx-auto max-w-lg rounded-3xl border border-slate-200 bg-white p-4 shadow-2xl">
+          <div className="absolute inset-x-3 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] mx-auto w-auto max-w-lg rounded-3xl border border-slate-200 bg-white p-4 shadow-2xl">
             <div className="mb-3 flex items-center justify-between px-2">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-700">novachat</p>

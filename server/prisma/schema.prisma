@@ -290,6 +290,7 @@ model Post {
   communityId String?
   content     String
   imageUrl    String?
+  background  String?
   visibility  PostVisibility @default(PUBLIC)
   moderationHiddenAt DateTime?
   moderationHiddenById String?

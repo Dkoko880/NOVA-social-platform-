@@ -23,6 +23,7 @@ export type SocialPostRecord = {
   authorId: string;
   content: string;
   imageUrl: string | null;
+  background?: string | null;
   visibility: 'PUBLIC' | 'FOLLOWERS' | 'PRIVATE';
   moderationHiddenAt?: string | null;
   moderationHiddenById?: string | null;

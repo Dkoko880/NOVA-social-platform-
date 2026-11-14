@@ -22,6 +22,7 @@ export type Post = {
   time: string
   content: string
   image?: string
+  background?: string
   likes: number
   comments: number
   shares: number

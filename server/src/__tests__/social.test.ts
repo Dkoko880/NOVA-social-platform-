@@ -107,6 +107,41 @@ describe('social platform features', () => {
     expect(response.body.post.author.name).toBe('Alice');
   });
 
+  it('persists colored post backgrounds through feed reads and edits', async () => {
+    await request(app).post('/api/auth/register').send({
+      name: 'Alice',
+      email: 'alice@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+    const login = await request(app).post('/api/auth/login').send({
+      email: 'alice@example.com',
+      password: 'Password123',
+    });
+    const cookie = getCookieHeader(login);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Cookie', cookie)
+      .send({ content: 'Purple post', background: '#c600ef' });
+    const feed = await request(app).get('/api/posts').set('Cookie', cookie);
+    const edited = await request(app)
+      .patch(`/api/posts/${created.body.post.id}`)
+      .set('Cookie', cookie)
+      .send({ content: 'Edited purple post' });
+
+    expect(created.status).toBe(201);
+    expect(created.body.post.background).toBe('#c600ef');
+    expect(feed.body.posts.find((post: { id: string }) => post.id === created.body.post.id).background).toBe('#c600ef');
+    expect(edited.body.post.background).toBe('#c600ef');
+
+    const removed = await request(app)
+      .patch(`/api/posts/${created.body.post.id}`)
+      .set('Cookie', cookie)
+      .send({ background: null });
+    expect(removed.body.post.background).toBeNull();
+  });
+
   it('notifies active users mentioned by their username in a new post', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Mentioned User',

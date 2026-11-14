@@ -19,6 +19,7 @@ import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { apiRequest, resolveMediaUrl, uploadMedia, uploadMessageAttachment, uploadVideo } from '../lib/api'
 import { postMediaFileType, validatePostMediaFile } from '../lib/postMedia'
+import { postBackgrounds } from '../lib/postBackgrounds'
 import { Avatar } from './ui/Avatar'
 
 type PostComposerProps = {
@@ -34,16 +35,6 @@ type ComposerProfileResponse = {
   name?: string
   profile?: { displayName?: string | null; username?: string | null; avatarUrl?: string | null }
 }
-
-const backgrounds = [
-  { label: 'White', value: '#f0f1f5', text: '#666a70' },
-  { label: 'Violet', value: '#c600ef', text: '#ffffff' },
-  { label: 'Red', value: '#e9003d', text: '#ffffff' },
-  { label: 'Black', value: '#111111', text: '#ffffff' },
-  { label: 'Berry gradient', value: 'linear-gradient(135deg, #7d18ab, #e60065)', text: '#ffffff' },
-  { label: 'Purple gradient', value: 'linear-gradient(135deg, #d320e6, #663be4)', text: '#ffffff' },
-  { label: 'Sunset gradient', value: 'linear-gradient(135deg, #ffcb45, #ed168e)', text: '#ffffff' },
-]
 
 const feelings = ['happy', 'grateful', 'loved', 'excited', 'blessed', 'tired', 'celebrating']
 const activities = ['watching a movie', 'listening to music', 'traveling', 'eating', 'working out']
@@ -73,7 +64,7 @@ export function PostComposer({ onClose, onPublished }: PostComposerProps) {
   const [locationDraft, setLocationDraft] = useState('')
   const [feelingOpen, setFeelingOpen] = useState(false)
   const [feeling, setFeeling] = useState('')
-  const [backgroundIndex, setBackgroundIndex] = useState(0)
+  const [backgroundIndex, setBackgroundIndex] = useState(-1)
   const mediaInputRef = useRef<HTMLInputElement>(null)
   const musicInputRef = useRef<HTMLInputElement>(null)
   const textAreaRef = useRef<HTMLTextAreaElement>(null)
@@ -215,6 +206,7 @@ export function PostComposer({ onClose, onPublished }: PostComposerProps) {
           content: postContent,
           ...(publishedMediaUrl ? { imageUrl: publishedMediaUrl } : {}),
           visibility,
+          background: backgroundIndex >= 0 ? postBackgrounds[backgroundIndex].value : null,
         }),
       })
       onPublished()
@@ -228,6 +220,7 @@ export function PostComposer({ onClose, onPublished }: PostComposerProps) {
   const filteredUsers = users.filter((candidate) =>
     `${candidate.name} ${candidate.handle}`.toLowerCase().includes(mentionQuery.trim().replace(/^@/, '').toLowerCase()),
   ).slice(0, 8)
+  const composerBackground = postBackgrounds[Math.max(backgroundIndex, 0)]
 
   const openLive = () => {
     navigate('/live')
@@ -274,7 +267,7 @@ export function PostComposer({ onClose, onPublished }: PostComposerProps) {
           </div>
         </div>
 
-        <div className="relative flex min-h-[150px] flex-1 flex-col overflow-y-auto" style={{ background: backgrounds[backgroundIndex].value, color: backgrounds[backgroundIndex].text }}>
+        <div className="relative flex min-h-[150px] flex-1 flex-col overflow-y-auto" style={{ background: composerBackground.value, color: composerBackground.text }}>
           <textarea
             ref={textAreaRef}
             aria-label="Post content"
@@ -283,7 +276,7 @@ export function PostComposer({ onClose, onPublished }: PostComposerProps) {
             onChange={(event) => setContent(event.target.value)}
             maxLength={2500}
             className="min-h-0 flex-1 resize-none border-0 bg-transparent px-7 pb-5 pt-6 text-[clamp(28px,6vw,48px)] leading-[1.2] outline-none placeholder:opacity-100"
-            style={{ color: backgrounds[backgroundIndex].text }}
+            style={{ color: composerBackground.text }}
           />
 
           {mediaFile && selectedMedia ? (
@@ -301,10 +294,10 @@ export function PostComposer({ onClose, onPublished }: PostComposerProps) {
           ) : mediaUrl ? <p className="mx-6 mb-3 truncate rounded-lg bg-white/70 px-3 py-2 text-sm">{mediaUrl}</p> : null}
 
           <div className="sticky bottom-0 flex shrink-0 items-center gap-3 overflow-x-auto px-6 py-3" aria-label="Post background and mention options">
-            <button type="button" aria-label="Previous background colors" onClick={() => setBackgroundIndex((current) => (current - 1 + backgrounds.length) % backgrounds.length)} className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-slate-200 bg-white shadow">
+            <button type="button" aria-label="Previous background colors" onClick={() => setBackgroundIndex((current) => ((current < 0 ? 0 : current) - 1 + postBackgrounds.length) % postBackgrounds.length)} className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-slate-200 bg-white shadow">
               <ChevronLeft className="h-6 w-6 text-slate-600" aria-hidden="true" />
             </button>
-            {backgrounds.map((background, index) => (
+            {postBackgrounds.map((background, index) => (
               <button
                 key={background.label}
                 type="button"

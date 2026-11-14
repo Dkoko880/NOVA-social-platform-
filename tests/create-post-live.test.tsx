@@ -132,6 +132,80 @@ describe('Create Post entry point', () => {
     expect(host.querySelector('form')?.className).toContain('h-[100dvh]')
   })
 
+  it('sends the selected background to the posts API', async () => {
+    await act(async () => {
+      root.render(<MemoryRouter initialEntries={['/create']}><CreatePage /></MemoryRouter>)
+      await Promise.resolve()
+    })
+
+    const backgroundButton = host.querySelector<HTMLButtonElement>('button[aria-label="Purple gradient background"]')
+    await act(async () => {
+      backgroundButton?.click()
+    })
+    const content = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Post content"]')
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+    await act(async () => {
+      valueSetter.call(content, 'A colorful update')
+      content?.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => {
+      host.querySelector('form')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      await Promise.resolve()
+    })
+
+    expect(mocks.apiRequest).toHaveBeenCalledWith('/api/posts', {
+      method: 'POST',
+      body: JSON.stringify({
+        content: 'A colorful update',
+        visibility: 'PUBLIC',
+        background: 'linear-gradient(135deg, #d320e6, #663be4)',
+      }),
+    })
+  })
+
+  it('shows colored text posts with their saved background but leaves media posts unchanged', async () => {
+    const post = {
+      id: 'colored-1',
+      author: { id: 'creator-1', name: 'Test Creator', handle: 'creator', avatar: '' },
+      time: 'now',
+      content: 'Centered text',
+      background: '#c600ef',
+      likes: 0,
+      comments: 0,
+      shares: 0,
+      saved: 0,
+    }
+
+    await act(async () => {
+      root.render(<MemoryRouter><PostCard post={post} /></MemoryRouter>)
+      await Promise.resolve()
+    })
+    const coloredContent = host.querySelector<HTMLElement>('.colored-post-content')
+    expect(coloredContent?.textContent).toBe('Centered text')
+    expect(coloredContent?.style.background).toBe('#c600ef')
+
+    const editButton = [...host.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Edit')
+    await act(async () => {
+      editButton?.click()
+    })
+    expect(host.querySelector<HTMLButtonElement>('button[aria-label="Violet background"]')?.getAttribute('aria-pressed')).toBe('true')
+    mocks.apiRequest.mockResolvedValueOnce({ post: { content: 'Updated text', imageUrl: null, background: '#c600ef', visibility: 'PUBLIC' } })
+    await act(async () => {
+      host.querySelector('form')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      await Promise.resolve()
+    })
+    expect(mocks.apiRequest).toHaveBeenCalledWith('/api/posts/colored-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ content: 'Centered text', imageUrl: '', background: '#c600ef', visibility: 'PUBLIC' }),
+    })
+
+    await act(async () => {
+      root.render(<MemoryRouter><PostCard post={{ ...post, id: 'media-1', image: '/photo.jpg' }} /></MemoryRouter>)
+      await Promise.resolve()
+    })
+    expect(host.querySelector('.colored-post-content')).toBeNull()
+  })
+
   it('plays a linked Feed broadcast inline through the authorized LiveKit join flow', async () => {
     await act(async () => {
       root.render(<MemoryRouter><PostCard post={{

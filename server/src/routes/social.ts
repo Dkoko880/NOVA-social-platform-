@@ -42,9 +42,20 @@ const privateProfileSchema = z.object({
   address: z.string().trim().max(300).optional(),
 }).refine((payload) => Object.keys(payload).length > 0, { message: 'Provide a date of birth or address.' });
 
+const postBackgroundSchema = z.enum([
+  '#f0f1f5',
+  '#c600ef',
+  '#e9003d',
+  '#111111',
+  'linear-gradient(135deg, #7d18ab, #e60065)',
+  'linear-gradient(135deg, #d320e6, #663be4)',
+  'linear-gradient(135deg, #ffcb45, #ed168e)',
+]);
+
 const createPostSchema = z.object({
   content: z.string().trim().min(1).max(2500),
   imageUrl: z.string().trim().max(500).refine(isSafePostMediaUrl, 'Use an HTTPS image URL or an uploaded novachat image or video.').optional(),
+  background: postBackgroundSchema.nullable().optional(),
   visibility: z.enum(['PUBLIC', 'FOLLOWERS', 'PRIVATE']).default('PUBLIC'),
 });
 
@@ -61,6 +72,7 @@ const createStatusSchema = z.object({
 const updatePostSchema = z.object({
   content: z.string().trim().min(1).max(2500).optional(),
   imageUrl: z.string().trim().max(500).refine(isSafePostMediaUrl, 'Use an HTTPS image URL or an uploaded novachat image or video.').optional(),
+  background: postBackgroundSchema.nullable().optional(),
   visibility: z.enum(['PUBLIC', 'FOLLOWERS', 'PRIVATE']).optional(),
 });
 
@@ -445,6 +457,7 @@ async function serializePost(post: any, currentUserId?: string, blockedUserIds?:
     id: post.id,
     content: post.content,
     imageUrl: post.imageUrl ?? null,
+    background: post.background ?? null,
     createdAt: post.createdAt,
     updatedAt: post.updatedAt,
     visibility: post.visibility ?? 'PUBLIC',
@@ -971,6 +984,7 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
         authorId: userId,
         content: payload.content,
         imageUrl: payload.imageUrl || null,
+        background: payload.background ?? null,
         visibility: payload.visibility,
       },
     });
@@ -984,6 +998,7 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
     authorId: userId,
     content: payload.content,
     imageUrl: payload.imageUrl || null,
+    background: payload.background ?? null,
     visibility: payload.visibility,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -1107,6 +1122,7 @@ socialRouter.patch('/posts/:id', requireAuth, requireAccountAccess, async (req, 
   const updates = {
     ...(payload.content !== undefined ? { content: payload.content } : {}),
     ...(payload.imageUrl !== undefined ? { imageUrl: payload.imageUrl || null } : {}),
+    ...(payload.background !== undefined ? { background: payload.background } : {}),
     ...(payload.visibility !== undefined ? { visibility: payload.visibility } : {}),
   };
   const updated = dbAvailable
