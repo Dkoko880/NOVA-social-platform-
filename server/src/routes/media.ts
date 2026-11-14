@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import multer from 'multer';
 import sharp from 'sharp';
 import env from '../config/env.js';
-import { getMediaStorage, imageFileMediaKeyFromUrl, liveReplayMediaKey, MediaStorageUnavailableError, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
+import { audioMediaKeyFromUrl, getMediaStorage, imageFileMediaKeyFromUrl, liveReplayMediaKey, MediaStorageUnavailableError, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
 import { isDatabaseAvailable, prisma } from '../lib/prisma.js';
 import { socialStore } from '../lib/socialStore.js';
 import { getLiveSession } from '../lib/platform.js';
@@ -176,7 +176,7 @@ async function canReadAttachment(key: string, ownerUserId: string, viewerId: str
       ),
     );
     if (referencedByMessage) return true;
-    if (!videoMediaKeyFromUrl(mediaUrl) && !imageFileMediaKeyFromUrl(mediaUrl)) return false;
+    if (!videoMediaKeyFromUrl(mediaUrl) && !imageFileMediaKeyFromUrl(mediaUrl) && !audioMediaKeyFromUrl(mediaUrl)) return false;
     const isBlocked = socialStore.state.blocks.some((block) =>
       (block.blockerId === viewerId && block.blockedId === ownerUserId)
       || (block.blockerId === ownerUserId && block.blockedId === viewerId),
@@ -206,7 +206,7 @@ async function canReadAttachment(key: string, ownerUserId: string, viewerId: str
     select: { id: true },
   });
   if (message) return true;
-  if (!videoMediaKeyFromUrl(mediaUrl) && !imageFileMediaKeyFromUrl(mediaUrl)) return false;
+  if (!videoMediaKeyFromUrl(mediaUrl) && !imageFileMediaKeyFromUrl(mediaUrl) && !audioMediaKeyFromUrl(mediaUrl)) return false;
   const [blocked, follow, post] = await Promise.all([
     prisma.block.findFirst({
       where: { OR: [{ blockerId: viewerId, blockedId: ownerUserId }, { blockerId: ownerUserId, blockedId: viewerId }] },

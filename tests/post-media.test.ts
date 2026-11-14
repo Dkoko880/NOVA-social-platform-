@@ -1,4 +1,4 @@
-import { isVideoPostMediaUrl, postMediaFileType, POST_IMAGE_MAX_BYTES, POST_VIDEO_MAX_BYTES, validatePostMediaFile } from '../src/lib/postMedia'
+import { isAudioPostMediaUrl, isVideoPostMediaUrl, postMediaFileType, POST_AUDIO_MAX_BYTES, POST_IMAGE_MAX_BYTES, POST_VIDEO_MAX_BYTES, validatePostMediaFile } from '../src/lib/postMedia'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { sidebarItems } from '../src/components/AppShell'
 import { uploadVideo } from '../src/lib/api'
@@ -10,24 +10,30 @@ describe('post media selection and video navigation', () => {
     vi.unstubAllGlobals()
   })
 
-  it('accepts supported browser image and video types and rejects mismatches and oversized files', () => {
+  it('accepts supported browser image, video, and audio types and rejects mismatches and oversized files', () => {
     const jpeg = new File(['image'], 'photo.jpeg', { type: 'image/jpeg' })
     const mp4 = new File(['video'], 'clip.mp4', { type: 'video/mp4' })
+    const mp3 = new File(['audio'], 'song.mp3', { type: 'audio/mpeg' })
     const mismatched = new File(['video'], 'clip.mp4', { type: 'video/quicktime' })
     const acceptedLargeVideo = new File([new Uint8Array(11 * 1024 * 1024)], 'large.mp4', { type: 'video/mp4' })
     const oversizedVideo = new File([new Uint8Array(POST_VIDEO_MAX_BYTES + 1)], 'oversized.mp4', { type: 'video/mp4' })
     const oversizedImage = new File([new Uint8Array(POST_IMAGE_MAX_BYTES + 1)], 'large.png', { type: 'image/png' })
+    const oversizedAudio = new File([new Uint8Array(POST_AUDIO_MAX_BYTES + 1)], 'large.mp3', { type: 'audio/mpeg' })
 
     expect(postMediaFileType(jpeg)?.kind).toBe('image')
     expect(postMediaFileType(mp4)?.kind).toBe('video')
+    expect(postMediaFileType(mp3)?.kind).toBe('audio')
     expect(validatePostMediaFile(jpeg)).toBe('')
     expect(validatePostMediaFile(mismatched)).toMatch(/Choose a JPEG/)
     expect(validatePostMediaFile(acceptedLargeVideo)).toBe('')
     expect(validatePostMediaFile(oversizedVideo)).toMatch(/100 MB or smaller/)
     expect(validatePostMediaFile(oversizedImage)).toMatch(/10 MB or smaller/)
+    expect(validatePostMediaFile(oversizedAudio)).toMatch(/Audio must be 10 MB or smaller/)
     expect(isVideoPostMediaUrl('/api/media/files/video.mp4')).toBe(true)
     expect(isVideoPostMediaUrl('https://cdn.example.test/clip.webm?download=1')).toBe(true)
     expect(isVideoPostMediaUrl('/api/media/files/image.webp')).toBe(false)
+    expect(isAudioPostMediaUrl('/api/media/files/song.m4a?download=1')).toBe(true)
+    expect(isAudioPostMediaUrl('/api/media/files/video.mp4')).toBe(false)
   })
 
   it('routes Videos in the main navigation instead of showing a standalone Create destination', () => {

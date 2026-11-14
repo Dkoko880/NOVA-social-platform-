@@ -199,6 +199,11 @@ export function imageFileMediaKeyFromUrl(url: string) {
   return match?.[1] ?? null;
 }
 
+export function audioMediaKeyFromUrl(url: string) {
+  const match = /^\/api\/media\/files\/([0-9a-f-]{36}\.(?:mp3|m4a))$/.exec(url);
+  return match?.[1] ?? null;
+}
+
 export function videoMediaKeyFromUrl(url: string) {
   const match = /^\/api\/media\/files\/([0-9a-f-]{36}\.(?:webm|mp4|ogg))$/.exec(url);
   return match?.[1] ?? null;

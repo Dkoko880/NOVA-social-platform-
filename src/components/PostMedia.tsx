@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Volume2, VolumeX } from 'lucide-react'
 import { apiRequest, fetchMediaBlob, resolveMediaUrl } from '../lib/api'
-import { isVideoPostMediaUrl } from '../lib/postMedia'
+import { isAudioPostMediaUrl, isVideoPostMediaUrl } from '../lib/postMedia'
 
 type PostMediaProps = {
   url: string
@@ -35,6 +35,7 @@ export function PostMedia({ url, alt = 'Post attachment', className = '', active
   const sessionRef = useRef<{ sessionId: string; startRequest: Promise<boolean>; lastSentTime: number; lastObservedTime: number; heartbeatRequest: Promise<void> | null } | null>(null)
   const isUploaded = url.startsWith('/api/media/')
   const isVideo = isVideoPostMediaUrl(url)
+  const isAudio = isAudioPostMediaUrl(url)
   const streamsUploadedVideo = isVideo && url.startsWith('/api/media/files/')
   const preferredMuted = muted ?? internalMuted
   const currentMuted = preferredMuted || autoplayMuted
@@ -386,5 +387,6 @@ export function PostMedia({ url, alt = 'Post attachment', className = '', active
       </div>
     )
   }
+  if (isAudio) return <audio src={source || undefined} controls preload="metadata" className={className} aria-label={alt} />
   return <img src={source} alt={alt} loading="lazy" decoding="async" className={className} />
 }

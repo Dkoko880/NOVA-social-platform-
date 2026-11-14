@@ -98,6 +98,47 @@ describe('authenticated media uploads', () => {
     expect((await request(app).get(messageUpload.body.mediaUrl).set('Cookie', bob.auth)).status).toBe(404);
   });
 
+  it('publishes uploaded audio with the same post visibility rules as image and video media', async () => {
+    const owner = await register('AudioPostOwner');
+    const viewer = await register('AudioPostViewer');
+    const audio = Buffer.from('ID3\0\0\0\0\0\0');
+    const publicUpload = await request(app)
+      .post('/api/media/attachments')
+      .set('Cookie', owner.auth)
+      .attach('file', audio, { filename: 'song.mp3', contentType: 'audio/mpeg' });
+    expect(publicUpload.status).toBe(201);
+    expect((await request(app).get(publicUpload.body.mediaUrl).set('Cookie', viewer.auth)).status).toBe(404);
+
+    const publicPost = await request(app).post('/api/posts').set('Cookie', owner.auth).send({
+      content: 'Music for today',
+      imageUrl: publicUpload.body.mediaUrl,
+    });
+    expect(publicPost.status).toBe(201);
+    expect(publicPost.body.post.imageUrl).toBe(publicUpload.body.mediaUrl);
+    const feed = await request(app).get('/api/posts').set('Cookie', viewer.auth);
+    expect(feed.status).toBe(200);
+    expect(feed.body.posts).toContainEqual(expect.objectContaining({
+      id: publicPost.body.post.id,
+      imageUrl: publicUpload.body.mediaUrl,
+    }));
+    const publicMedia = await request(app).get(publicUpload.body.mediaUrl).set('Cookie', viewer.auth);
+    expect(publicMedia.status).toBe(200);
+    expect(publicMedia.headers['content-type']).toMatch(/^audio\/mpeg/);
+
+    const privateUpload = await request(app)
+      .post('/api/media/attachments')
+      .set('Cookie', owner.auth)
+      .attach('file', audio, { filename: 'private.mp3', contentType: 'audio/mpeg' });
+    expect(privateUpload.status).toBe(201);
+    const privatePost = await request(app).post('/api/posts').set('Cookie', owner.auth).send({
+      content: 'Private music',
+      imageUrl: privateUpload.body.mediaUrl,
+      visibility: 'PRIVATE',
+    });
+    expect(privatePost.status).toBe(201);
+    expect((await request(app).get(privateUpload.body.mediaUrl).set('Cookie', viewer.auth)).status).toBe(404);
+  });
+
   it('serves authorized media to a freshly registered account without exposing private posts', async () => {
     const owner = await register('FreshMediaOwner');
     const registration = await request(app).post('/api/auth/register').send({

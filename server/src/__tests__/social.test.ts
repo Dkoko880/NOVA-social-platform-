@@ -107,6 +107,41 @@ describe('social platform features', () => {
     expect(response.body.post.author.name).toBe('Alice');
   });
 
+  it('notifies active users mentioned by their username in a new post', async () => {
+    await request(app).post('/api/auth/register').send({
+      name: 'Mentioned User',
+      email: 'mentioned-user@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+    const mentionedLogin = await request(app).post('/api/auth/login').send({
+      email: 'mentioned-user@example.com',
+      password: 'Password123',
+    });
+    await request(app).post('/api/auth/register').send({
+      name: 'Post Author',
+      email: 'post-author@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+    const authorLogin = await request(app).post('/api/auth/login').send({
+      email: 'post-author@example.com',
+      password: 'Password123',
+    });
+
+    const response = await request(app)
+      .post('/api/posts')
+      .set('Cookie', getCookieHeader(authorLogin))
+      .send({ content: 'Thanks @mentioned-user for the help!' });
+
+    expect(response.status).toBe(201);
+    expect(socialStore.state.notifications).toContainEqual(expect.objectContaining({
+      recipientId: mentionedLogin.body.user.id,
+      actorId: authorLogin.body.user.id,
+      type: 'mention',
+    }));
+  });
+
   it('does not publish content that requires moderator review', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',

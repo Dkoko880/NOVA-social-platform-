@@ -7,7 +7,7 @@ import { socialStore } from '../lib/socialStore.js';
 import { reviewContentForSafety } from '../lib/moderation.js';
 import { getLiveSession, isNotificationEnabled, updateLiveSession } from '../lib/platform.js';
 import { requireAuth, requireActiveAccountIfAuthenticated } from '../middleware/auth.js';
-import { getMediaStorage, imageFileMediaKeyFromUrl, mediaKeyFromUrl, uploadedMediaBelongsTo, uploadedVideoBelongsTo, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
+import { audioMediaKeyFromUrl, getMediaStorage, imageFileMediaKeyFromUrl, mediaKeyFromUrl, uploadedMediaBelongsTo, uploadedVideoBelongsTo, videoMediaKeyFromUrl } from '../lib/mediaStorage.js';
 import { canDeleteLiveReplayMedia } from '../lib/liveReplayPolicy.js';
 import { deleteLiveKitEgressFile, stopLiveKitEgress } from '../lib/livekitEgress.js';
 import { decryptPrivateAddress, encryptPrivateAddress } from '../lib/privateProfile.js';
@@ -22,7 +22,7 @@ function isSafeMediaUrl(value: string) {
 }
 
 function isSafePostMediaUrl(value: string) {
-  return Boolean(imageFileMediaKeyFromUrl(value)) || isSafeMediaUrl(value);
+  return Boolean(imageFileMediaKeyFromUrl(value) || audioMediaKeyFromUrl(value)) || isSafeMediaUrl(value);
 }
 
 const updateProfileSchema = z.object({
@@ -346,6 +346,28 @@ async function addNotification(recipientId: string, actorId: string | null, type
     message,
     createdAt: new Date().toISOString(),
   });
+}
+
+async function notifyPostMentions(content: string, actorId: string) {
+  const handles = [...new Set([...content.matchAll(/(?:^|[^a-zA-Z0-9_.-])@([a-zA-Z0-9_.-]{2,32})/g)].map((match) => match[1].toLowerCase()))];
+  if (!handles.length) return;
+
+  const dbAvailable = await isDatabaseAvailable();
+  const candidates = dbAvailable
+    ? await prisma.user.findMany({
+        where: { id: { not: actorId }, status: 'ACTIVE' },
+        select: { id: true, name: true, email: true, profile: { select: { username: true } } },
+      })
+    : fallbackStore.list().filter((candidate) => candidate.id !== actorId && candidate.status === 'ACTIVE');
+  const mentionedUsers = candidates.filter((candidate) => {
+    const profile = 'profile' in candidate ? candidate.profile : getProfileForUserId(candidate.id);
+    return handles.includes(makeHandle(candidate, profile).toLowerCase());
+  });
+  if (!mentionedUsers.length) return;
+  const actorName = (await getUserById(actorId))?.name ?? 'Someone';
+  await Promise.all(mentionedUsers.map((mentioned) =>
+    addNotification(mentioned.id, actorId, 'mention', `${actorName} mentioned you in a post.`),
+  ));
 }
 
 async function serializePost(post: any, currentUserId?: string, blockedUserIds?: string[]) {
@@ -953,6 +975,7 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
       },
     });
 
+    await notifyPostMentions(payload.content, userId);
     return res.status(201).json({ post: await serializePost(post, userId) });
   }
 
@@ -967,6 +990,7 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
   };
 
   socialStore.state.posts.push(record);
+  await notifyPostMentions(payload.content, userId);
   return res.status(201).json({ post: await serializePost(record, userId) });
 });
 

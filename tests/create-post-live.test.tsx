@@ -18,6 +18,7 @@ vi.mock('../src/lib/api', () => ({
   apiRequest: mocks.apiRequest,
   resolveMediaUrl: (url: string) => url,
   uploadMedia: vi.fn(),
+  uploadMessageAttachment: vi.fn(),
   uploadVideo: vi.fn(),
 }))
 vi.mock('../src/lib/eventStream', () => ({
@@ -121,8 +122,12 @@ describe('Create Post entry point', () => {
     expect(host.querySelector('[data-testid="current-path"]')?.textContent).toBe('/create')
     expect(host.querySelector('h2')?.textContent).toBe('Create post')
     expect(host.textContent).toContain('Test Creator')
-    expect(host.textContent).toContain('Photos / Videos')
-    expect(host.textContent).toContain('Go Live')
+    expect(host.textContent).toContain('Photos/Videos')
+    expect(host.textContent).toContain('Go live')
+    const optionLabels = [...host.querySelectorAll('section button')]
+      .map((button) => button.textContent?.trim())
+      .filter((label) => ['Photos/Videos', 'Music', 'Tag people', 'Add location', 'Feeling/activity', 'Create Event', 'Go live'].includes(label ?? ''))
+    expect(optionLabels).toEqual(['Photos/Videos', 'Music', 'Tag people', 'Add location', 'Feeling/activity', 'Create Event', 'Go live'])
     expect(host.querySelector('select[aria-label="Post privacy"]')).not.toBeNull()
     expect(host.querySelector('form')?.className).toContain('h-[100dvh]')
   })
